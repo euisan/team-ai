@@ -4,6 +4,9 @@ import { matchRoute, type Route } from './routes.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
+// What the static rankings read of an account: enough to rank saved state too.
+export type Ranked = Pick<RuntimeAccount, 'usage' | 'resetsAt' | 'windows' | 'inflight'>;
+
 // An empty exclusion set, for judging an account on its own merits rather than
 // on what one request has already tried.
 const NO_EXCLUSIONS = new Set<string>();
@@ -99,7 +102,7 @@ export class AccountPool {
   // Least-spent first, so both selection and the dashboard agree on what "next"
   // means. Unmeasured accounts sort last rather than first: a null is unknown,
   // not empty, and routing to one on a hunch spends an unknown budget.
-  static byHeadroom(a: RuntimeAccount, b: RuntimeAccount): number {
+  static byHeadroom(a: Ranked, b: Ranked): number {
     const ua = AccountPool.headroomUsage(a); const ub = AccountPool.headroomUsage(b);
     if (ua === null || ub === null) return (ua === null ? 1 : 0) - (ub === null ? 1 : 0);
     if (ua !== ub) return ua - ub;
@@ -122,7 +125,7 @@ export class AccountPool {
   // Without this split, byHeadroom ranks every request on the Fable window, and
   // the account with the most Fable left is exactly the one Opus and Sonnet get
   // routed to first — the opposite of what the pool should do.
-  static byNonFableHeadroom(reserve: number): (a: RuntimeAccount, b: RuntimeAccount) => number {
+  static byNonFableHeadroom(reserve: number): (a: Ranked, b: Ranked) => number {
     return (a, b) => {
       // A reserve of 1 holds nothing back, so there is no tier to sort by — rank
       // purely on the budget the request spends.
@@ -140,12 +143,12 @@ export class AccountPool {
   // back by sending other models here. An unmeasured Fable window is not treated
   // as spent — a null is unknown, and assuming empty would spend a budget we
   // have not looked at.
-  static fableSpent(account: RuntimeAccount, reserve: number): boolean {
+  static fableSpent(account: Ranked, reserve: number): boolean {
     const usage = AccountPool.fableWindow(account)?.usage;
     return usage !== null && usage !== undefined && usage >= reserve;
   }
 
-  static generalUsage(account: RuntimeAccount): number | null {
+  static generalUsage(account: Ranked): number | null {
     return AccountPool.generalWindow(account)?.usage ?? account.usage;
   }
 
@@ -413,10 +416,14 @@ export class AccountPool {
   // windows in 10% steps, and inside a step prefer the account with fewer
   // requests in flight. Only then fall back to the exact ranking, so both the
   // dashboard's order and the fleet-wide preference still hold.
-  private spread(wantsFable: boolean): (a: RuntimeAccount, b: RuntimeAccount) => number {
-    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
-    const tier = (a: RuntimeAccount) => (!wantsFable && this.fableReserve < 1 && AccountPool.fableSpent(a, this.fableReserve) ? 0 : 1);
-    const bucket = (a: RuntimeAccount) => { const load = AccountPool.loadUsage(a, wantsFable); return load === null ? Number.MAX_SAFE_INTEGER : Math.floor(load * 10); };
+  private spread(wantsFable: boolean): (a: RuntimeAccount, b: RuntimeAccount) => number { return AccountPool.levelOrder(wantsFable, this.fableReserve); }
+
+  // spread() on its own, for anything that ranks without a pool: the
+  // dashboard's 'level' order compares saved state through this same function.
+  static levelOrder(wantsFable: boolean, reserve: number): (a: Ranked, b: Ranked) => number {
+    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(reserve);
+    const tier = (a: Ranked) => (!wantsFable && reserve < 1 && AccountPool.fableSpent(a, reserve) ? 0 : 1);
+    const bucket = (a: Ranked) => { const load = AccountPool.loadUsage(a, wantsFable); return load === null ? Number.MAX_SAFE_INTEGER : Math.floor(load * 10); };
     return (a, b) => tier(a) - tier(b) || bucket(a) - bucket(b) || a.inflight - b.inflight || exact(a, b);
   }
 
@@ -437,7 +444,7 @@ export class AccountPool {
   // How full the account is on whichever window will gate its next request:
   // the budget this kind of request spends, or the 5-hour session window,
   // whichever is fuller. Null when neither has been measured.
-  static loadUsage(account: RuntimeAccount, wantsFable: boolean): number | null {
+  static loadUsage(account: Ranked, wantsFable: boolean): number | null {
     const budget = wantsFable ? AccountPool.headroomUsage(account) : AccountPool.generalUsage(account);
     const session = sessionWindow(account.windows)?.usage ?? null;
     if (budget === null && session === null) return null;

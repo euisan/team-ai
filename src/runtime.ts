@@ -7,6 +7,7 @@ import { BodyBudget, bodyTimeoutMs, createProxy, maxBodyBytes, maxInflightBodyBy
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { handleRouteControl } from './route-control.js';
+import { parseBalance } from './pacing.js';
 import { parseRoutes } from './routes.js';
 import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
 import { createServer } from 'node:http';
@@ -56,8 +57,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)), timeoutMs: bodyTimeoutMs(config.proxy.bodyTimeoutMs) };
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
-  const balance = config.routing?.balance ?? 'pacing';
-  if (balance !== 'pacing' && balance !== 'level') throw new Error(`routing.balance must be "pacing" or "level", not ${JSON.stringify(balance)}`);
+  const balance = parseBalance(config.routing?.balance);
   for (const pool of pools) pool.balance = balance;
   // Model routes are checked before anything listens: a malformed route is a
   // startup error rather than a route that silently never applies.
