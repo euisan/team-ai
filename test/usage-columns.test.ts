@@ -35,6 +35,7 @@ const state = {
 } as unknown as PersistedState;
 
 const frame = (width: number): string[] => buildFrame(config, state, { width, selectedId: 'cred-alice@example.com', mode: 'normal', message: '', sortByHeadroom: false });
+const frameWithSelection = (width: number, selectedId: string): string[] => buildFrame(config, state, { width, selectedId, mode: 'normal', message: '', sortByHeadroom: false });
 
 // The gauges of one line as [start column, width], found by their background
 // colour runs (a gauge opens with a background SGR and closes with a reset),
@@ -172,5 +173,39 @@ test('the tail fields — age, pace, RC / ~D-n — each start in one column acro
     assert.equal(new Set(paces).size, 1, `width ${width}: pace columns ${paces}`);
     assert.ok(paces[0]! > ages[0]!);
     assert.equal(columnOf(row(lines, 'carol@'), 'RC2'), columnOf(row(lines, 'alice@'), '~D-'), `width ${width}: RC and ~D-n share the extra column`);
+  }
+});
+
+test('a row without pace keeps its age and extra tail fields in the shared columns', () => {
+  const noPace = {
+    ...state,
+    accounts: {
+      ...state.accounts,
+      'cred-dave@example.com': {
+        ...state.accounts['cred-dave@example.com'],
+        resetCredits: 2,
+        windows: { primary: { usage: 0.1, resetsAt: now + 6 * d, minutes: 300 } },
+      },
+    },
+  } as PersistedState;
+  for (const width of [120, 160, 200]) {
+    const lines = buildFrame(config, noPace, { width, selectedId: 'cred-alice@example.com', mode: 'normal', message: '', sortByHeadroom: false });
+    const age = columnOf(row(lines, 'alice@'), '14m ago');
+    const extra = columnOf(row(lines, 'carol@'), 'RC2');
+    const dave = row(lines, 'dave@');
+    assert.equal(columnOf(dave, '14m ago'), age, `width ${width}: age stays aligned without pace`);
+    assert.equal(columnOf(dave, 'RC2'), extra, `width ${width}: RC stays in the extra column without pace`);
+    assert.doesNotMatch(stripAnsi(dave), /[+-]\d+%p/, `width ${width}: no pace is invented`);
+  }
+});
+
+test('Claude and Codex selected rows show the cursor in the selection column', () => {
+  for (const width of [120, 160, 200]) {
+    const claude = row(frameWithSelection(width, 'cred-alice@example.com'), 'alice@');
+    const codexSelected = row(frameWithSelection(width, 'cred-carol@example.com'), 'carol@');
+    const codexUnselected = row(frameWithSelection(width, 'cred-carol@example.com'), 'dave@');
+    assert.match(stripAnsi(claude), /^▸> {2}alice@/, `width ${width}: Claude cursor`);
+    assert.match(stripAnsi(codexSelected), /^ > {2}carol@/, `width ${width}: Codex cursor`);
+    assert.match(stripAnsi(codexUnselected), /^ {4}dave@/, `width ${width}: unselected Codex row`);
   }
 });
