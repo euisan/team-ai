@@ -212,3 +212,16 @@ test('proxy.maxInflightBodyMb: 1024 MB by default, never below proxy.maxBodyMb, 
     assert.throws(() => maxInflightBodyBytes(bad, MB), /proxy\.maxInflightBodyMb must be a number of megabytes above 0 and at most 65536/, String(bad));
   }
 });
+
+test('a body over 32 MB that is relayed leaves its size in the log, never its content', async () => {
+  const r = await rig(ok, 64 * MB);
+  try {
+    const small = await r.call(bodyOf(32 * MB)); assert.equal(small.status, 200); await small.text();
+    assert.equal(r.events.some((e) => /large request body/.test(e)), false, '32 MB is not large');
+    const large = await r.call(bodyOf(33 * MB)); assert.equal(large.status, 200); await large.text();
+    const line = r.events.find((e) => /large request body/.test(e));
+    assert.ok(line, r.events.join(' | '));
+    assert.match(line, /Codex POST \/codex\/responses large request body 33\.0 MB \(34603008 bytes\)/);
+    assert.equal(line.includes('MARKER'), false);
+  } finally { r.close(); }
+});

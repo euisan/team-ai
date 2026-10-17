@@ -287,9 +287,14 @@ rather than allowed to take the relay down.
 A request body over `proxy.maxBodyMb` is answered by the relay itself with
 `413` and `x-teamai-413-reason: body_limit`, and never sent upstream; the
 Activity pane logs its size and the limit (never its content). The default is
-not smaller than what either upstream documents (OpenAI: 512 MB per request,
-Anthropic Messages: 32 MB), so in practice the upstream decides — and its own
-`413` reaches the client unchanged. Each in-flight request holds its whole body
+not a measured request size: the one oversized request on record (2026-10-17)
+was a long Codex session with several screenshots, inline as base64, that went
+past the old fixed 32 MB, and its exact size was not kept. 512 MB is the largest
+single size either upstream documents — OpenAI's per-file upload limit; it
+documents no per-request limit for the Responses API, and Anthropic's Messages
+API documents 32 MB per request — so in practice the upstream decides, and its
+own `413` reaches the client unchanged. A relayed body over 32 MB leaves a
+`large request body` line with its size, so real sizes are on record. Each in-flight request holds its whole body
 in memory, because failing over to another account resends it. What all of
 them hold together is capped by `proxy.maxInflightBodyMb` (1024 MB by default,
 for both providers together; an upload still in progress counts): a request
