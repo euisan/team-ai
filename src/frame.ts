@@ -189,8 +189,8 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(`  ${clock(event.at)}  ${event.message}`); continue; }
-    const failed = typeof request.status !== 'number' || request.status >= 400;
-    const outcome = `(${request.status}, ${(request.durationMs / 1000).toFixed(1)}s)`;
+    const failed = typeof request.status !== 'number' || request.status >= 400 || Boolean(request.streamEnd);
+    const outcome = `(${request.status}${request.streamEnd ? ` ${request.streamEnd}` : ''}, ${(request.durationMs / 1000).toFixed(1)}s)`;
     out.push(`  ${clock(event.at)}  ${tag(request.sessionId)}${request.providerLabel} ${request.method} ${request.path}${model(request, false)}${request.account ? ` → ${request.account}` : ''}${routed(request)} ${failed ? color(31, outcome) : outcome}`);
   }
   return out;
@@ -510,7 +510,7 @@ function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: 
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(fit(` ${hhmm(event.at)} ${event.message}`, width)); continue; }
-    const failed = typeof request.status !== 'number' || request.status >= 400;
+    const failed = typeof request.status !== 'number' || request.status >= 400 || Boolean(request.streamEnd);
     const status = String(request.status).padStart(3);
     out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.account ?? ''}`, width));
   }

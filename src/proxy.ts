@@ -79,8 +79,9 @@ let requestCounter = 0;
 
 // Per-request bookkeeping dispatch fills in for the activity line. cut marks
 // an upstream stream that broke after the headers went out; finished is the
-// terminal SSE event the stream delivered, if any.
-interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void }
+// terminal SSE event the stream delivered, if any; setEnd records it on the
+// activity line.
+interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void; setEnd(end: StreamEnd): void }
 
 // The body parsed once, for the fields the activity line shows. Not kept.
 function parsedBody(body: Buffer): unknown {
@@ -105,7 +106,7 @@ function finalStatus(res: ServerResponse, track: RequestTrack): number | string 
 
 export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message)), bodyLimit = DEFAULT_MAX_BODY_MB * MB): Server {
   return createServer(async (req, res) => {
-    let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {} };
+    let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {}, setEnd: () => {} };
     try {
       if (!authorized(req, clientToken)) return json(res, 401, { error: 'Unauthorized local client' });
       const path = pool.provider.normalizePath(req.url || '/');
@@ -124,7 +125,9 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       pool.inFlightProxied++;
       // The line opens before the body is read, so a large upload already shows.
       begin(); opened = id;
-      track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })) };
+      // A response.failed or response.incomplete arrives under a 200: without
+      // a mark of its own the line reads as a success.
+      track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })), setEnd: (end) => { if (end !== 'completed') safely(() => activity.update(id, { streamEnd: end })); } };
       try {
         let body: Buffer;
         try { body = await readBody(req, bodyLimit); } catch (error) {
@@ -351,7 +354,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     let cut: string | null = null;
     try {
       if (!response.body) res.end();
-      else await pipeStream(response.body, res, isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; }) : null);
+      else await pipeStream(response.body, res, isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; track.setEnd(end); }) : null);
     } catch (error) { cut = (error as Error).message; track.cut = true; throw error; }
     // The finished-request line itself comes from the activity log; only a
     // cut, with its cause, needs a sentence of its own.
