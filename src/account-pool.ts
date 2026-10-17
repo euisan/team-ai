@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { matchRoute, type Route } from './routes.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
@@ -169,10 +170,45 @@ export class AccountPool {
   private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>, wantsFable = true, lastResort = false): boolean {
     const now = Date.now();
     if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; }
+    return this.eligible(account, excluded, wantsFable, lastResort, now);
+  }
+
+  // The same judgement without touching the account: a window that has
+  // rolled over reads as cleared instead of being cleared. For anything that
+  // only looks (the dashboard's route and next-account markers).
+  private eligible(account: RuntimeAccount, excluded: Set<string>, wantsFable: boolean, lastResort: boolean, now = Date.now()): boolean {
+    const rolled = account.resetsAt !== null && account.resetsAt <= now;
+    const usage = rolled ? null : account.usage; const cooldownUntil = rolled ? null : account.cooldownUntil;
     const limit = lastResort ? 1 : this.threshold;
-    if (!(account.enabled && !account.error && !excluded.has(account.id) && (!account.cooldownUntil || account.cooldownUntil <= now) && (account.usage === null || account.usage < limit))) return false;
+    if (!(account.enabled && !account.error && !excluded.has(account.id) && (!cooldownUntil || cooldownUntil <= now) && (usage === null || usage < limit))) return false;
     if (wantsFable && AccountPool.fableSpent(account, 1)) return false;
     return true;
+  }
+
+  // Model routes for this provider, from config. setRoutes returns a warning
+  // for each account reference that names no account here; such a reference
+  // is skipped, the rest of the route still applies.
+  private routes: Route[] = [];
+  private routeFellBack = new Set<string>();
+  setRoutes(routes: Route[]): string[] {
+    this.routes = routes;
+    return routes.flatMap((route) => route.accounts.filter((ref) => !this.accounts.some((a, i) => AccountPool.names(a, i, ref))).map((ref) => `route ${route.name}: account ${ref} not found — skipped`));
+  }
+  routeFor(model: string | null | undefined): Route | null { return matchRoute(this.routes, model); }
+  get routeList(): readonly Route[] { return this.routes; }
+  private static names(account: RuntimeAccount, index: number, ref: string | number): boolean {
+    return typeof ref === 'number' ? index === ref : ref === account.label || ref === account.id || ref === account.credentialId;
+  }
+  isMember(route: Route, account: RuntimeAccount): boolean {
+    const index = this.accounts.indexOf(account);
+    return route.accounts.some((ref) => AccountPool.names(account, index, ref));
+  }
+  // An exclusive route narrows the pool by excluding everyone else, so every
+  // rule that already honours exclusions — the session pin, ranking, the
+  // shortfall wording, failover — stays inside the route on its own.
+  private scope(excluded: Set<string>, route: Route | null | undefined): Set<string> {
+    if (route?.mode !== 'exclusive') return excluded;
+    return new Set([...excluded, ...this.accounts.filter((a) => !this.isMember(route, a)).map((a) => a.id)]);
   }
 
   // acquire returned nothing but at least one account is otherwise healthy and
@@ -187,8 +223,8 @@ export class AccountPool {
   // needs to decide what to do: whether it is a slot shortage (retry in a
   // moment) or a budget shortage, whether only the Fable weekly budget is gone
   // (other models still work), and the earliest moment anything rolls over.
-  explainShortfall(excluded: Set<string>, wantsFable: boolean): Shortfall {
-    const label = this.provider.label;
+  explainShortfall(excludedByRequest: Set<string>, wantsFable: boolean, route?: Route | null): Shortfall {
+    const label = this.provider.label; const excluded = this.scope(excludedByRequest, route);
     if (this.saturatedButHealthy(excluded)) {
       return { reason: 'concurrency_saturated', retryAfterMs: 5_000, message: `Every ${label} account with budget left is at its concurrency cap (${this.maxConcurrent} requests in flight each). Retry in a few seconds.` };
     }
@@ -207,7 +243,8 @@ export class AccountPool {
     if (fableSpent) parts.push(`${fableSpent} spent the Fable weekly budget`);
     if (overLimit) parts.push(`${overLimit} used up the session window`);
     if (coolingDown) parts.push(`${coolingDown} cooling down after an upstream rejection`);
-    const what = wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
+    const what = route?.mode === 'exclusive' ? `No ${label} account in route "${route.name}" can serve right now`
+      : wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
     const detail = parts.length ? ` (${live.length} accounts: ${parts.join(', ')})` : ` (${live.length} accounts)`;
     const when = next ? ` Earliest reset in ${AccountPool.formatDuration(next.at - now)}: ${next.label}.` : '';
     const hint = wantsFable && fableSpent ? ' Other models are still served: switch model or wait.' : '';
@@ -235,23 +272,32 @@ export class AccountPool {
   // read from the request body upstream, so a mixed workload (Claude Code on
   // Opus, another session on Fable) splits across the pool by what each request
   // actually spends rather than all chasing the same window.
-  acquire(session: string, excluded = new Set<string>(), wantsFable = true): RuntimeAccount | null {
-    const key = AccountPool.affinityKey(session, wantsFable);
+  acquire(session: string, requestExcluded = new Set<string>(), wantsFable = true, route: Route | null = null): RuntimeAccount | null {
+    const excluded = this.scope(requestExcluded, route);
+    // A routed request pins separately, so one session's turns on another
+    // model do not drag this pin around (the same reason Fable pins apart).
+    const key = AccountPool.affinityKey(session, wantsFable) + (route ? `#route:${route.name}` : '');
     const pinned = this.accounts.find((a) => a.id === this.affinity.get(key));
+    // A prefer route ranks its accounts first, and moves a session off an
+    // outside account whenever one of its own can take the request.
+    const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a) ? 1 : 0;
+    const memberOpen = route?.mode === 'prefer' && this.accounts.some((a) => !outside(a) && this.available(a, excluded, wantsFable));
     // Session affinity is a cache-locality preference, not a claim on the
     // account. Honour it while the account can take the request and while the
     // request should be spending here: an Opus turn leaves an account still
     // holding Fable budget only when a spare exists to take it — early in the
     // week every account reserves, and refusing the pin then just scatters
     // the session over the fleet for nothing.
-    if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded)) { pinned.inflight++; this.remember(key, pinned.id); return pinned; }
+    if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded) && !(outside(pinned) && memberOpen)) { pinned.inflight++; this.remember(key, pinned.id); this.noteRoute(route, pinned); return pinned; }
     const rank = this.spread(wantsFable);
     // An explicit priority orders accounts within the same reservation tier,
     // never across it: a #1 account still holding Fable budget used to take
     // every Opus and Haiku turn ahead of a spare whose Fable was already
     // spent, burning the one budget only Fable turns can use.
     const diverts = (a: RuntimeAccount) => this.divertsOff(a, wantsFable, excluded) ? 1 : 0;
+    // A route the user wrote outranks the automatic Fable reservation.
     const ranked = (lastResort: boolean) => this.accounts.filter((a) => this.available(a, excluded, wantsFable, lastResort)).sort((a, b) => {
+      const routed = outside(a) - outside(b); if (routed) return routed;
       const tier = diverts(a) - diverts(b); if (tier) return tier;
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
       return rank(a, b);
@@ -263,8 +309,17 @@ export class AccountPool {
     // failover) or at its concurrency cap is still the session's home: this
     // request spills elsewhere, the pin stays, and the next turn comes back to
     // its warm cache. Only a home that is genuinely gone is replaced.
-    if (selected) { selected.inflight++; if (!pinned || !this.isHome(pinned, wantsFable)) this.remember(key, selected.id); }
+    if (selected) { selected.inflight++; if (!pinned || !this.isHome(pinned, wantsFable)) this.remember(key, selected.id); this.noteRoute(route, selected); }
     return selected;
+  }
+
+  // A prefer route that has to send a request elsewhere says so once, and
+  // once more when its own accounts take over again.
+  private noteRoute(route: Route | null, account: RuntimeAccount): void {
+    if (route?.mode !== 'prefer') return;
+    const member = this.isMember(route, account); const fell = this.routeFellBack.has(route.name);
+    if (!member && !fell) { this.routeFellBack.add(route.name); this.log(`${this.provider.label} route ${route.name}: no route account available → ${account.label}`); }
+    else if (member && fell) { this.routeFellBack.delete(route.name); this.log(`${this.provider.label} route ${route.name}: back on ${account.label}`); }
   }
 
   // Fable turns and everything else pin separately. One Claude Code session
@@ -844,5 +899,14 @@ export class AccountPool {
   exportState(target: PersistedState): void {
     for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
+    // What the dashboard needs to mark route accounts, worked out here since
+    // the dashboard cannot judge availability itself. Judged without side
+    // effects and without any request's exclusions.
+    if (this.routes.length) {
+      target.routes ??= [];
+      for (const route of this.routes) {
+        target.routes.push({ provider: this.provider.id, name: route.name, color: route.color, mode: route.mode, members: this.accounts.filter((a) => this.isMember(route, a)).map((a) => ({ credentialId: a.credentialId, usable: this.eligible(a, NO_EXCLUSIONS, false, true) && !this.atConcurrencyCap(a) })) });
+      }
+    }
   }
 }

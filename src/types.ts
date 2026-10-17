@@ -1,3 +1,5 @@
+import type { RouteColor, RouteConfig } from './routes.js';
+
 export type ProviderId = 'claude' | 'codex';
 
 export interface StoredAccount {
@@ -40,6 +42,8 @@ export interface TeamAIConfig {
   // is not consumed by Opus/Sonnet requests that any account could serve.
   // 1 disables the split and restores plain least-spent routing.
   fableReserveThreshold?: number;
+  // Model routes per provider; see src/routes.ts.
+  routes?: Partial<Record<ProviderId, RouteConfig[]>>;
   // What the Activity pane shows besides method and path. Both default on.
   activity?: { sessionIds?: boolean; models?: boolean };
   // Codex reset credits ("Full reset" tickets). Off unless turned on; see
@@ -136,6 +140,9 @@ export interface ActiveRequest {
   model?: string | null;
   effort?: string | null;
   sessionId?: string | null;
+  // The model route the request matched, and whether it ended up outside it.
+  route?: string | null;
+  routeFallback?: boolean;
 }
 
 // The same request once it has ended. status is the HTTP status the client
@@ -152,6 +159,8 @@ export interface RequestSummary {
   model?: string | null;
   effort?: string | null;
   sessionId?: string | null;
+  route?: string | null;
+  routeFallback?: boolean;
 }
 
 // message is the readable sentence (and what capture redaction rewrites);
@@ -166,6 +175,9 @@ export interface PersistedState {
   // The server that wrote this file. The dashboard draws `active` only while
   // that process is alive, so a crash cannot leave requests spinning forever.
   serverPid?: number;
+  // Each configured model route and whether its accounts can serve right now,
+  // for the dashboard's route markers.
+  routes?: Array<{ provider: ProviderId; name: string; color: RouteColor | null; mode: 'prefer' | 'exclusive'; members: Array<{ credentialId: string; usable: boolean }> }>;
   // The warm-up probe shape learned from live traffic, per provider. Without it
   // a restarted proxy falls back to a hardcoded client version that upstream may
   // reject on version grounds, leaving every account unmeasured until real

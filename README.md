@@ -174,6 +174,15 @@ falls back to a reserved one rather than failing. A Fable request keeps the
 plain least-spent order; set `fableReserveThreshold` to `1` to turn the split
 off.
 
+**Model routes.** `routes.claude` and `routes.codex` send requests for chosen models to chosen accounts. Each route is `{ "name", "match", "accounts", "mode", "color" }`: `match` is a list of patterns tested against the request's `model` (`*` matches anything, everything else is literal, case is ignored, the whole name must match — `claude-opus-*`, `*fable*`, `gpt-6-astra`), `accounts` lists account labels, ids or 0-based positions among that provider's accounts, and the first route that matches applies. In the default `"mode": "prefer"` the route's accounts are tried first and, when none of them can take the request, it goes to any other account at once; the switch and the return are each logged once. With `"mode": "exclusive"` only the route's accounts may serve the model — failover stays inside the route, and when they are all spent the request gets a 429 that names the route. A route outranks the automatic Fable reservation (a route is a rule you wrote), a routed request keeps a session pin of its own, and a request with no `model` matches no route. A malformed route stops the relay from starting (`server-start.log` says which); an account reference that matches nothing is logged and skipped. The dashboard adds one marker column per route left of the cursor — `▸` in the route's colour on its accounts, grey where that account cannot serve right now — request lines carry `[route:name]` (`→fallback` when a prefer route had to leave), and `teamai status` lists the routes.
+
+```json
+"routes": {
+  "claude": [{ "name": "opus", "match": ["claude-opus-*"], "accounts": ["work@example.com"], "color": "magenta" }],
+  "codex": [{ "name": "mini", "match": ["*-mini"], "accounts": [0, 1], "mode": "exclusive" }]
+}
+```
+
 A Fable-tier 429 (`7d_oi` rejected while the shared `5h`/`7d` windows are still
 allowed) benches only that account's Fable window, not the account: every other
 model keeps being served from it, instead of the whole account sitting idle for
@@ -231,6 +240,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `codexResetCreditsListRefreshMs` | `600000` | How long the ticket list shown by `t` is reused. `0` fetches it once. |
 | `codexResetCreditsSessionWindow` | `false` | Also spend a ticket when only the 5-hour window is used up. |
 | `activity` | `{ "sessionIds": true, "models": true }` | What request lines in the Activity pane show besides method and path. |
+| `routes` | — | Optional. Model routes per provider, `{ "claude": [...], "codex": [...] }` (see Model routes). |
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
 
 Change a port if something else already owns it — that is the usual cause of a

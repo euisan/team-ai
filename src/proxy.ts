@@ -3,6 +3,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog, type ActivitySink } from './activity.js';
+import type { Route } from './routes.js';
 import type { Provider, RuntimeAccount } from './types.js';
 
 // Upper bound on waiting for upstream response headers only. Never applies to the body.
@@ -45,7 +46,7 @@ let requestCounter = 0;
 
 // Per-request bookkeeping dispatch fills in for the activity line. cut marks
 // an upstream stream that broke after the headers went out.
-interface RequestTrack { cut: boolean; setAccount(label: string): void }
+interface RequestTrack { cut: boolean; setAccount(label: string, outsideRoute?: boolean): void }
 
 // The body parsed once, for the fields the activity line shows. Not kept.
 function parsedBody(body: Buffer): unknown {
@@ -85,14 +86,19 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       pool.inFlightProxied++;
       // The line opens before the body is read, so a large upload already shows.
       begin(); opened = id;
-      track = { cut: false, setAccount: (label) => safely(() => activity.update(id, { account: label })) };
+      track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })) };
       try {
         const body = await readBody(req);
         // Session, model and effort for the activity line — three fields, read
         // once; nothing else from the body leaves this function.
-        const identity = pool.provider.displayIdentity?.(incomingHeaders(req), parsedBody(body));
+        const parsed = parsedBody(body);
+        const identity = pool.provider.displayIdentity?.(incomingHeaders(req), parsed);
         if (identity) safely(() => activity.update(id, identity));
-        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track);
+        // A model route, if the requested model matches one.
+        const model = (parsed as { model?: unknown } | null)?.model;
+        const route = pool.routeFor(typeof model === 'string' ? model : null);
+        if (route) safely(() => activity.update(id, { route: route.name }));
+        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track, route);
       } finally { pool.inFlightProxied--; }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
     finally {
@@ -102,7 +108,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
   });
 }
 
-async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack): Promise<void> {
+async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack, route: Route | null = null): Promise<void> {
   const excluded = new Set<string>(); let authRetried = false;
   // Decided once from the request body: the retry loop must not re-read a body
   // it has already forwarded, and the answer cannot change between failovers.
@@ -127,7 +133,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   let retryOn: RuntimeAccount | null = null;
   while (!res.destroyed) {
     const forced: RuntimeAccount | null = retryOn; retryOn = null;
-    const account: RuntimeAccount | null = forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable);
+    const account: RuntimeAccount | null = forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable, route);
     if (!account) {
       // Exhausting this request's candidates does not mean exhausting quota.
       // Only retry explicit pre-stream transient HTTP failures; never replay a
@@ -147,8 +153,8 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // The quota dead end: no account has budget (a busy fleet is not one).
       // A reset credit can reopen an account; on a reset, that account is back
       // in play for this request.
-      if (creditPass && pool.explainShortfall(excluded, wantsFable).reason === 'quota_exhausted') {
-        const redeemed = await pool.redeemForFleet(excluded, wantsFable);
+      if (creditPass && pool.explainShortfall(excluded, wantsFable, route).reason === 'quota_exhausted') {
+        const redeemed = await pool.redeemForFleet(excluded, wantsFable, (a) => route?.mode !== 'exclusive' || pool.isMember(route, a));
         if (redeemed.attempted) creditPass = false;
         if (res.destroyed) return;
         if (redeemed.reset) { excluded.delete(redeemed.reset.id); continue; }
@@ -163,7 +169,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // Say what is actually short — a free slot (retry in a moment) or budget
       // (and whose, and until when) — and leave a trace in the activity log:
       // this 429 never reached upstream, so nothing else records it.
-      const shortfall = pool.explainShortfall(excluded, wantsFable);
+      const shortfall = pool.explainShortfall(excluded, wantsFable, route);
       onChange(`${pool.provider.label} ${req.method} ${path} → 429 ${shortfall.reason}${wantsFable ? ' (fable)' : ''}${shortfall.retryAfterMs ? `, next reset ${AccountPool.formatDuration(shortfall.retryAfterMs)}` : ''}`);
       const headers: Record<string, string> = { 'x-teamai-429-reason': shortfall.reason };
       // Claude Code honours retry-after; cap it so a days-away weekly reset
@@ -171,7 +177,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));
       return json(res, 429, { error: shortfall.message }, headers);
     }
-    track.setAccount(account.label);
+    track.setAccount(account.label, route ? !pool.isMember(route, account) : undefined);
     let response: Response;
     let phase = 'token refresh';
     let dispatchedAt = Date.now();

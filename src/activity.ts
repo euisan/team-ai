@@ -24,12 +24,13 @@ export function clean(value: unknown, max: number): string | null {
 
 export const LIMITS = { method: 16, path: 256, account: 64, model: 64, effort: 16, sessionId: 64 } as const;
 
-export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId'>>;
+export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId' | 'route' | 'routeFallback'>>;
 
 export function requestMessage(request: RequestSummary): string {
   const account = request.account ? ` → ${request.account}` : '';
   const model = request.model ? ` (${request.model}${request.effort ? `·${request.effort}` : ''})` : '';
-  return `${request.providerLabel} ${request.method} ${request.path}${model}${account} ${request.status} (${(request.durationMs / 1000).toFixed(1)}s)`;
+  const route = request.route ? ` [route:${request.route}${request.routeFallback ? '→fallback' : ''}]` : '';
+  return `${request.providerLabel} ${request.method} ${request.path}${model}${account}${route} ${request.status} (${(request.durationMs / 1000).toFixed(1)}s)`;
 }
 
 export class ActivityLog implements ActivitySink {
@@ -47,13 +48,15 @@ export class ActivityLog implements ActivitySink {
   update(id: string, patch: ActivityPatch): void {
     const entry = this.open.get(id); if (!entry) return;
     for (const key of ['account', 'model', 'effort', 'sessionId'] as const) if (key in patch) entry[key] = clean(patch[key], LIMITS[key]);
+    if ('route' in patch) entry.route = clean(patch.route, LIMITS.account);
+    if ('routeFallback' in patch) entry.routeFallback = patch.routeFallback === true;
     this.changed();
   }
 
   end(id: string, status: number | string, at = Date.now()): void {
     const entry = this.open.get(id); if (!entry) return;
     this.open.delete(id);
-    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null };
+    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null, route: entry.route ?? null, routeFallback: entry.routeFallback ?? false };
     this.record({ at, message: requestMessage(request), request });
   }
 
