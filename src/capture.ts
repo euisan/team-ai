@@ -5,6 +5,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildFrame, displayOrder, orderOptions, type FrameMode } from './frame.js';
+import { measureHost } from './host-metrics.js';
 import { renderFrame } from './png.js';
 import { liveState } from './runtime.js';
 import { redactSnapshot, redactor, type RedactLevel } from './redact.js';
@@ -40,7 +41,10 @@ export async function captureDashboard(options: CaptureOptions): Promise<Capture
   // The footer message may name an account ("Added …"), so it goes through
   // the same mask as everything else.
   const message = redactor(rawConfig.accounts, options.level)(options.message ?? '');
-  const lines = buildFrame(config, state, { width, selectedId, mode: options.mode ?? 'normal', message, sortByHeadroom });
+  // The host's own load is no account data, so it needs no mask; a quarter
+  // second between two snapshots gives the header a measured CPU%.
+  const host = await measureHost();
+  const lines = buildFrame(config, state, { width, selectedId, mode: options.mode ?? 'normal', message, sortByHeadroom, host });
   const dir = options.outDir ?? join(dataDir(), 'captures');
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const name = `teamai-${stamp(new Date())}`; const body = `${lines.join('\n')}\n`; const image = renderFrame(lines);

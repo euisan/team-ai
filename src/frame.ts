@@ -3,6 +3,7 @@
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
 import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, usageLayout, type GridRow } from './columns.js';
+import { hostText, type HostSample } from './host-metrics.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
@@ -271,7 +272,22 @@ export interface FrameView {
   sortByHeadroom: boolean;
   credits?: CreditPicker;
   routes?: RouteEditor;
+  // This PC's CPU and RAM load, sampled by the caller on each redraw. Absent:
+  // the header has no host field at all.
+  host?: HostSample | null;
 }
+
+// The header's right side: the first candidate that fits beside the title
+// with a space to spare, else the last one. Candidates go from most to least
+// detailed, and the host field (CPU/RAM) goes before anything else does —
+// its used/total amount first, then the whole field, and only then the ports
+// or the long running label.
+function headerLine(left: string, candidates: string[], width: number): string {
+  const right = candidates.find((text) => visible(left) + 1 + visible(text) <= width) ?? candidates[candidates.length - 1] ?? '';
+  return `${left}${' '.repeat(Math.max(1, width - visible(left) - visible(right)))}${right}`;
+}
+// The used/total amount is for the wide layout only.
+const withHost = (host: HostSample | null | undefined, rest: string, amounts: boolean): string[] => host ? [...(amounts ? [`${hostText(host, true)}  ${rest}`] : []), `${hostText(host, false)}  ${rest}`] : [];
 
 // Every key the normal screen takes, as the footer names them. The wide footer
 // spells them out in one line; a narrow one shows what fits and leaves the
@@ -310,8 +326,8 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   // together.
   const barWidth = gaugeWidth(width);
   const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
-  const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
-  lines.push(`${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`); lines.push('━'.repeat(width));
+  const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
+  lines.push(headerLine(color(1, ' TeamAI'), [...withHost(view.host, headerRight, true), headerRight], width)); lines.push('━'.repeat(width));
   for (const provider of ['claude', 'codex'] as const) {
     const group = ordered.filter((account) => account.provider === provider); if (!group.length) continue;
     const sectionTitle = ` ${provider === 'claude' ? 'Claude' : 'Codex'} accounts (${group.length}) `;
@@ -516,10 +532,8 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, orderOptions(config));
   const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow>): void => { for (const text of texts) lines.push({ text, rank }); };
   const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
-  const headerLeft = color(1, ' TeamAI');
-  const headerRight = [`${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount} `, `${color(32, '●')} Claude ${claudeCount}  Codex ${codexCount} `, `${color(32, '●')} C${claudeCount} X${codexCount} `]
-    .find((right) => visible(headerLeft) + 1 + visible(right) <= width) ?? '';
-  push(RANK.header, `${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`);
+  const running = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount} `;
+  push(RANK.header, headerLine(color(1, ' TeamAI'), [...withHost(view.host, running, false), running, `${color(32, '●')} Claude ${claudeCount}  Codex ${codexCount} `, `${color(32, '●')} C${claudeCount} X${codexCount} `, ''], width));
 
   for (const provider of ['claude', 'codex'] as const) {
     const group = ordered.filter((account) => account.provider === provider); if (!group.length) continue;
