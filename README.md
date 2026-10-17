@@ -152,18 +152,31 @@ teamai priority claude user@example.com 1      # or: auto
 teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png, no TTY needed
 ```
 
-Accounts are ordered by how much quota they have left, least-spent first, in
-both the dashboard and the pool's own selection — so the top row is the account
-the next request would go to. Claude is judged on its model-weekly (Fable)
-window rather than the overall one, because that is what actually refuses the
-top model first. Once every account is spent they all tie, and the order falls
-through to whichever frees up soonest — on a fleet where nothing can serve a
-request today, time-to-reset is the only thing that separates them (Claude on
-its Fable window, Codex on its weekly one). An unmeasured
-account sorts last (unknown is not the same as empty), a pinned priority still
-wins, and `c` toggles back to configured order.
+Accounts of the same priority are ordered by **weekly pacing**, in both the
+dashboard and the pool's own selection — so the top row is the account the next
+request would go to. Each weekly budget is read as a straight line from 0% when
+the week starts to 100% at its reset, and an account's deviation is its weekly
+usage minus the share of the week already gone: an account *behind* its line
+(negative) has budget it will lose at the reset unless it is spent, so it goes
+first. It is an order, not a gate — when every account is ahead, the least-ahead
+one is used — and an account about to reset with budget left is simply the
+furthest behind, so there is no separate "resets soon" rule. The weekly window
+is the one the request spends: Claude's `7d` (its Fable weekly window for a
+Fable request), and on Codex the window whose length is 10080 minutes, whatever
+it is called. Deviations within 5 points of each other count as equal, so two
+accounts do not swap places on every request; a tie goes to the account the
+session is already on, then to the most weekly budget left per remaining week,
+then to the earliest weekly reset, then to the earliest and least-used 5-hour
+window. An account with no weekly window that resets in the future (unmeasured,
+or its reset already passed) sorts after those that have one. The Fable
+reservation, an explicit priority, the switch threshold — which also sets aside
+an account whose 5-hour window is at it, however far behind its week is — the
+session pin and the concurrency cap all apply first, as before. Each row shows
+its deviation as `+12%p` / `-30%p`. `routing.balance: "level"` restores the
+older order (the fuller of the 5-hour and weekly windows, in 10% steps, fewest
+requests in flight first), and `c` toggles back to configured order.
 
-A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — tiers, priority, spread, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
+A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — tiers, priority, pacing, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
 
 **Model-aware routing.** Only the top model (Claude's Fable tier) draws on the
 model-weekly window, so a request that does not need it — Opus, Sonnet, Haiku —
@@ -236,6 +249,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `warmupIntervalMs` | `300000` | Background re-measure interval. `0` disables it. |
 | `maxConcurrentPerAccount` | `16` | In-flight requests allowed per account. `0` means unlimited. |
 | `fableReserveThreshold` | `0.8` | Fable-window usage at or above which an account is preferred for non-Fable requests. `1` turns model-aware routing off. |
+| `routing.balance` | `"pacing"` | How accounts of equal priority are ordered: `pacing` (weekly progress, see above) or `level` (least-full windows in 10% steps). |
 | `codexResetCredits` | `false` | Spend Codex reset credits automatically (see above). |
 | `codexResetCreditsPolicy` | `"fleet"` | `fleet`: only when no Codex account has budget. `account`: also on an account's own exhaustion 429. |
 | `codexResetCreditsCooldownMs` | `1800000` | Minimum time between two attempts on one account, whatever the outcome. |

@@ -32,6 +32,9 @@ export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
+  const balance = config.routing?.balance ?? 'pacing';
+  if (balance !== 'pacing' && balance !== 'level') throw new Error(`routing.balance must be "pacing" or "level", not ${JSON.stringify(balance)}`);
+  for (const pool of pools) pool.balance = balance;
   // Model routes are checked before anything listens: a malformed route is a
   // startup error rather than a route that silently never applies.
   const routeWarnings = pools.flatMap((pool) => pool.setRoutes(parseRoutes(config.routes?.[pool.provider.id], pool.provider.id)).map((warning) => `${pool.provider.label} ${warning}`));

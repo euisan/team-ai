@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
-import { buildFrame, displayOrder, ESC, type CreditPicker, type FrameMode } from './frame.js';
+import { buildFrame, displayOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
 import { liveState, runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
 import type { ResetCredit, StoredAccount } from './types.js';
@@ -16,11 +16,11 @@ export async function runTui(): Promise<void> {
   // it back in configured order for anyone reading it as a roster.
   let sortByHeadroom = true;
   let credits: CreditPicker | undefined; let creditList: ResetCredit[] = []; let creditAccount: string | null = null;
-  const rows = async (): Promise<StoredAccount[]> => displayOrder((await loadConfig()).accounts, await loadState(), sortByHeadroom);
+  const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); return displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)); };
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   const render = async (): Promise<void> => {
-    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom)); if (current && !selectedId) selectedId = current.credentialId;
+    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40);
     const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits });
     process.stdout.write(`${ESC}H${lines.join('\n')}`);

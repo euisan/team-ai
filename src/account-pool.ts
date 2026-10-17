@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
@@ -28,6 +29,11 @@ export class AccountPool {
   saveNow: () => Promise<void> = async () => {};
   log: (message: string) => void = () => {};
   private deadEndLoggedAt = 0;
+  // How accounts in the same tier and priority are ordered: 'pacing' by weekly
+  // progress (src/pacing.ts), 'level' by how full they are. The clock is only
+  // read for that ordering, so a test can fix it.
+  balance: Balance = 'pacing';
+  now: () => number = Date.now;
 
   // Accounts still holding Fable budget are kept for Fable. An account measured
   // below this line reserves its remainder; at or above it, it is the preferred
@@ -83,8 +89,11 @@ export class AccountPool {
 
   // The bucket every request spends, Fable or not. This is what gates traffic
   // that does not need the top model, so it is what ranks those requests.
-  static generalWindow(account: { windows: Record<string, { usage: number | null; resetsAt?: number | null }> }): { usage: number | null; resetsAt?: number | null } | undefined {
-    return account.windows.primary ?? account.windows.requests ?? account.windows['7d'];
+  // Weekly first: Claude's 7d, or the Codex window a week long. Codex calls its
+  // 5-hour window primary and its weekly one secondary, so reaching for
+  // primary first left the Codex weekly budget out of every ranking.
+  static generalWindow(account: { windows: Record<string, { usage: number | null; resetsAt?: number | null; minutes?: number | null }> }): { usage: number | null; resetsAt?: number | null } | undefined {
+    return weeklyWindow(account.windows, false) ?? account.windows.primary ?? account.windows.requests;
   }
 
   // Least-spent first, so both selection and the dashboard agree on what "next"
@@ -292,7 +301,7 @@ export class AccountPool {
     // week every account reserves, and refusing the pin then just scatters
     // the session over the fleet for nothing.
     if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded) && !(outside(pinned) && memberOpen)) { pinned.inflight++; this.remember(key, pinned.id); this.noteRoute(route, pinned); return pinned; }
-    const selected = this.pick(excluded, wantsFable, route, this.availableNow);
+    const selected = this.pick(excluded, wantsFable, route, this.availableNow, pinned?.id);
     // A pinned account that is only excluded for this request (a transient
     // failover) or at its concurrency cap is still the session's home: this
     // request spills elsewhere, the pin stays, and the next turn comes back to
@@ -305,9 +314,9 @@ export class AccountPool {
   // preview() so the dashboard's arrow cannot drift from real selection.
   // `judge` decides availability: acquire's clears rolled-over windows as it
   // looks, preview's only looks.
-  private pick(excluded: Set<string>, wantsFable: boolean, route: Route | null, judge: Judge): RuntimeAccount | null {
+  private pick(excluded: Set<string>, wantsFable: boolean, route: Route | null, judge: Judge, pinned?: string): RuntimeAccount | null {
     const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a) ? 1 : 0;
-    const rank = this.spread(wantsFable);
+    const rank = this.balance === 'level' ? this.spread(wantsFable) : this.paced(wantsFable, pinned);
     // An explicit priority orders accounts within the same reservation tier,
     // never across it: a #1 account still holding Fable budget used to take
     // every Opus and Haiku turn ahead of a spare whose Fable was already
@@ -388,7 +397,8 @@ export class AccountPool {
 
   get pinnedSessions(): number { return this.affinity.size; }
 
-  // Selection order for a new session. The static rankings compare exact
+  // The 'level' order for a new session (routing.balance: "level"; the
+  // default is paced() below). The static rankings compare exact
   // usage, which herds every new session onto whichever account is a point
   // lower this hour (51% vs 52%) until its weekly figure creeps past the next
   // one — a number that moves a tenth of a percent per request. Meanwhile the
@@ -408,12 +418,26 @@ export class AccountPool {
     return (a, b) => tier(a) - tier(b) || bucket(a) - bucket(b) || a.inflight - b.inflight || exact(a, b);
   }
 
+  // The 'pacing' order: the Fable tier as in spread(), then weekly progress
+  // (comparePacing). An account whose 5-hour window is at the switch
+  // threshold never gets here — routingUsage is the fuller of the two windows,
+  // so eligible() has already set it aside — and being behind on the week
+  // cannot pull a request onto an account about to refuse it.
+  private paced(wantsFable: boolean, pinned?: string): (a: RuntimeAccount, b: RuntimeAccount) => number {
+    const now = this.now();
+    const tier = (a: RuntimeAccount) => (!wantsFable && this.fableReserve < 1 && AccountPool.fableSpent(a, this.fableReserve) ? 0 : 1);
+    // Accounts that tie on every pacing key (nothing measured, or windows with
+    // no reset) fall back to the static ranking rather than config order.
+    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
+    return (a, b) => tier(a) - tier(b) || comparePacing(a, b, wantsFable, now, pinned) || exact(a, b);
+  }
+
   // How full the account is on whichever window will gate its next request:
   // the budget this kind of request spends, or the 5-hour session window,
   // whichever is fuller. Null when neither has been measured.
   static loadUsage(account: RuntimeAccount, wantsFable: boolean): number | null {
     const budget = wantsFable ? AccountPool.headroomUsage(account) : AccountPool.generalUsage(account);
-    const session = account.windows['5h']?.usage ?? null;
+    const session = sessionWindow(account.windows)?.usage ?? null;
     if (budget === null && session === null) return null;
     return Math.max(budget ?? 0, session ?? 0);
   }
