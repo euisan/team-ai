@@ -40,6 +40,16 @@ export interface TeamAIConfig {
   // is not consumed by Opus/Sonnet requests that any account could serve.
   // 1 disables the split and restores plain least-spent routing.
   fableReserveThreshold?: number;
+  // Codex reset credits ("Full reset" tickets). Off unless turned on; see
+  // src/reset-credits.ts for what each key does.
+  codexResetCredits?: boolean;
+  codexResetCreditsPolicy?: 'fleet' | 'account';
+  codexResetCreditsCooldownMs?: number;
+  codexResetCreditsReserve?: number;
+  codexResetCreditsTimeoutMs?: number;
+  codexResetCreditsListRefreshMs?: number;
+  // Also spend a ticket when only the short (5-hour) window is used up.
+  codexResetCreditsSessionWindow?: boolean;
   accounts: StoredAccount[];
 }
 
@@ -64,6 +74,25 @@ export interface QuotaSnapshot {
   routingUsage: number | null;
   routingResetsAt: number | null;
   windows: Record<string, QuotaWindow>;
+  // Codex reset credits on hand, from the usage endpoint only. Absent on a
+  // header reading, which must not erase a known count; null when the usage
+  // endpoint did not report a usable one.
+  resetCredits?: number | null;
+}
+
+// One reset credit as the Codex backend lists it, already filtered to the ones
+// that can be spent. Times are epoch ms.
+export interface ResetCredit { id: string; title: string | null; grantedAt: number | null; expiresAt: number | null }
+
+// The reset-credit ledger kept per Codex account and persisted across
+// restarts: an interrupted redemption must still read as possibly spent.
+export interface ResetCreditLedger {
+  resetCredits?: number | null;
+  resetCreditsAt?: number | null;
+  resetCreditLastAt?: number | null;
+  resetCreditLastOutcome?: string | null;
+  resetCreditsConsumed?: number;
+  resetCreditResetAt?: number | null;
 }
 
 export interface SubscriptionProfile {
@@ -76,7 +105,7 @@ export interface SubscriptionProfile {
   fetchedAt: number;
 }
 
-export interface AccountRuntimeState {
+export interface AccountRuntimeState extends ResetCreditLedger {
   usage: number | null;
   resetsAt: number | null;
   windows?: Record<string, QuotaWindow>;
@@ -134,7 +163,7 @@ export interface PersistedState {
   probes?: Partial<Record<ProviderId, ProbeTemplate>>;
 }
 
-export interface RuntimeAccount extends StoredAccount {
+export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   credential: OAuthCredential;
   usage: number | null;
   resetsAt: number | null;
@@ -148,6 +177,12 @@ export interface RuntimeAccount extends StoredAccount {
   profile: SubscriptionProfile | null;
   measuredAt: number | null;
   inflight: number;
+  // Memory only: the redemption running for this account, shared by every
+  // caller so a ticket is never spent twice concurrently; and the last list.
+  resetCreditPromise?: Promise<import('./reset-credits.js').RedeemResult> | null;
+  resetCreditList?: { credits: ResetCredit[]; at: number } | null;
+  resetCreditListTriedAt?: number | null;
+  resetCreditListFailing?: boolean;
 }
 
 export interface FailureDecision {
@@ -184,6 +219,11 @@ export interface Provider {
   // or /status (Codex) screen shows. Unlike a probe it is not a model call, so
   // it spends no quota and can run on a timer across the whole fleet.
   fetchUsage?(credential: OAuthCredential): Promise<QuotaSnapshot | null>;
+  // Codex reset credits: list the spendable ones, and spend one. consume
+  // returns the raw answer (the backend says no with a 200 and a code) and
+  // throws on a timeout or a dropped connection.
+  fetchResetCredits?(credential: OAuthCredential): Promise<ResetCredit[]>;
+  consumeResetCredit?(credential: OAuthCredential, options: { redeemRequestId: string; creditId?: string; timeoutMs: number }): Promise<{ status: number; body: string }>;
 }
 
 // Why the pool could not hand out an account, shaped for the 429 the client

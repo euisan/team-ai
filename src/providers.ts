@@ -1,3 +1,4 @@
+import { parseResetCreditList, resetCreditCount } from './reset-credits.js';
 import type { OAuthCredential, Provider, QuotaSnapshot, QuotaWindow } from './types.js';
 
 // accept-encoding is dropped too: fetch negotiates and decompresses on its own,
@@ -113,7 +114,7 @@ export function claudeUsageQuota(data: { limits?: ClaudeUsageLimit[] | null; fiv
 // Codex's /wham/usage: the same primary/secondary windows the x-codex-* headers
 // carry, with the window length in seconds rather than minutes.
 interface CodexUsageWindow { used_percent?: number | null; limit_window_seconds?: number | null; reset_after_seconds?: number | null; reset_at?: number | null }
-export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsageWindow | null; secondary_window?: CodexUsageWindow | null } | null }): QuotaSnapshot | null {
+export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsageWindow | null; secondary_window?: CodexUsageWindow | null } | null; rate_limit_reset_credits?: unknown }): QuotaSnapshot | null {
   const windows: Record<string, QuotaWindow> = {};
   for (const [name, window] of [['primary', data.rate_limit?.primary_window], ['secondary', data.rate_limit?.secondary_window]] as const) {
     if (!window || typeof window.used_percent !== 'number' || !Number.isFinite(window.used_percent)) continue;
@@ -123,7 +124,11 @@ export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsa
     windows[name] = { usage: Math.max(0, Math.min(1, window.used_percent / 100)), resetsAt: reset, minutes };
   }
   const binding = Object.values(windows).sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0))[0];
-  return binding ? { routingUsage: binding.usage, routingResetsAt: binding.resetsAt, windows } : null;
+  // The reset-credit count rides on the same read. Only available_count is
+  // trusted: applicable_available_count has read 0 on accounts that did hold
+  // spendable tickets.
+  const resetCredits = resetCreditCount(data);
+  return binding ? { routingUsage: binding.usage, routingResetsAt: binding.resetsAt, windows, resetCredits } : null;
 }
 
 export const claudeProvider: Provider = {
@@ -401,10 +406,27 @@ export const codexProvider: Provider = {
     return { url: `https://chatgpt.com/backend-api${template.path}`, headers, body: JSON.stringify(payload) };
   },
   async fetchUsage(credential) {
-    const response = await fetch('https://chatgpt.com/backend-api/wham/usage', { headers: { authorization: `Bearer ${credential.accessToken}`, 'chatgpt-account-id': credential.accountId }, signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(`${this.upstreamBase}/wham/usage`, { headers: whamHeaders(credential), signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Codex usage failed (${response.status})`);
     return codexUsageQuota(await response.json() as Parameters<typeof codexUsageQuota>[0]);
   },
+  async fetchResetCredits(credential) {
+    const response = await fetch(`${this.upstreamBase}/wham/rate-limit-reset-credits`, { headers: whamHeaders(credential), signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error(`Codex reset credit list failed (${response.status})`);
+    return parseResetCreditList(await response.json());
+  },
+  async consumeResetCredit(credential, options) {
+    // Without a credit_id the backend picks the ticket itself.
+    const payload: Record<string, string> = { redeem_request_id: options.redeemRequestId };
+    if (options.creditId) payload.credit_id = options.creditId;
+    const response = await fetch(`${this.upstreamBase}/wham/rate-limit-reset-credits/consume`, { method: 'POST', headers: { ...whamHeaders(credential), 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(options.timeoutMs) });
+    return { status: response.status, body: await response.text() };
+  },
 };
+
+// The minimal header set the ChatGPT usage endpoints accept.
+function whamHeaders(credential: OAuthCredential): Record<string, string> {
+  return { accept: 'application/json', authorization: `Bearer ${credential.accessToken}`, 'chatgpt-account-id': credential.accountId };
+}
 
 export const providers: Record<'claude' | 'codex', Provider> = { claude: claudeProvider, codex: codexProvider };

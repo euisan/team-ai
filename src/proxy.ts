@@ -108,8 +108,16 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   let retryRounds = 0;
   let retryWaitMs = 0;
   let nextRetryAt = 0;
+  // Reset credits (Codex): one chance per request to spend a ticket, used up
+  // by any attempt that reached the backend. creditRetried keeps a request
+  // from going back to one account twice on a ticket; staleRetried does the
+  // same for an answer that predates a reset; retryOn is that account.
+  let creditPass = pool.resetCredits.enabled && pool.provider.id === 'codex';
+  const creditRetried = new Set<string>(); const staleRetried = new Set<string>();
+  let retryOn: RuntimeAccount | null = null;
   while (!res.destroyed) {
-    const account = pool.acquire(session, excluded, wantsFable);
+    const forced: RuntimeAccount | null = retryOn; retryOn = null;
+    const account: RuntimeAccount | null = forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable);
     if (!account) {
       // Exhausting this request's candidates does not mean exhausting quota.
       // Only retry explicit pre-stream transient HTTP failures; never replay a
@@ -125,6 +133,18 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
           transientAccounts.clear(); nextRetryAt = 0;
           continue;
         }
+      }
+      // The quota dead end: no account has budget (a busy fleet is not one).
+      // A reset credit can reopen an account; on a reset, that account is back
+      // in play for this request.
+      if (creditPass && pool.explainShortfall(excluded, wantsFable).reason === 'quota_exhausted') {
+        const redeemed = await pool.redeemForFleet(excluded, wantsFable);
+        if (redeemed.attempted) creditPass = false;
+        if (res.destroyed) return;
+        if (redeemed.reset) { excluded.delete(redeemed.reset.id); continue; }
+        if (redeemed.yielded) continue;
+      }
+      if (lastFailure) {
         copyHeaders(lastFailure.response, res);
         res.writeHead(lastFailure.response.status); res.end(lastFailure.body);
         onChange(`${pool.provider.label} ${req.method} ${path} → ${lastFailure.response.status} upstream failure preserved`);
@@ -144,6 +164,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     track.setAccount(account.label);
     let response: Response;
     let phase = 'token refresh';
+    let dispatchedAt = Date.now();
     try {
       await pool.refresh(account);
       phase = 'upstream';
@@ -158,6 +179,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // headers arrive; a streaming body has no time limit. A client that
       // goes away mid-stream is handled in pipeStream, so no slot leaks.
       const headerGuard = new AbortController();
+      dispatchedAt = Date.now();
       const headerTimer = setTimeout(() => headerGuard.abort(new Error('upstream sent no response headers within 300s')), HEADER_TIMEOUT_MS);
       try {
         response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : new Uint8Array(sendBody), signal: headerGuard.signal });
@@ -174,7 +196,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       pool.release(account); pool.cooldown(account, 2_000, 'network'); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error (${phase}: ${describeError(error)}); failover`);
       continue;
     }
-    pool.updateQuota(account, response.headers);
+    const observed = pool.observeResponse(account, response.headers, dispatchedAt, response.status);
     if (!response.ok) {
       // Read the error body before releasing the slot, but never leak the slot
       // if the read itself fails: an upstream that closes the connection
@@ -231,6 +253,20 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         continue;
       }
       if (decision.kind === 'quota') {
+        // Sent before a reset credit was spent on this account: the rejection
+        // describes the old windows. Try the account again rather than bench it.
+        if (observed === 'stale' && !staleRetried.has(account.id)) {
+          staleRetried.add(account.id); retryOn = account;
+          onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} predates its reset credit; retrying`);
+          continue;
+        }
+        // Account policy: spend a ticket on the account that just ran out and
+        // go straight back to it, once.
+        if (creditPass && pool.resetCredits.policy === 'account' && !creditRetried.has(account.id)) {
+          const redeemed = await pool.redeemResetCredit(account, '429-exhausted', { enforce: true });
+          if (!redeemed.skipped) creditPass = false;
+          if (!redeemed.skipped && redeemed.kind === 'reset') { creditRetried.add(account.id); retryOn = account; continue; }
+        }
         pool.cooldown(account, decision.retryAfterMs, decision.kind); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}; failover`);
         // A spent account after a transient one must not end the request: the
         // transient account still has its retry rounds, and the decision block

@@ -4,6 +4,8 @@ import type { Server } from 'node:http';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog } from './activity.js';
 import { createProxy, secureEqual } from './proxy.js';
+import { handleResetCreditControl } from './reset-credit-control.js';
+import { resetCreditSettings } from './reset-credits.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
@@ -45,6 +47,13 @@ export async function runServer(): Promise<void> {
   const schedule = (): void => { if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; const run = fullSave ? persistNow : persistStateOnly; fullSave = false; saving = saving.then(run, run); }, 25); };
   const persist = (event?: string | ActivityEvent): void => { if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
   const persistActivity = (): void => schedule();
+  // Reset credits: the ledger goes to disk before and after each consume call,
+  // through the same save chain so it never races a scheduled save.
+  const saveImmediately = (): Promise<void> => { saving = saving.then(persistNow, persistNow); return saving; };
+  for (const pool of pools) {
+    pool.log = (message) => persist(message); pool.saveNow = saveImmediately;
+    if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);
+  }
   const servers: Server[] = [];
   for (const pool of pools) {
     if (!pool.accounts.length) continue;
@@ -118,6 +127,7 @@ export async function runServer(): Promise<void> {
   // host and gated by the same client token as the proxies.
   const control = createServer(async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
+    if (await handleResetCreditControl(req, res, pools.find((p) => p.provider.id === 'codex'), config.proxy.clientToken)) return;
     if (!secureEqual(token, config.proxy.clientToken)) { res.writeHead(401).end('{}'); return; }
     if (!req.url?.startsWith('/probe')) { res.writeHead(404).end('{}'); return; }
     // Pick up accounts added or removed by the TUI (a separate process) before

@@ -198,6 +198,8 @@ Learned quota (usage, windows, reset times, subscription profile) is written to 
 
 If more requests arrive at once than the fleet's combined per-account concurrency can serve, the relay rejects the overflow with `429` (`x-teamai-429-reason: concurrency_saturated`) before reading the request body, rather than buffering unbounded bodies. The same header distinguishes a busy fleet from a spent one (`quota_exhausted`) on the "no account available" 429.
 
+**Codex reset credits.** A ChatGPT account may hold reset credits — the tickets Codex CLI's `/usage` "Full reset" spends. With `codexResetCredits` on, the relay spends one by itself at the quota dead end: when no Codex account can take a request because every one is out of budget (not merely busy), it redeems a ticket on the best eligible account — most tickets first, then the weekly window that resets latest — and serves the same request there. An account qualifies only when its weekly window is measured full (`codexResetCreditsSessionWindow` lets a full 5-hour window qualify too), its ticket count has been read from the usage endpoint and exceeds `codexResetCreditsReserve`, and its last attempt is older than `codexResetCreditsCooldownMs`. With `codexResetCreditsPolicy: "account"` a ticket is also spent right after an account's own exhaustion 429, and the request goes back to that account once. A request spends at most one ticket. A ticket cannot be given back, so the relay never spends one on a guess: the attempt is recorded on disk as `pending` before the call, an answer it cannot read (a timeout, a 5xx, an unknown code) counts as possibly spent and stops the pass instead of trying the next account, a `pending` found after a restart blocks that account until a usage read has counted its tickets again or 15 minutes pass, and the usage is re-read 1.5 s after every attempt. For two minutes after a reset, figures from responses sent before it, and readings that would raise usage, are ignored; a fresh 429 is always believed. Codex rows show the tickets on hand as `RC<n>`, `teamai status` lists them per account, and `t` on a Codex row opens a picker to spend a chosen ticket by hand (`y` to confirm). Off by default; with it off, no reset-credit call is ever made.
+
 The `~D-N` subscription value is an estimate, not an authoritative expiry date: Anthropic's profile endpoint exposes subscription status and creation time, but no current billing-period end. TeamAI therefore estimates the next monthly billing anniversary and marks it with `~`. Profile state is refreshed at server startup and every six hours.
 
 ## Configuration
@@ -219,6 +221,13 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `warmupIntervalMs` | `300000` | Background re-measure interval. `0` disables it. |
 | `maxConcurrentPerAccount` | `16` | In-flight requests allowed per account. `0` means unlimited. |
 | `fableReserveThreshold` | `0.8` | Fable-window usage at or above which an account is preferred for non-Fable requests. `1` turns model-aware routing off. |
+| `codexResetCredits` | `false` | Spend Codex reset credits automatically (see above). |
+| `codexResetCreditsPolicy` | `"fleet"` | `fleet`: only when no Codex account has budget. `account`: also on an account's own exhaustion 429. |
+| `codexResetCreditsCooldownMs` | `1800000` | Minimum time between two attempts on one account, whatever the outcome. |
+| `codexResetCreditsReserve` | `0` | Tickets per account that automatic use leaves alone. |
+| `codexResetCreditsTimeoutMs` | `10000` | Time limit on one redemption call; past it the outcome counts as unknown. |
+| `codexResetCreditsListRefreshMs` | `600000` | How long the ticket list shown by `t` is reused. `0` fetches it once. |
+| `codexResetCreditsSessionWindow` | `false` | Also spend a ticket when only the 5-hour window is used up. |
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
 
 Change a port if something else already owns it — that is the usual cause of a
