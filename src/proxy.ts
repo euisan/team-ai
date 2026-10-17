@@ -29,10 +29,50 @@ export function maxBodyBytes(value: unknown): number {
   return Math.floor(value * MB);
 }
 
+// What every request body held in memory at once may add up to, in MB, from
+// proxy.maxInflightBodyMb. Each body is held whole until its request ends, so
+// without a shared cap the worst case is maxBodyMb × maxConcurrentPerAccount ×
+// accounts — 512 MB × 16 × 4 is 32 GB — long before quota or concurrency
+// limits say no. 1024 MB still takes two bodies of the default maximum at once,
+// or dozens of the 32 MB Anthropic allows; real bodies are far smaller (see
+// DEFAULT_MAX_BODY_MB). The process holds more than this at its peak, since
+// fetch copies the body it sends (and Claude's is rewritten per account): up
+// to about three times the budget at the peak. Unset, it is never below
+// maxBodyMb, so one body the limit allows always fits.
+export const DEFAULT_MAX_INFLIGHT_BODY_MB = 1024;
+const MAX_INFLIGHT_BODY_MB_CEILING = 65536;
+
+// proxy.maxInflightBodyMb as bytes, given proxy.maxBodyMb as bytes; or a
+// startup error. Below the per-body limit is an error rather than a quiet
+// raise: such a body would be accepted by one limit and refused by the other.
+export function maxInflightBodyBytes(value: unknown, bodyLimit: number): number {
+  if (value === undefined) return Math.max(DEFAULT_MAX_INFLIGHT_BODY_MB * MB, bodyLimit);
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_INFLIGHT_BODY_MB_CEILING) throw new Error(`proxy.maxInflightBodyMb must be a number of megabytes above 0 and at most ${MAX_INFLIGHT_BODY_MB_CEILING}, not ${JSON.stringify(value)}`);
+  const bytes = Math.floor(value * MB);
+  if (bytes < bodyLimit) throw new Error(`proxy.maxInflightBodyMb (${value}) must be at least proxy.maxBodyMb (${bodyLimit / MB}): a body under one limit would be refused by the other`);
+  return bytes;
+}
+
+// The bytes of request bodies held right now, shared by every proxy in the
+// process (both providers and their legacy ports): memory is one pool.
+export class BodyBudget {
+  used = 0;
+  constructor(readonly limit: number) {}
+  get free(): number { return this.limit - this.used; }
+  take(bytes: number): boolean { if (bytes > this.free) return false; this.used += bytes; return true; }
+  give(bytes: number): void { this.used = Math.max(0, this.used - bytes); }
+}
+
+// The body limits createProxy applies. A bare number is the per-body limit.
+export interface BodyOptions { limit: number; budget?: BodyBudget | null }
+
 export function formatBytes(bytes: number): string { return `${(bytes / MB).toFixed(1)} MB (${bytes} bytes)`; }
 
 class BodyTooLarge extends Error {
   constructor(readonly size: number, readonly limit: number) { super(`Request body is ${formatBytes(size)}, over the relay's ${formatBytes(limit)} limit (proxy.maxBodyMb in config.json)`); }
+}
+class BodyBudgetFull extends Error {
+  constructor(readonly size: number, readonly held: number, readonly limit: number) { super(`Request body is ${formatBytes(size)}, and the relay already holds ${formatBytes(held)} of request bodies in flight, against its ${formatBytes(limit)} limit (proxy.maxInflightBodyMb in config.json). Retry in a few seconds.`); }
 }
 
 export function secureEqual(a: string, b: string): boolean {
@@ -46,12 +86,29 @@ function authorized(req: IncomingMessage, token: string): boolean { const raw = 
 // chosen from the body's model and session. Chunks are kept as the socket
 // delivered them (no per-chunk copy). Past the limit the rest is read and
 // dropped, only counted, so the 413 names the real size and the client is not
-// cut off mid-upload before it can read the answer.
-async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+// cut off mid-upload before it can read the answer. Each chunk kept is taken
+// from the shared budget as it arrives, so an upload still in progress counts;
+// a body that does not fit (by its declared length, or once a chunk does not)
+// gives back what it took at once and is drained the same way. On success the
+// caller owns body.length bytes of the budget and gives them back.
+async function readBody(req: IncomingMessage, limit: number, budget: BodyBudget | null): Promise<Buffer> {
   const declared = Number(req.headers['content-length']);
-  const parts: Buffer[] = []; let size = 0; let over = Number.isFinite(declared) && declared > limit;
-  for await (const chunk of req) { const value = chunk as Buffer; size += value.length; if (size > limit) over = true; if (!over) parts.push(value); }
+  let parts: Buffer[] = []; let size = 0; let taken = 0;
+  let over = Number.isFinite(declared) && declared > limit;
+  let full = !over && budget !== null && Number.isFinite(declared) && declared > budget.free;
+  let heldByOthers = full ? budget!.used : 0;
+  const drop = (): void => { budget?.give(taken); taken = 0; parts = []; };
+  try {
+    for await (const chunk of req) {
+      const value = chunk as Buffer; size += value.length;
+      if (size > limit && !over) { over = true; drop(); }
+      if (over || full) continue;
+      if (budget && !budget.take(value.length)) { full = true; drop(); heldByOthers = budget.used; continue; }
+      taken += value.length; parts.push(value);
+    }
+  } catch (error) { drop(); throw error; }
   if (over) throw new BodyTooLarge(size, limit);
+  if (full) throw new BodyBudgetFull(size, heldByOthers, budget!.limit);
   return parts.length === 1 ? parts[0]! : Buffer.concat(parts, size);
 }
 // "network error" alone hid whether a token refresh or the upstream call
@@ -104,7 +161,8 @@ function finalStatus(res: ServerResponse, track: RequestTrack): number | string 
   return res.headersSent || res.destroyed ? 499 : 502;
 }
 
-export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message)), bodyLimit = DEFAULT_MAX_BODY_MB * MB): Server {
+export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message)), body: number | BodyOptions = DEFAULT_MAX_BODY_MB * MB): Server {
+  const { limit: bodyLimit, budget = null } = typeof body === 'number' ? { limit: body } : body;
   return createServer(async (req, res) => {
     let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {}, setEnd: () => {} };
     try {
@@ -128,9 +186,16 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       // A response.failed or response.incomplete arrives under a 200: without
       // a mark of its own the line reads as a success.
       track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })), setEnd: (end) => { if (end !== 'completed') safely(() => activity.update(id, { streamEnd: end })); } };
+      let held = 0;
       try {
         let body: Buffer;
-        try { body = await readBody(req, bodyLimit); } catch (error) {
+        try { body = await readBody(req, bodyLimit, budget); held = body.length; } catch (error) {
+          if (error instanceof BodyBudgetFull) {
+            // Not this request's fault and not for long: a 429 with a reason,
+            // like a relay at its concurrency cap, in the 413's error shape.
+            onChange(`${pool.provider.label} ${req.method} ${path} → 429 body_budget request body ${formatBytes(error.size)}, ${formatBytes(error.held)} already held of proxy.maxInflightBodyMb ${formatBytes(error.limit)}`);
+            return json(res, 429, { error: { type: 'body_budget_exhausted', message: error.message } }, { 'retry-after': '5', 'x-teamai-429-reason': 'body_budget' });
+          }
           if (!(error instanceof BodyTooLarge)) throw error;
           // Never forwarded, so nothing upstream records it: the size and the
           // limit go to the log; the body itself is not kept or shown.
@@ -147,7 +212,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
         const route = pool.routeFor(typeof model === 'string' ? model : null);
         if (route) safely(() => activity.update(id, { route: route.name }));
         await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track, route);
-      } finally { pool.inFlightProxied--; }
+      } finally { pool.inFlightProxied--; budget?.give(held); }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
     finally {
       // Every line that opened is closed exactly once, whatever happened above.

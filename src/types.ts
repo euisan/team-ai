@@ -35,6 +35,9 @@ export interface TeamAIConfig {
     legacyPorts?: Partial<Record<ProviderId, number[]>>;
     // The largest request body relayed, in MB; 512 when absent (see proxy.ts).
     maxBodyMb?: number;
+    // What all request bodies held at once may add up to, in MB; 1024 (or
+    // maxBodyMb, if larger) when absent (see proxy.ts).
+    maxInflightBodyMb?: number;
   };
   switchThreshold: number;
   warmupIntervalMs?: number;

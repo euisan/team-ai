@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, request, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
-import { createProxy, DEFAULT_MAX_BODY_MB, maxBodyBytes } from '../src/proxy.js';
+import { BodyBudget, createProxy, DEFAULT_MAX_BODY_MB, DEFAULT_MAX_INFLIGHT_BODY_MB, maxBodyBytes, maxInflightBodyBytes, type BodyOptions } from '../src/proxy.js';
 import { defaultConfig } from '../src/storage.js';
 import type { Provider, StoredAccount } from '../src/types.js';
 
@@ -13,7 +13,7 @@ const MB = 1024 * 1024;
 
 // A relay with two synthetic accounts in front of a local upstream that counts
 // what it receives. Every token here is made up.
-async function rig(handler: (req: IncomingMessage, res: ServerResponse, body: Buffer) => void, bodyLimit?: number) {
+async function rig(handler: (req: IncomingMessage, res: ServerResponse, body: Buffer) => void, bodyLimit?: number | BodyOptions) {
   const received: number[] = [];
   const upstream = createServer((req, res) => {
     const parts: Buffer[] = []; req.on('data', (c: Buffer) => parts.push(c));
@@ -38,7 +38,7 @@ async function rig(handler: (req: IncomingMessage, res: ServerResponse, body: Bu
   // No content-length: the size is only known once the upload ends.
   const callChunked = (chunks: string[]) => fetch(url, { method: 'POST', headers, duplex: 'half', body: new ReadableStream({ start(c) { for (const chunk of chunks) c.enqueue(new TextEncoder().encode(chunk)); c.close(); } }) } as RequestInit);
   const close = () => { proxy.close(); upstream.close(); proxy.closeAllConnections(); upstream.closeAllConnections(); };
-  return { received, events, call, callChunked, close };
+  return { received, events, call, callChunked, close, port: pa.port };
 }
 
 const ok = (_req: IncomingMessage, res: ServerResponse) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); };
@@ -125,4 +125,90 @@ test("upstream's own 413 reaches the client as it was sent, and is not retried o
     assert.equal(res.headers.get('x-teamai-413-reason'), null, 'not the relay\'s own 413');
     assert.deepEqual(r.received, [2 * MB], 'one account tried, once');
   } finally { r.close(); }
+});
+
+// A raw upload that sends `first` bytes now and holds the rest back until
+// finish() is called (or never). Resolves the response whenever it comes.
+function upload(port: number, total: number, first: number) {
+  const req = request({ host: '127.0.0.1', port, path: '/v1/responses', method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'content-length': total } });
+  const response = new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; text: string }>((resolve, reject) => {
+    req.on('response', (res) => { const parts: Buffer[] = []; res.on('data', (c: Buffer) => parts.push(c)); res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, text: Buffer.concat(parts).toString() })); });
+    req.on('error', reject);
+  });
+  req.write(Buffer.alloc(first, 'a'));
+  return { response, finish: () => req.end(Buffer.alloc(total - first, 'a')), abort: () => req.destroy() };
+}
+const until = async (check: () => boolean, ms = 3_000): Promise<void> => { const deadline = Date.now() + ms; while (!check() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5)); assert.ok(check(), 'condition not reached in time'); };
+
+test('bodies held in flight share one budget: past it a request is turned away with a 429 that says so, and the budget comes back', async () => {
+  const budget = new BodyBudget(3 * MB);
+  let release: () => void = () => {}; const gate = new Promise<void>((r) => { release = r; });
+  let calls = 0;
+  const r = await rig((_req, res) => { calls++; void (calls === 1 ? gate : Promise.resolve()).then(() => ok(_req, res)); }, { limit: 2 * MB, budget });
+  try {
+    // The first request holds 2 MB while upstream sits on it.
+    const first = r.call(bodyOf(2 * MB));
+    await until(() => r.received.length === 1);
+    assert.equal(budget.used, 2 * MB);
+    // The second does not fit in the remaining 1 MB.
+    const second = await r.call(bodyOf(2 * MB));
+    assert.equal(second.status, 429);
+    assert.equal(second.headers.get('x-teamai-429-reason'), 'body_budget');
+    assert.equal(second.headers.get('retry-after'), '5');
+    const answer = await second.json() as { error: { type: string; message: string } };
+    assert.equal(answer.error.type, 'body_budget_exhausted');
+    assert.match(answer.error.message, /proxy\.maxInflightBodyMb/); assert.match(answer.error.message, /3145728 bytes/);
+    assert.deepEqual(r.received, [2 * MB], 'the refused body never went upstream');
+    assert.equal(budget.used, 2 * MB, 'the refused request gave back what it took');
+    const line = r.events.find((e) => / 429 body_budget /.test(e));
+    assert.ok(line, r.events.join(' | ')); assert.equal(line.includes('MARKER'), false);
+    // A small one still fits beside it.
+    const small = await r.call(bodyOf(MB / 2)); assert.equal(small.status, 200); await small.text();
+    release();
+    assert.equal((await first).status, 200);
+    await until(() => budget.used === 0);
+    // Once the first is done the same 2 MB fits again.
+    const again = await r.call(bodyOf(2 * MB)); assert.equal(again.status, 200); await again.text();
+    await until(() => budget.used === 0);
+  } finally { release(); r.close(); }
+});
+
+test('a body still uploading counts against the budget, and gives it back when the upload is abandoned', async () => {
+  const budget = new BodyBudget(1 * MB);
+  const r = await rig(ok, { limit: MB, budget });
+  try {
+    const slow = upload(r.port, MB, 3 * MB / 4);
+    slow.response.catch(() => {});
+    await until(() => budget.used === 3 * MB / 4);
+    // Declared too big for what is left: refused at once, before its body.
+    const refused = upload(r.port, MB / 2, 0); refused.finish();
+    const answer = await refused.response;
+    assert.equal(answer.status, 429); assert.equal(answer.headers['x-teamai-429-reason'], 'body_budget');
+    slow.abort();
+    await until(() => budget.used === 0);
+  } finally { r.close(); }
+});
+
+test('an over-limit body and a failed upstream give back their budget', async () => {
+  const budget = new BodyBudget(4 * MB);
+  const r = await rig((_req, res) => { res.writeHead(500); res.end('{}'); }, { limit: MB, budget });
+  try {
+    const over = await r.call(bodyOf(2 * MB)); assert.equal(over.status, 413); await over.text();
+    assert.equal(budget.used, 0);
+    const failed = await r.call(bodyOf(MB / 2)); assert.equal(failed.status, 500); await failed.text();
+    await until(() => budget.used === 0);
+  } finally { r.close(); }
+});
+
+test('proxy.maxInflightBodyMb: 1024 MB by default, never below proxy.maxBodyMb, and refused when invalid', () => {
+  assert.equal(DEFAULT_MAX_INFLIGHT_BODY_MB, 1024);
+  assert.equal(maxInflightBodyBytes(undefined, 512 * MB), 1024 * MB);
+  // A raised maxBodyMb with no budget set raises the default with it, so one
+  // body that the limit allows always fits.
+  assert.equal(maxInflightBodyBytes(undefined, 2048 * MB), 2048 * MB);
+  assert.equal(maxInflightBodyBytes(600, 512 * MB), 600 * MB);
+  assert.throws(() => maxInflightBodyBytes(256, 512 * MB), /proxy\.maxInflightBodyMb \(256\) must be at least proxy\.maxBodyMb \(512\)/);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '1024', null, 65537]) {
+    assert.throws(() => maxInflightBodyBytes(bad, MB), /proxy\.maxInflightBodyMb must be a number of megabytes above 0 and at most 65536/, String(bad));
+  }
 });
