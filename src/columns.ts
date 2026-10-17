@@ -4,6 +4,8 @@
 // truncates or measures a frame line goes through here, so a line built to be
 // `width` columns wide is exactly that wide on the screen and in the PNG.
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+const SGR_SPLIT = new RegExp(`(${String.fromCharCode(27)}\\[[0-9;]*m)`); const ANSI_ONE = new RegExp(`^${String.fromCharCode(27)}\\[[0-9;]*m$`);
+const ESC = String.fromCharCode(27); const RESET = `${ESC}[0m`;
 
 // East Asian Wide and Fullwidth ranges, plus the emoji blocks terminals draw
 // two cells wide. Ambiguous-width characters (box drawing, ●, …) count as one,
@@ -42,14 +44,118 @@ export function cellWidth(text: string): number {
   return width;
 }
 
-// Exactly `width` columns: padded with spaces, or cut with an ellipsis (and
-// its colours dropped, as before) when it does not fit. A wide character that
-// would straddle the edge is left out and the gap padded, never split.
+// Exactly `width` columns: padded with spaces, or cut with an ellipsis when it
+// does not fit. Colours up to the cut are kept (and closed after it), so a row
+// cut at the terminal's edge keeps its gauges. A wide character that would
+// straddle the edge is left out and the gap padded, never split.
 export function fit(text: string, width: number): string {
   if (width <= 0) return '';
   const used = cellWidth(text);
   if (used <= width) return text + ' '.repeat(width - used);
-  let out = ''; let taken = 0;
-  for (const char of stripAnsi(text)) { const w = charWidth(char); if (taken + w > width - 1) break; out += char; taken += w; }
-  return `${out}…${' '.repeat(Math.max(0, width - 1 - taken))}`;
+  let out = ''; let taken = 0; let coloured = false;
+  for (const part of text.split(SGR_SPLIT)) {
+    if (ANSI_ONE.test(part)) { out += part; coloured = true; continue; }
+    let full = false;
+    for (const char of part) { const w = charWidth(char); if (taken + w > width - 1) { full = true; break; } out += char; taken += w; }
+    if (full) break;
+  }
+  return `${out}${coloured ? RESET : ''}…${' '.repeat(Math.max(0, width - 1 - taken))}`;
+}
+
+// The usage grid every dashboard panel draws on — Claude and Codex accounts
+// and the other agents' boxes alike — so a gauge in one box sits directly
+// above the same kind of gauge in the next:
+//
+//   identity | session gauge | weekly gauge | extra gauge | tail
+//
+// The identity is account, plan, state and order on an account row (after the
+// route markers, cursor and next-account arrow) and the group name on another
+// agent's row; either way it is `id` columns wide. The first gauge is the
+// short session window (5h), the second the weekly one, the third whatever a
+// provider has beyond those — a model-scoped week, a month. A row without one
+// of them leaves that gauge blank at the same width. Narrower terminals get
+// narrower gauges and a shorter account name, and anything still too wide is
+// cut at the right edge — the same columns for every panel either way.
+export const SLOTS = 3;
+export const PLAN_WIDTH = 10; export const STATE_WIDTH = 8; export const ORDER_WIDTH = 5;
+
+export interface UsageLayout {
+  marks: number;
+  account: number;
+  id: number;
+  gauge: number;
+  // Start column of each gauge, then of the tail.
+  slots: number[];
+  tail: number;
+}
+
+// Gauge width depends on the terminal alone, so gauges can be drawn before
+// the rest of the layout is known.
+export const gaugeWidth = (width: number): number => width >= 132 ? 18 : width >= 120 ? 16 : 12;
+
+// `tail` is the widest tail any row draws; the account name gives up columns
+// (down to 10) so the tail fits before anything is cut at the edge.
+export function usageLayout(width: number, marks = 0, tail = 0): UsageLayout {
+  const gauge = gaugeWidth(width);
+  const fixed = marks + 3 + 1 + PLAN_WIDTH + 1 + STATE_WIDTH + 1 + ORDER_WIDTH;
+  const account = Math.max(10, Math.min(24, width - fixed - SLOTS * (gauge + 1) - (tail ? tail + 1 : 0)));
+  const id = fixed + account;
+  return { marks, account, id, gauge, slots: Array.from({ length: SLOTS }, (_, i) => id + 1 + i * (gauge + 1)), tail: id + SLOTS * (gauge + 1) + 1 };
+}
+
+// An account row's identity: `lead` is the route markers, cursor and arrow,
+// `marks + 2` columns; then account, plan, state and order.
+export interface AccountIdentity { lead: string; account: string; plan: string; state: string; order: string }
+
+// One row of the grid, kept as parts until every panel is collected, because
+// the account column's width depends on the widest tail in the whole frame.
+// `cells` holds a gauge (or a column title) per slot, or nothing for a blank
+// one; a single string instead spans all three, for a row with a note where
+// its gauges would be. `gaps` replaces the space in front of a slot — the
+// Fable arrow sits in the one before the third gauge.
+export interface GridRow {
+  identity: string | AccountIdentity;
+  cells: Array<string | null | undefined> | string;
+  tail?: string;
+  gaps?: string[];
+  dim?: boolean;
+}
+
+export function renderRow(layout: UsageLayout, row: GridRow): string {
+  const { identity, cells } = row;
+  let out = typeof identity === 'string' ? fit(identity, layout.id)
+    : `${fit(identity.lead, layout.marks + 2)} ${fit(identity.account, layout.account)} ${fit(identity.plan, PLAN_WIDTH)} ${fit(identity.state, STATE_WIDTH)} ${fit(identity.order, ORDER_WIDTH)}`;
+  if (typeof cells === 'string') out += ` ${fit(cells, SLOTS * (layout.gauge + 1) - 1)}`;
+  else for (let i = 0; i < SLOTS; i++) out += `${row.gaps?.[i] || ' '}${fit(cells[i] ?? '', layout.gauge)}`;
+  if (row.tail) out += ` ${row.tail}`;
+  return row.dim ? `${ESC}[90m${out}${RESET}` : out;
+}
+
+// Lay out every grid row of a frame on one shared layout; other lines pass
+// through untouched.
+export function layoutRows(width: number, marks: number, lines: Array<string | GridRow>): string[] {
+  const tail = Math.max(0, ...lines.map((line) => typeof line === 'string' ? 0 : cellWidth(line.tail ?? '')));
+  const layout = usageLayout(width, marks, tail);
+  return lines.map((line) => typeof line === 'string' ? line : renderRow(layout, line));
+}
+
+// Which gauge a quota window belongs in, by its length: up to a day is a
+// session window, up to a week the weekly one, anything longer an extra.
+export function slotOf(minutes: number | null | undefined): number | null {
+  if (!minutes) return null;
+  return minutes <= 1440 ? 0 : minutes <= 10_080 ? 1 : 2;
+}
+
+// Put windows into the three gauges by length; one of unknown length goes to
+// `fallback(index)`. Two windows wanting the same gauge: the later one takes
+// the next free gauge rather than being dropped.
+export function placeInSlots<T>(windows: T[], minutes: (window: T) => number | null | undefined, fallback: (index: number) => number): Array<T | undefined> {
+  const out: Array<T | undefined> = Array.from({ length: SLOTS });
+  windows.forEach((window, index) => {
+    let slot = Math.min(SLOTS - 1, slotOf(minutes(window)) ?? fallback(index));
+    while (slot < SLOTS && out[slot] !== undefined) slot++;
+    if (slot >= SLOTS) slot = out.findIndex((taken) => taken === undefined);
+    if (slot >= 0) out[slot] = window;
+  });
+  return out;
 }
