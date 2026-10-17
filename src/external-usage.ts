@@ -4,13 +4,16 @@
 //
 // Their credentials belong to those apps. They are read, used in memory for
 // one request, and never written anywhere: not to state.json, not to a log,
-// not into an error message, not onto a child process's command line. Grok's
-// sign-in is never refreshed. All three sources are undocumented, so an answer
-// of an unexpected shape becomes an 'error' row rather than a guess.
+// not into an error message, not onto a child process's command line. The one
+// exception is Grok's sign-in: when it is about to expire it is refreshed with
+// its own refresh token, the way the grok CLI does (src/grok-refresh.ts). All
+// three sources are undocumented, so an answer of an unexpected shape becomes
+// an 'error' row rather than a guess.
 import { execFile as execFileCallback } from 'node:child_process';
 import { readFile as readFileAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { grokExpiring, grokRefreshable, refreshGrokSignIn, type GrokRefreshDeps } from './grok-refresh.js';
 import { maskLabel } from './redact.js';
 import type { TeamAIConfig } from './types.js';
 
@@ -127,6 +130,7 @@ export interface CollectDeps {
   home?: string;
   now?: () => number;
   opencodeUrl?: string;
+  grokRefresh?: Omit<GrokRefreshDeps, 'fetch' | 'now'>;
 }
 
 const defaultExec = (command: string, args: string[], options: { timeout: number }): Promise<string> => new Promise((resolve, reject) => {
@@ -173,23 +177,31 @@ export async function collectOpencodeGo(deps: CollectDeps = {}): Promise<Externa
 }
 
 // The sign-in Grok's CLI keeps: the first auth.x.ai entry.
-function grokSignIn(auth: unknown): { key: string; userId: string | null; email: string | null; expiresAt: number | null } | null {
+function grokSignIn(auth: unknown): { name: string; entry: unknown; key: string; userId: string | null; email: string | null } | null {
   if (!auth || typeof auth !== 'object') return null;
-  const entry = Object.entries(auth as Record<string, unknown>).find(([name, value]) => name.startsWith('https://auth.x.ai::') && typeof field(value, 'key') === 'string')?.[1];
-  if (!entry) return null;
+  const [name, entry] = Object.entries(auth as Record<string, unknown>).find(([name, value]) => name.startsWith('https://auth.x.ai::') && typeof field(value, 'key') === 'string') ?? [];
+  if (!name || !entry) return null;
   const text = (key: string) => { const value = field(entry, key); return typeof value === 'string' && value ? value : null; };
-  return { key: text('key')!, userId: text('user_id'), email: text('email'), expiresAt: instant(field(entry, 'expires_at')) };
+  return { name, entry, key: text('key')!, userId: text('user_id'), email: text('email') };
 }
 
 export async function collectGrok(deps: CollectDeps = {}): Promise<ExternalUsage | null> {
   const env = deps.env ?? process.env; const home = deps.home ?? homedir(); const now = deps.now?.() ?? Date.now();
-  const auth = await readJson(deps, join(env.GROK_HOME || join(home, '.grok'), 'auth.json'));
+  const authPath = join(env.GROK_HOME || join(home, '.grok'), 'auth.json');
+  const auth = await readJson(deps, authPath);
   if (auth === undefined) return null;
-  const signIn = grokSignIn(auth);
+  let signIn = grokSignIn(auth);
   if (!signIn) return result('grok', 'signed-out', 'not signed in — run grok login', {}, now);
   const who = signIn.email ? maskLabel(signIn.email, 'partial', 0) : null;
-  // Treated as expired five minutes early; never refreshed from here.
-  if (signIn.expiresAt !== null && signIn.expiresAt - 5 * 60_000 <= now) return result('grok', 'expired', 'sign-in expired — run grok to refresh', { identity: who }, now);
+  // Treated as expired five minutes early, as the CLI does, and refreshed
+  // then; nothing is sent with an expiring token.
+  if (grokExpiring(signIn.entry, now)) {
+    if (!grokRefreshable(signIn.entry)) return result('grok', 'expired', 'sign-in expired — run grok to refresh', { identity: who }, now);
+    const refreshed = await refreshGrokSignIn(authPath, signIn.name, { ...deps.grokRefresh, fetch: deps.fetch, now: deps.now });
+    if (!refreshed.ok) return result('grok', 'expired', `sign-in expired — ${refreshed.reason}`, { identity: who }, now);
+    signIn = grokSignIn(refreshed.auth);
+    if (!signIn) return result('grok', 'signed-out', 'not signed in — run grok login', { identity: who }, now);
+  }
   const base = (env.GROK_CLI_CHAT_PROXY_BASE_URL || 'https://cli-chat-proxy.grok.com').replace(/\/+$/, '');
   const headers: Record<string, string> = { authorization: `Bearer ${signIn.key}`, 'x-xai-token-auth': 'xai-grok-cli', accept: 'application/json' };
   if (signIn.userId) headers['x-userid'] = signIn.userId;
