@@ -135,10 +135,8 @@ export async function runTui(): Promise<void> {
     else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); }
     else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; message = `Deleted ${account.label}`; await restartDaemon(); } mode = 'normal'; } }
     else if (mode === 'order') {
-      if (key === 'a' || key === 'c') { await mutate((account) => { account.priority = null; }); }
-      else if (key === '\x1b[A' || key === 'k') await mutate((account) => { account.priority = Math.max(1, (account.priority ?? 2) - 1); });
-      else if (key === '\x1b[B' || key === 'j') await mutate((account) => { account.priority = (account.priority ?? 0) + 1; });
-      else if (key === '\r') mode = 'normal';
+      const step = await pressOrderKey(selectedId, key);
+      if (step.saved) await restartDaemon(); else if (step.move) await move(step.move); else if (step.done) mode = 'normal';
     } else {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
@@ -196,6 +194,29 @@ export async function pressRouteKey(editor: RouteEditor, key: string, onSaving: 
     const reopened = openRouteEditor(await loadConfig(), save.provider, save.focus, `${save.notice} — ${describeReload(outcome)}`);
     return outcome.status === 'failed' ? { ...reopened, notice: undefined, warning: `${save.notice}: ${describeReload(outcome)}` } : reopened;
   } catch (error) { return { ...result.editor, phase: result.editor.phase === 'delete' ? 'list' : result.editor.phase, error: (error as Error).message }; }
+}
+
+// Priority mode ('o'). ←/→ (or h/l) take the selected account's priority one
+// step down or up — #1 is the floor, there is no ceiling, and from auto ← lands
+// on #1 and → on #1 — and a/c put it back to auto. ↑/↓ (or k/j) move to another
+// account without leaving the mode; Enter leaves it (Esc too, handled before
+// any mode). Each change is saved the moment it is made, and nothing is undone
+// on the way out. A key that would leave the value as it is (← at #1, a on
+// auto) writes nothing, so the relay is not restarted for it.
+export function orderKey(priority: number | null, key: string): { priority?: number | null; move?: -1 | 1; done?: true } {
+  const next = key === '\x1b[D' || key === 'h' ? Math.max(1, (priority ?? 2) - 1) : key === '\x1b[C' || key === 'l' ? (priority ?? 0) + 1 : key === 'a' || key === 'c' ? null : undefined;
+  if (next !== undefined) return next === priority ? {} : { priority: next };
+  return key === '\x1b[A' || key === 'k' ? { move: -1 } : key === '\x1b[B' || key === 'j' ? { move: 1 } : key === '\r' ? { done: true } : {};
+}
+
+// One key in priority mode against config.json: the change orderKey asks for
+// is written for the selected account (the first one when none is), and
+// `saved` says whether anything was, so the caller knows to restart the relay.
+export async function pressOrderKey(selectedId: string | null, key: string): Promise<{ saved: boolean; move?: -1 | 1; done?: true }> {
+  const config = await loadConfig(); const account = config.accounts.find((a) => a.credentialId === selectedId) || config.accounts[0];
+  const step = orderKey(account?.priority ?? null, key);
+  if (!account || step.priority === undefined) return { saved: false, move: step.move, done: step.done };
+  account.priority = step.priority; await saveConfig(config); return { saved: true };
 }
 
 async function restartDaemon(): Promise<void> {
