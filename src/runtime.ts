@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import type { Server } from 'node:http';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog } from './activity.js';
-import { createProxy, secureEqual } from './proxy.js';
+import { createProxy, maxBodyBytes, secureEqual } from './proxy.js';
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { handleRouteControl } from './route-control.js';
@@ -31,6 +31,9 @@ export function legacyPorts(config: TeamAIConfig, id: ProviderId): number[] {
 
 export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
+  // Checked before anything else: a bad limit is a startup error, not a relay
+  // that turns away every request or none.
+  const bodyLimit = maxBodyBytes(config.proxy.maxBodyMb);
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   const balance = config.routing?.balance ?? 'pacing';
@@ -72,7 +75,7 @@ export async function runServer(): Promise<void> {
   for (const pool of pools) {
     if (!pool.accounts.length) continue;
     const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
-    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity); servers.push(server);
+    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, bodyLimit); servers.push(server);
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
     // Past startup, a socket-level error must never end the process: the relay
     // is the only route its clients have, and killing it over one bad socket
@@ -88,7 +91,7 @@ export async function runServer(): Promise<void> {
     // Failures here are not fatal: a port taken by something else just means
     // that one legacy address is unavailable, not that the proxy cannot serve.
     for (const legacy of legacyPorts(config, pool.provider.id)) {
-      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity);
+      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, bodyLimit);
       try {
         await new Promise<void>((resolve, reject) => { alias.once('error', reject); alias.listen(legacy, config.proxy.host, () => { alias.removeListener('error', reject); resolve(); }); });
         servers.push(alias);

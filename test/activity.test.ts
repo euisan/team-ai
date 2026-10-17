@@ -23,7 +23,7 @@ function recorder() {
   return { events, calls, log, sink, ends: () => calls.filter((c) => c.startsWith('end:')) };
 }
 
-async function rig(handler: Handler, options: { accounts?: string[]; maxConcurrent?: number; capacity?: boolean; classify?: Provider['classifyFailure'] } = {}) {
+async function rig(handler: Handler, options: { accounts?: string[]; maxConcurrent?: number; capacity?: boolean; classify?: Provider['classifyFailure']; bodyLimit?: number } = {}) {
   const upstream = createServer((req, res) => { void handler(req, res); });
   await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
   const provider: Provider = {
@@ -37,7 +37,7 @@ async function rig(handler: Handler, options: { accounts?: string[]; maxConcurre
   const credentials = Object.fromEntries(ids.map((id) => [id, { accessToken: `secret-${id}`, refreshToken: null, expiresAt: null, accountId: id }]));
   const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: {} }, 0.98, options.maxConcurrent ?? 16);
   const rec = recorder();
-  const proxy = createProxy(pool, 'local-secret', () => {}, options.capacity ? () => pool.totalCapacity() : undefined, rec.sink);
+  const proxy = createProxy(pool, 'local-secret', () => {}, options.capacity ? () => pool.totalCapacity() : undefined, rec.sink, options.bodyLimit);
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
   const url = `http://127.0.0.1:${pa.port}/v1/responses`;
   const call = (body = '{}', signal?: AbortSignal) => fetch(url, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body, signal });
@@ -139,7 +139,7 @@ test('an upstream stream that breaks after the headers closes as cut', async () 
 
 test('refusals before dispatch still leave exactly one closed line', async () => {
   let release: () => void = () => {}; const gate = new Promise<void>((r) => { release = r; });
-  const r = await rig(async (req, res) => { await drain(req); await gate; res.writeHead(200); res.end('ok'); }, { maxConcurrent: 1, capacity: true });
+  const r = await rig(async (req, res) => { await drain(req); await gate; res.writeHead(200); res.end('ok'); }, { maxConcurrent: 1, capacity: true, bodyLimit: 32 * 1024 * 1024 });
   try {
     const first = r.call();
     await until(() => r.pool.inFlightProxied === 1);
