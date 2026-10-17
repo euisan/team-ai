@@ -210,7 +210,7 @@ function externalBox(usage: ExternalUsage, width: number, gauge: number): Array<
     out.push({ identity: '  group', cells: titles, dim: true });
     for (const group of usage.groups) {
       const gauges = placed.get(group)!.map((w) => w && bar(w.usedPercent === null ? null : w.usedPercent / 100, w.resetsAt, gauge));
-      out.push({ identity: `  ${name(group.name)}`, cells: gauges, tail: age(usage.lastOkAt) });
+      out.push({ identity: `  ${name(group.name)}`, cells: gauges, tail: [age(usage.lastOkAt)] });
     }
     if (problem) out.push(color(90, `  refresh failed — showing cached data (${problem})`));
   } else out.push(color(90, `  ${problem ?? (usage.measuredAt ? 'no usage data' : 'not measured yet')}`));
@@ -321,18 +321,18 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       // Weekly progress against the straight line: -30%p is behind (goes
       // first), +12%p ahead. Blank without a weekly window that resets later.
       const pace = formatDeviation(pacingDeviation(saved?.windows || {}, false, Date.now()));
-      const paceText = pace ? ` ${color(90, pace)}` : '';
+      const paceText = pace ? color(90, pace) : '';
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
         const gauges = [bar(session?.usage, session?.resetsAt, barWidth), bar(weekly?.usage, weekly?.resetsAt, barWidth), bar(fable?.usage, fable?.resetsAt, barWidth)];
-        lines.push({ identity: head, cells: gauges, tail: `~${renewColored} ${age(saved?.measuredAt)}${paceText}`, gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
+        lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText, `~${renewColored}`], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
       } else {
         const shown = codexSlots(account);
         // Reset credits on hand, when the usage endpoint has counted some.
-        const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? ` ${color(36, `RC${saved.resetCredits}`)}` : '';
+        const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? color(36, `RC${saved.resetCredits}`) : '';
         lines.push(shown.some(Boolean)
-          ? { identity: head, cells: shown.map((window) => window && bar(window.usage, window.resetsAt, barWidth)), tail: `${age(saved?.measuredAt)}${paceText}${credits}` }
-          : { identity: head, cells: color(90, 'no quota data yet'), tail: credits.trimStart() });
+          ? { identity: head, cells: shown.map((window) => window && bar(window.usage, window.resetsAt, barWidth)), tail: [age(saved?.measuredAt), paceText, credits] }
+          : { identity: head, cells: color(90, 'no quota data yet'), tail: ['', '', credits] });
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));

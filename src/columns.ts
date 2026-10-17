@@ -87,20 +87,25 @@ export interface UsageLayout {
   // Start column of each gauge, then of the tail.
   slots: number[];
   tail: number;
+  // Width of each tail field: measured age, pacing deviation, then the
+  // provider's extra (Claude's ~D-n, Codex's RC<n>).
+  fields: number[];
 }
 
 // Gauge width depends on the terminal alone, so gauges can be drawn before
 // the rest of the layout is known.
 export const gaugeWidth = (width: number): number => width >= 132 ? 18 : width >= 120 ? 16 : 12;
 
-// `tail` is the widest tail any row draws; the account name gives up columns
-// (down to 10) so the tail fits before anything is cut at the edge.
-export function usageLayout(width: number, marks = 0, tail = 0): UsageLayout {
-  const gauge = gaugeWidth(width);
+// `fields` are the widest of each tail field any row draws; the account name
+// gives up columns (down to 10) so the tail fits before anything is cut at
+// the edge. A field no row uses takes no room.
+export function usageLayout(width: number, marks = 0, fields: number[] = []): UsageLayout {
+  const gauge = gaugeWidth(width); const used = fields.filter((field) => field > 0);
+  const tail = used.length ? used.reduce((sum, field) => sum + field, 0) + used.length - 1 : 0;
   const fixed = marks + 3 + 1 + PLAN_WIDTH + 1 + STATE_WIDTH + 1 + ORDER_WIDTH;
   const account = Math.max(10, Math.min(24, width - fixed - SLOTS * (gauge + 1) - (tail ? tail + 1 : 0)));
   const id = fixed + account;
-  return { marks, account, id, gauge, slots: Array.from({ length: SLOTS }, (_, i) => id + 1 + i * (gauge + 1)), tail: id + SLOTS * (gauge + 1) + 1 };
+  return { marks, account, id, gauge, slots: Array.from({ length: SLOTS }, (_, i) => id + 1 + i * (gauge + 1)), tail: id + SLOTS * (gauge + 1) + 1, fields };
 }
 
 // An account row's identity: `lead` is the route markers, cursor and arrow,
@@ -112,11 +117,13 @@ export interface AccountIdentity { lead: string; account: string; plan: string; 
 // `cells` holds a gauge (or a column title) per slot, or nothing for a blank
 // one; a single string instead spans all three, for a row with a note where
 // its gauges would be. `gaps` replaces the space in front of a slot — the
-// Fable arrow sits in the one before the third gauge.
+// Fable arrow sits in the one before the third gauge. `tail` holds the
+// fields after the gauges, in order — age, pace, extra — each drawn at the
+// same column in every row, blank where a row has none.
 export interface GridRow {
   identity: string | AccountIdentity;
   cells: Array<string | null | undefined> | string;
-  tail?: string;
+  tail?: string[];
   gaps?: string[];
   dim?: boolean;
 }
@@ -127,15 +134,17 @@ export function renderRow(layout: UsageLayout, row: GridRow): string {
     : `${fit(identity.lead, layout.marks + 2)} ${fit(identity.account, layout.account)} ${fit(identity.plan, PLAN_WIDTH)} ${fit(identity.state, STATE_WIDTH)} ${fit(identity.order, ORDER_WIDTH)}`;
   if (typeof cells === 'string') out += ` ${fit(cells, SLOTS * (layout.gauge + 1) - 1)}`;
   else for (let i = 0; i < SLOTS; i++) out += `${row.gaps?.[i] || ' '}${fit(cells[i] ?? '', layout.gauge)}`;
-  if (row.tail) out += ` ${row.tail}`;
+  const tail = layout.fields.flatMap((field, i) => field > 0 ? [fit(row.tail?.[i] ?? '', field)] : []).join(' ');
+  if (tail.trim()) out += ` ${tail}`;
   return row.dim ? `${ESC}[90m${out}${RESET}` : out;
 }
 
 // Lay out every grid row of a frame on one shared layout; other lines pass
 // through untouched.
 export function layoutRows(width: number, marks: number, lines: Array<string | GridRow>): string[] {
-  const tail = Math.max(0, ...lines.map((line) => typeof line === 'string' ? 0 : cellWidth(line.tail ?? '')));
-  const layout = usageLayout(width, marks, tail);
+  const rows = lines.filter((line): line is GridRow => typeof line !== 'string');
+  const fields = Array.from({ length: Math.max(0, ...rows.map((row) => row.tail?.length ?? 0)) }, (_, i) => Math.max(0, ...rows.map((row) => cellWidth(row.tail?.[i] ?? ''))));
+  const layout = usageLayout(width, marks, fields);
   return lines.map((line) => typeof line === 'string' ? line : renderRow(layout, line));
 }
 
