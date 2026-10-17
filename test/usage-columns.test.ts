@@ -21,7 +21,7 @@ const external = (provider: string, identity: string | null, groups: unknown[]) 
 const state = {
   version: 1,
   accounts: {
-    'cred-alice@example.com': { ...measured, usage: 0.4, resetsAt: null, windows: { '5h': { usage: 0.42, resetsAt: now + 3 * h }, '7d': { usage: 0.61, resetsAt: now + 2 * d }, '7d_oi': { usage: 0.35, resetsAt: now + 2 * d } } },
+    'cred-alice@example.com': { ...measured, usage: 0.4, resetsAt: null, profile: { hasClaudeMax: true, status: 'active', createdAt: '2026-01-29T00:00:00Z' }, windows: { '5h': { usage: 0.42, resetsAt: now + 3 * h }, '7d': { usage: 0.61, resetsAt: now + 2 * d }, '7d_oi': { usage: 0.35, resetsAt: now + 2 * d } } },
     'cred-김철수.아주긴주소@example.com': { ...measured, usage: 0.9, resetsAt: null, windows: { '5h': { usage: 0.93, resetsAt: now + h }, '7d': { usage: 0.2, resetsAt: now + 5 * d }, '7d_oi': { usage: 0.1, resetsAt: now + 5 * d } } },
     'cred-carol@example.com': { ...measured, usage: 0.3, resetsAt: null, resetCredits: 2, windows: { primary: { usage: 0.3, resetsAt: now + 2 * h, minutes: 300 }, secondary: { usage: 0.75, resetsAt: now + 4 * d, minutes: 10080 } } },
     'cred-dave@example.com': { ...measured, usage: 0.1, resetsAt: null, windows: { primary: { usage: 0.1, resetsAt: now + 6 * d, minutes: 10080 } } },
@@ -160,5 +160,17 @@ test('the PNG capture keeps the same gauge columns as the text frame', () => {
         assert.deepEqual(pixel(start - 1, index), [...BACKGROUND], `width ${width} row ${index}: nothing painted just before the gauge`);
       }
     });
+  }
+});
+
+test('the tail fields — age, pace, RC / ~D-n — each start in one column across panels', () => {
+  for (const width of [120, 160, 200]) {
+    const lines = frame(width);
+    const ages = ['alice@', '김철수', 'carol@', 'dave@', 'Gemini 3 Pro', 'Gemini 4 Argon', '제미니', 'OpenCode Go (env)', 'Grok SuperGrok'].map((needle) => columnOf(row(lines, needle), '14m ago'));
+    assert.equal(new Set(ages).size, 1, `width ${width}: age columns ${ages}`);
+    const paces = (['alice@', '김철수', 'carol@', 'dave@'] as const).map((needle) => columnOf(row(lines, needle), stripAnsi(row(lines, needle)).match(/[+-]\d+%p/)![0]));
+    assert.equal(new Set(paces).size, 1, `width ${width}: pace columns ${paces}`);
+    assert.ok(paces[0]! > ages[0]!);
+    assert.equal(columnOf(row(lines, 'carol@'), 'RC2'), columnOf(row(lines, 'alice@'), '~D-'), `width ${width}: RC and ~D-n share the extra column`);
   }
 });
