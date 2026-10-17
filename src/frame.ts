@@ -2,7 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
-import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, type GridRow } from './columns.js';
+import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, usageLayout, type GridRow } from './columns.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
@@ -83,6 +83,14 @@ function windowLabel(minutes: number | null | undefined, fallback: string): stri
   if (minutes % 1440 === 0) return `${minutes / 1440}d`;
   if (minutes % 60 === 0) return `${minutes / 60}h`;
   return `${minutes}m`;
+}
+
+// A Codex account's windows in the three gauges: a 5h limit in the session
+// gauge, a 1w limit in the weekly one, whichever ChatGPT sends it as; a window
+// of unknown length keeps its primary/secondary place.
+function codexWindows(state: PersistedState, account: StoredAccount) {
+  const saved = state.accounts[account.credentialId];
+  return placeInSlots([saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow), (window) => window!.minutes, (index) => index);
 }
 
 // What the account order depends on in config: routing.balance and the Fable
@@ -219,7 +227,7 @@ function externalBox(usage: ExternalUsage, width: number, gauge: number): Array<
   return out;
 }
 
-export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits' | 'routes';
+export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits' | 'routes' | 'help';
 
 // The reset-credit picker ('t' on a Codex row): the tickets on one account and
 // where the operator is in choosing and confirming one.
@@ -241,7 +249,10 @@ function pickerLines(picker: CreditPicker, width: number): string[] {
   const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
   if (picker.phase === 'loading') out.push(color(90, '  Loading…'));
   else if (!picker.items.length) out.push(color(90, '  No reset credits available'));
-  else picker.items.forEach((item, i) => out.push(`${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', 28)} granted ${stamp(item.grantedAt)}  expires ${stamp(item.expiresAt)}`));
+  // Narrower than the wide layout, a ticket is its title and when it expires.
+  else picker.items.forEach((item, i) => out.push(width < NARROW_WIDTH
+    ? `${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', Math.max(4, width - 18))} exp ${stamp(item.expiresAt)}`
+    : `${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', 28)} granted ${stamp(item.grantedAt)}  expires ${stamp(item.expiresAt)}`));
   if (picker.phase === 'applying') out.push(color(33, '  Applying…'));
   if (picker.phase === 'done') out.push(`  Result: ${picker.result ?? 'error'}`);
   out.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
@@ -262,15 +273,41 @@ export interface FrameView {
   routes?: RouteEditor;
 }
 
+// Every key the normal screen takes, as the footer names them. The wide footer
+// spells them out in one line; a narrow one shows what fits and leaves the
+// rest to the '?' list.
+function normalKeys(codexSelected: boolean, sortByHeadroom: boolean): string[] {
+  return ['1 Claude', '2 Codex', '↑↓ select', 's switch', 'e enable', 'o order', 'd delete', 'a add', ...(codexSelected ? ['t credits'] : []), 'p capture', 'R Reload', `c ${sortByHeadroom ? 'quota' : 'config'}-sort`, 'g routes', 'q quit'];
+}
+
+// Hints packed into as few lines of `width` as they fit, two spaces apart.
+function packHints(hints: string[], width: number): string[] {
+  const out: string[] = []; let line = '';
+  for (const hint of hints) {
+    const next = line ? `${line}  ${hint}` : ` ${hint}`;
+    if (line && visible(next) > width) { out.push(line); line = ` ${hint}`; } else line = next;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+// The '?' list: every key, in either layout.
+function helpLines(keys: string[], width: number): string[] {
+  const title = ' Keys ';
+  return [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`), ...packHints([...keys, '? this list'], width), color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`)];
+}
+
 export function buildFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
   const { width, height, selectedId, mode, message, sortByHeadroom } = view;
+  // The route markers widen the identity column by the larger provider's
+  // route count, so both account boxes keep their gauges in line.
+  const markWidth = Math.max(0, ...(['claude', 'codex'] as const).map((provider) => (state.routes || []).filter((route) => route.provider === provider).length));
+  if (isNarrow(width, markWidth)) return buildNarrowFrame(config, state, view);
   const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, orderOptions(config));
   const lines: Array<string | GridRow> = [];
   // One column layout for every panel below (see columns.ts): the account
   // boxes and the other agents' boxes are collected as grid rows and laid out
-  // together. The route markers widen the identity column by the larger
-  // provider's route count, so both account boxes keep their gauges in line.
-  const markWidth = Math.max(0, ...(['claude', 'codex'] as const).map((provider) => (state.routes || []).filter((route) => route.provider === provider).length));
+  // together.
   const barWidth = gaugeWidth(width);
   const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
   const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
@@ -282,13 +319,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     // Column titles: the rows are dense and every field below is an
     // abbreviation, so name them once per section rather than expecting the
     // reader to infer what "auto" or a bare percentage refers to.
-    // Codex windows go to the gauge their length says — a 5h limit to the
-    // session gauge, a 1w limit to the weekly one, whichever ChatGPT sends it
-    // as — and a window of unknown length keeps its primary/secondary place.
-    const codexSlots = (account: StoredAccount) => {
-      const saved = state.accounts[account.credentialId];
-      return placeInSlots([saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow), (window) => window!.minutes, (index) => index);
-    };
+    const codexSlots = (account: StoredAccount) => codexWindows(state, account);
     // Codex titles follow whatever windows are actually in play for this
     // section, so the header never advertises a gauge that no row renders.
     // Window lengths vary by account, so the title carries the span the rows
@@ -350,6 +381,9 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   }
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
+  // 't' only does something on a Codex row, so it is only offered there.
+  const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
+  if (mode === 'help') lines.push(...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
   const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push('');
   const active = state.active || [];
   const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
@@ -358,15 +392,224 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   lines.push(...activityLines(active, state.events || [], activityRows, { sessionIds: config.activity?.sessionIds !== false, models: config.activity?.models !== false }, tint));
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
-  // 't' only does something on a Codex row, so it is only offered there.
-  const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
-  const footer = mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  ${codexSelected ? 't credits  ' : ''}p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  g routes  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
-    : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
-    : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
+  const footer = modeFooter(view, codexSelected);
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';
   lines.push(status && visible(footer) + visible(status) > width ? `${fit(footer, Math.max(0, width - visible(status)))}${status}` : fit(`${footer}${status}`, width));
   const drawn = layoutRows(width, markWidth, lines);
-  return (height === undefined ? drawn : drawn.slice(0, height)).map((line) => fit(line, width));
+  // Too short for everything: the rule and footer stay, the body gives way.
+  return (height === undefined || drawn.length <= height ? drawn : [...drawn.slice(0, Math.max(0, height - 2)), ...drawn.slice(-Math.min(2, height))]).map((line) => fit(line, width));
+}
+
+function modeFooter(view: FrameView, codexSelected: boolean): string {
+  const { mode } = view;
+  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'normal' ? ` ${normalKeys(codexSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
+    : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
+    : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
+}
+
+// ── The narrow layout ───────────────────────────────────────────────────────
+// A phone looking at the same terminal is 40–60 columns wide. The wide grid
+// cannot draw there: identity (29 columns plus a 10-column account name plus
+// the route markers) and three 12-column gauges need 78 columns before the
+// third gauge is cut, and below that every row is cut mid-gauge. So under
+// NARROW_WIDTH, or wherever the grid would not fit, the screen is a summary:
+// one line per account and per usage group, an activity log of one line per
+// request, and a footer of the keys that fit.
+export const NARROW_WIDTH = 80;
+export const isNarrow = (width: number, marks = 0): boolean => width < Math.max(NARROW_WIDTH, usageLayout(0, marks).tail - 1);
+
+// One quota window on a narrow row: its short name, how much is spent, and
+// when it resets.
+interface Reading { label: string; usage: number | null | undefined; resetsAt: number | null | undefined }
+interface NarrowRow { lead: string; name: string; tint?: number; cells: Array<Reading | undefined>; note?: string }
+interface NarrowLayout { name: number; label: number; gauge: number; cells: number; reset: boolean }
+const RESET_WIDTH = 5;
+// A reset time in at most five columns: 59m, 2h10m, 23h, 3d8h, 13d.
+function shortDuration(reset: number | null | undefined): string {
+  const text = duration(reset); return text.length <= RESET_WIDTH ? text : text.replace(/^(\d+[hd]).*$/, '$1');
+}
+
+// The richest row that still leaves the name 10 columns: short gauges, then
+// numbers only, then the third window (Claude's Fable week, a 30-day limit)
+// goes, then the reset time. Below that the name takes what is left. One
+// layout for the whole frame, so every panel's numbers line up.
+function narrowLayout(width: number, label: number, needed: number): NarrowLayout {
+  const cellWidth = (gauge: number): number => 1 + label + 1 + Math.max(4, gauge);
+  const tries: Array<[number, number, boolean]> = [[8, 3, true], [6, 3, true], [0, 3, true], [0, 2, true], [0, 2, false]];
+  for (const [gauge, cells, reset] of tries) {
+    const shown = Math.min(cells, needed);
+    const name = width - 2 - shown * cellWidth(gauge) - (reset ? 1 + RESET_WIDTH : 0);
+    if (name >= 10) return { name, label, gauge, cells: shown, reset };
+  }
+  const cells = Math.min(2, needed);
+  return { name: Math.max(1, width - 2 - cells * cellWidth(0)), label, gauge: 0, cells, reset: false };
+}
+
+function narrowValue(reading: Reading, gauge: number): string {
+  if (gauge) return bar(reading.usage, null, gauge);
+  if (reading.usage == null) return color(90, '   -');
+  const ratio = Math.max(0, Math.min(1, reading.usage));
+  return color(ratio >= 0.9 ? 31 : ratio >= 0.7 ? 33 : 32, `${Math.round(ratio * 100)}%`.padStart(4));
+}
+
+function narrowRow(layout: NarrowLayout, row: NarrowRow): string {
+  let out = `${fit(row.lead, 2)}${fit(row.tint ? color(row.tint, row.name) : row.name, layout.name)}`;
+  const span = layout.cells * (1 + layout.label + 1 + Math.max(4, layout.gauge)) + (layout.reset ? 1 + RESET_WIDTH : 0);
+  if (row.note) return `${out} ${fit(color(90, row.note), span - 1)}`;
+  const shown = row.cells.slice(0, layout.cells);
+  // Name and figure together, right-aligned, so the % signs line up.
+  for (const reading of shown) {
+    const cell = reading ? `${reading.label.slice(0, layout.label)} ${narrowValue(reading, layout.gauge)}` : '';
+    out += ` ${' '.repeat(Math.max(0, layout.label + 1 + Math.max(4, layout.gauge) - visible(cell)))}${cell}`;
+  }
+  out += ' '.repeat(Math.max(0, layout.cells - shown.length) * (1 + layout.label + 1 + Math.max(4, layout.gauge)));
+  if (layout.reset) {
+    // The reset that matters is the most-spent window's: that is when the
+    // account gets room back.
+    const binding = shown.filter((reading): reading is Reading => Boolean(reading?.resetsAt && reading.resetsAt > Date.now()))
+      .sort((a, b) => (b.usage ?? -1) - (a.usage ?? -1))[0];
+    out += ` ${fit(color(90, binding ? shortDuration(binding.resetsAt) : ''), RESET_WIDTH)}`;
+  }
+  return out;
+}
+
+const rule = (title: string, width: number): string => { const head = visible(`─ ${title} `) > width ? fit(`─ ${title} `, width) : `─ ${title} `; return color(36, `${head}${'─'.repeat(Math.max(0, width - visible(head)))}`); };
+const hhmm = (at: number): string => color(90, new Date(at).toLocaleTimeString('en-GB').slice(0, 5));
+
+// One line per request, never wrapped: time, session, provider (C/X),
+// status — seconds so far while in flight — and the account, cut to fit.
+function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: number, width: number, sessions: boolean): string[] {
+  const now = Date.now(); const spin = SPINNER[Math.floor(now / 500) % SPINNER.length]!;
+  const shownActive = active.slice(0, rows); const shownEvents = [...events].reverse().slice(0, Math.max(0, rows - shownActive.length));
+  const tagged = sessions && [...shownActive, ...shownEvents.map((e) => e.request)].some((r) => r?.sessionId);
+  const tag = (id: string | null | undefined): string => tagged ? `${id ? sessionTag(id) : ' '.repeat(6)} ` : '';
+  const who = (provider: string): string => provider === 'claude' ? 'C' : provider === 'codex' ? 'X' : provider.slice(0, 1).toUpperCase();
+  const out = shownActive.map((entry) => {
+    const seconds = Math.max(0, Math.round((now - entry.startedAt) / 1000));
+    const elapsed = (seconds < 100 ? `${seconds}s` : `${Math.round(seconds / 60)}m`).padStart(3);
+    return fit(`${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.account ?? ''}`, width);
+  });
+  for (const event of shownEvents) {
+    const request = event.request;
+    if (!request) { out.push(fit(` ${hhmm(event.at)} ${event.message}`, width)); continue; }
+    const failed = typeof request.status !== 'number' || request.status >= 400;
+    const status = String(request.status).padStart(3);
+    out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.account ?? ''}`, width));
+  }
+  return out;
+}
+
+// A line and how much it matters. When the terminal is too short for all of
+// them the lowest rank goes first, from the bottom up, so what is left is
+// still in screen order: the account the next request would use (and the
+// selected one) outlasts everything, then the provider rules, the footer, an
+// open editor, the other accounts, the header, the first activity lines
+// (then the Activity rule over them, which says nothing on its own), the
+// other agents, and last the rest of the activity log.
+const RANK = { current: 100, provider: 90, message: 80, footer: 70, overlay: 60, account: 50, header: 45, activity: 40, activityTitle: 39, external: 30, log: 20 } as const;
+interface Ranked { text: string | NarrowRow; rank: number }
+
+function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
+  const { width, height, selectedId, mode, message, sortByHeadroom } = view;
+  const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, orderOptions(config));
+  const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow>): void => { for (const text of texts) lines.push({ text, rank }); };
+  const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
+  const headerLeft = color(1, ' TeamAI');
+  const headerRight = [`${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount} `, `${color(32, '●')} Claude ${claudeCount}  Codex ${codexCount} `, `${color(32, '●')} C${claudeCount} X${codexCount} `]
+    .find((right) => visible(headerLeft) + 1 + visible(right) <= width) ?? '';
+  push(RANK.header, `${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`);
+
+  for (const provider of ['claude', 'codex'] as const) {
+    const group = ordered.filter((account) => account.provider === provider); if (!group.length) continue;
+    const next = state.next?.[provider];
+    // The ► account is always drawn; with no preview yet, the top row is the
+    // best guess. The selected row stays too, so s/e/d act on something seen.
+    const current = group.find((account) => account.credentialId === next?.general) ?? group[0]!;
+    const rows = group.map((account): Ranked => {
+      const saved = state.accounts[account.credentialId]; const windows = saved?.windows || {};
+      const cursor = account.credentialId === selectedId ? color(36, '>') : ' ';
+      const arrow = next?.general === account.credentialId ? color(32, '►') : next?.fable === account.credentialId ? color(35, '►') : ' ';
+      const tint = !account.enabled ? 90 : saved?.error ? 31 : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? 33 : undefined;
+      const fable = windows['7d_oi'] || Object.entries(windows).find(([name]) => name.startsWith('7d_'))?.[1];
+      const cells: Array<Reading | undefined> = provider === 'claude'
+        ? [{ label: '5h', ...pick(windows['5h']) }, { label: '7d', ...pick(windows['7d']) }, { label: 'F', ...pick(fable) }]
+        : codexWindows(state, account).map((window, slot) => window && { label: windowLabel(window.minutes, ['5h', '7d', '+'][slot]!), usage: window.usage, resetsAt: window.resetsAt });
+      const row: NarrowRow = provider === 'codex' && !cells.some(Boolean) ? { lead: `${cursor}${arrow}`, name: account.label, tint, cells, note: 'no quota data yet' } : { lead: `${cursor}${arrow}`, name: account.label, tint, cells };
+      return { text: row, rank: account === current || account.credentialId === selectedId ? RANK.current : RANK.account };
+    });
+    push(RANK.provider, rule(`${provider === 'claude' ? 'Claude' : 'Codex'} ${group.length}`, width));
+    lines.push(...rows);
+  }
+
+  // 't' only does something on a Codex row, so it is only offered there.
+  const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
+  if (mode === 'credits' && view.credits) push(RANK.overlay, ...pickerLines(view.credits, width));
+  if (mode === 'routes' && view.routes) push(RANK.overlay, ...routeEditorLines(view.routes, width));
+  if (mode === 'help') push(RANK.overlay, ...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
+
+  // Other agents: one line per usage group under one rule, a provider's
+  // groups kept or dropped together. The group names (Gemini …, OpenCode Go,
+  // Grok) already say whose they are. A group still showing cached figures
+  // after a failed refresh is yellow.
+  let externalRank: number = RANK.external; let ruled = false;
+  for (const provider of EXTERNAL_PROVIDERS) {
+    const usage = state.external?.[provider]; if (!usage) continue;
+    if (!ruled) { push(RANK.external, rule('Other agents', width)); ruled = true; }
+    const problem = usage.status === 'ok' ? null
+      : usage.status === 'signed-out' ? (usage.note ?? 'not signed in') : usage.status === 'expired' ? (usage.note ?? 'sign-in expired')
+      : usage.status === 'unavailable' ? (usage.note ?? 'usage unavailable') : `${usage.note ?? 'error'}`;
+    const rows: NarrowRow[] = usage.groups.map((group) => ({
+      lead: '  ', name: group.name, tint: problem ? 33 : undefined,
+      cells: placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1).map((w) => w && { label: windowLabel(w.minutes, w.label), usage: w.usedPercent === null ? null : w.usedPercent / 100, resetsAt: w.resetsAt }),
+    }));
+    if (!rows.length) rows.push({ lead: '  ', name: EXTERNAL_TITLES[provider], cells: [], note: problem ?? (usage.measuredAt ? 'no usage data' : 'not measured yet') });
+    push(externalRank--, ...rows);
+  }
+
+  const active = state.active || [];
+  push(RANK.activityTitle, rule(`Activity${active.length ? ` ${active.length} active` : ''}`, width));
+  const log = narrowActivity(active, state.events || [], height === undefined ? 8 : Math.max(0, height), width, config.activity?.sessionIds !== false);
+  log.forEach((line, i) => push(i < 2 ? RANK.activity : RANK.log, line));
+  // Where blank lines go when the log is shorter than the screen.
+  const pad: Ranked = { text: '', rank: 0 }; lines.push(pad);
+
+  // Keys: in the normal screen what fits, with '?' for the rest; in any
+  // other mode the hints that fit, the rest above the footer.
+  // Moving, switching and enabling come first: they are what a glance from
+  // a phone is for.
+  const first = ['↑↓ select', 's switch', 'e enable', 'q quit'];
+  const footerKeys = mode === 'normal' ? [...first, ...normalKeys(codexSelected, sortByHeadroom).filter((key) => !first.includes(key))] : modeFooter(view, codexSelected).trim().split(/\s{2,}/);
+  const help = mode === 'normal' ? '? help' : '';
+  let footer = ''; const left: string[] = [];
+  for (const key of footerKeys) {
+    const next = footer ? `${footer}  ${key}` : ` ${key}`;
+    if (!left.length && visible(next) + (help ? 2 + visible(help) : 0) <= width) footer = next; else left.push(key);
+  }
+  if (help && left.length) footer = footer ? `${footer}  ${help}` : ` ${help}`;
+  if (!help && left.length) push(RANK.overlay, ...packHints(left, width).map((line) => color(90, line)));
+  if (message) push(RANK.message, ` ${message}`);
+  push(RANK.footer, footer);
+
+  // Drop what the height cannot hold, then pad below the activity log.
+  if (height !== undefined) {
+    while (lines.length > height) {
+      const lowest = Math.min(...lines.map((line) => line.rank));
+      lines.splice(lines.map((line) => line.rank).lastIndexOf(lowest), 1);
+    }
+  }
+  if (height !== undefined && lines.includes(pad)) lines.splice(lines.indexOf(pad), 1, ...Array.from({ length: height - lines.length + 1 }, () => ({ text: '', rank: 0 })));
+  else if (lines.includes(pad)) lines.splice(lines.indexOf(pad), 1);
+  const rows = lines.map((line) => line.text);
+  const readings = rows.filter((row): row is NarrowRow => typeof row !== 'string' && !row.note);
+  const label = Math.max(2, ...readings.flatMap((row) => row.cells.map((cell) => cell ? Math.min(3, visible(cell.label)) : 0)));
+  const needed = Math.max(1, ...readings.map((row) => row.cells.reduce((last, cell, i) => cell ? i + 1 : last, 0)));
+  const layout = narrowLayout(width, label, needed);
+  const drawn = rows.map((row) => typeof row === 'string' ? row : narrowRow(layout, row));
+  return drawn.map((line) => fit(line, width));
+}
+
+function pick(window: { usage: number | null; resetsAt: number | null } | undefined): { usage: number | null; resetsAt: number | null } {
+  return { usage: window?.usage ?? null, resetsAt: window?.resetsAt ?? null };
 }
