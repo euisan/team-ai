@@ -43,6 +43,10 @@ export interface TeamAIConfig {
   // is not consumed by Opus/Sonnet requests that any account could serve.
   // 1 disables the split and restores plain least-spent routing.
   fableReserveThreshold?: number;
+  // How accounts of equal priority are ordered: 'pacing' (default) puts the
+  // account furthest behind a straight weekly line first; 'level' the one with
+  // the emptiest windows, in 10% steps. See src/pacing.ts.
+  routing?: { balance?: 'pacing' | 'level' };
   // Model routes per provider; see src/routes.ts.
   routes?: Partial<Record<ProviderId, RouteConfig[]>>;
   // Usage of other agents installed here (Antigravity, OpenCode Go, Grok),

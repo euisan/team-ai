@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFrame, displayOrder } from '../src/frame.js';
+import { buildFrame, displayOrder, type OrderOptions } from '../src/frame.js';
+
+const LEVEL: OrderOptions = { balance: 'level', fableReserve: 0.8 };
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
 function account(provider: 'claude' | 'codex', label: string, priority: number | null = null): StoredAccount {
@@ -22,7 +24,7 @@ test('display order groups providers even when config interleaves them', () => {
 test('display order ranks least-spent first, unmeasured last, pinned priority ahead of all', () => {
   const config = [account('claude', 'spent@example.com'), account('claude', 'unknown@example.com'), account('claude', 'fresh@example.com'), account('claude', 'pinned@example.com', 1)];
   const state = usage({ 'spent@example.com': 1, 'unknown@example.com': null, 'fresh@example.com': 0.2, 'pinned@example.com': 0.9 });
-  const ordered = displayOrder(config, state, true);
+  const ordered = displayOrder(config, state, true, LEVEL);
   assert.deepEqual(ordered.map((a) => a.label), ['pinned@example.com', 'fresh@example.com', 'spent@example.com', 'unknown@example.com']);
 });
 
@@ -32,7 +34,7 @@ test('display order ranks least-spent first, unmeasured last, pinned priority ah
 test('stepping by index through display order visits adjacent drawn rows', () => {
   const config = [account('claude', 'b@example.com'), account('codex', 'z@example.com'), account('claude', 'a@example.com')];
   const state = usage({ 'b@example.com': 0.8, 'a@example.com': 0.1, 'z@example.com': 0.5 });
-  const ordered = displayOrder(config, state, true);
+  const ordered = displayOrder(config, state, true, LEVEL);
   const walk: string[] = []; let index = 0;
   while (index < ordered.length) { walk.push(ordered[index]!.label); index++; }
   assert.deepEqual(walk, ['a@example.com', 'b@example.com', 'z@example.com']);

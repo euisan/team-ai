@@ -159,17 +159,31 @@ teamai priority claude user@example.com 1      # o bien: auto
 teamai capture [--redact partial|full|none] [--out DIR]   # guarda el panel como .txt y .png (sin TTY)
 ```
 
-Las cuentas se ordenan según la cuota que les queda, de menor consumo a mayor,
-tanto en el panel como en la propia selección del grupo, así que la fila
-superior es la cuenta a la que iría la siguiente solicitud. Claude se evalúa por
-su ventana semanal por modelo (Fable) en vez de la general, porque es esa la que
-en la práctica rechaza primero el modelo superior. Cuando todas las cuentas
-están agotadas, quedan empatadas y el orden pasa a depender de cuál se libera
-antes: en una flota donde hoy nadie puede atender una solicitud, el tiempo hasta
-el reinicio es lo único que las diferencia (Claude por su ventana Fable, Codex
-por la semanal). Una cuenta sin medir se ordena al final (desconocido no es lo
-mismo que vacío), una prioridad fijada sigue teniendo precedencia, y `c` alterna
-de vuelta al orden configurado.
+Las cuentas con la misma prioridad se ordenan por **ritmo semanal**, tanto en el
+panel como en la selección del propio pool, así que la fila superior es la
+cuenta a la que iría la siguiente solicitud. Cada presupuesto semanal se lee
+como una recta que va del 0 % al empezar la semana al 100 % en su reinicio, y
+la desviación de una cuenta es su uso semanal menos la fracción de semana ya
+transcurrida: una cuenta *por detrás* de su recta (negativa) tiene presupuesto
+que perderá en el reinicio si no lo gasta, así que va primero. Es un orden, no
+un bloqueo: si todas van por delante, se usa la que menos. Una cuenta a punto de
+reiniciarse con presupuesto sobrante ya es la más retrasada, por lo que no hay
+una regla aparte de "reinicio próximo". La ventana semanal es la que gasta la
+solicitud: `7d` en Claude (su ventana semanal Fable para una solicitud Fable) y,
+en Codex, la ventana de 10080 minutos, se llame como se llame. Desviaciones a
+menos de 5 puntos cuentan como empate, para que dos cuentas no se alternen en
+cada solicitud; un empate lo gana la cuenta en la que ya está la sesión, luego
+la que más presupuesto semanal tiene por semana restante, luego el reinicio
+semanal más temprano y luego la ventana de 5 horas que se reinicia antes y está
+menos usada. Una cuenta sin ventana semanal que se reinicie en el futuro (sin
+medir, o con el reinicio ya pasado) va detrás de las que la tienen. La reserva
+de Fable, la prioridad explícita, el umbral de cambio (que también aparta una
+cuenta cuya ventana de 5 horas lo alcanza, por atrasada que vaya su semana), el
+anclaje de sesión y el límite de concurrencia se aplican antes, como siempre.
+Cada fila muestra su desviación como `+12%p` / `-30%p`. `routing.balance:
+"level"` recupera el orden anterior (la más llena de las ventanas de 5 horas y
+semanal, en pasos del 10 %, con menos solicitudes en curso primero), y `c`
+vuelve al orden configurado.
 
 **Enrutamiento según el modelo.** Solo el modelo superior (el nivel Fable de
 Claude) consume la ventana semanal por modelo, así que una solicitud que no lo
@@ -227,6 +241,7 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `warmupIntervalMs` | `300000` | Intervalo de remedición en segundo plano. `0` lo desactiva. |
 | `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
 | `fableReserveThreshold` | `0.8` | Uso de la ventana Fable a partir del cual la cuenta se prefiere para solicitudes que no son Fable. `1` desactiva el enrutamiento según el modelo. |
+| `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 
 Cambia un puerto si otro proceso ya lo ocupa: esa es la causa habitual de un
