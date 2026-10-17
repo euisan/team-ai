@@ -1,3 +1,4 @@
+import type { ExternalUsage } from './external-usage.js';
 import type { RouteColor, RouteConfig } from './routes.js';
 
 export type ProviderId = 'claude' | 'codex';
@@ -44,6 +45,9 @@ export interface TeamAIConfig {
   fableReserveThreshold?: number;
   // Model routes per provider; see src/routes.ts.
   routes?: Partial<Record<ProviderId, RouteConfig[]>>;
+  // Usage of other agents installed here (Antigravity, OpenCode Go, Grok),
+  // shown on the dashboard only. Each provider is shown when detected.
+  externalUsage?: { enabled?: boolean; providers?: { antigravity?: boolean; opencodeGo?: boolean; grok?: boolean }; refreshMs?: number; source?: 'direct' | 'orca' };
   // What the Activity pane shows besides method and path. Both default on.
   activity?: { sessionIds?: boolean; models?: boolean };
   // Codex reset credits ("Full reset" tickets). Off unless turned on; see
@@ -177,6 +181,8 @@ export interface PersistedState {
   serverPid?: number;
   // Each configured model route and whether its accounts can serve right now,
   // for the dashboard's route markers.
+  // The latest usage read for other agents on this machine (display only).
+  external?: Partial<Record<'antigravity' | 'opencodeGo' | 'grok', ExternalUsage>>;
   // Where a new request would go right now, per provider (see
   // AccountPool.preview): the general target, Claude's Fable target, and one
   // per model route. Credential ids.

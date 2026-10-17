@@ -7,6 +7,7 @@ import { createProxy, secureEqual } from './proxy.js';
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { parseRoutes } from './routes.js';
+import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
@@ -39,8 +40,11 @@ export async function runServer(): Promise<void> {
   // Requests in flight. Not restored from state.json: whatever a previous
   // process had open died with it.
   let closing = false;
+  // Other agents' usage, read on its own timer and isolated from the relay:
+  // a failure there is a row on the dashboard, never an error here.
+  const external = new ExternalUsageMonitor(externalUsageSettings(config));
   const activity = new ActivityLog((event) => persist(event), () => persistActivity());
-  const snapshot = (): PersistedState => { const next: PersistedState = { version: 1, accounts: {}, events, active: closing ? [] : activity.snapshot(), serverPid: process.pid }; pools.forEach((p) => p.exportState(next)); return next; };
+  const snapshot = (): PersistedState => { const next: PersistedState = { version: 1, accounts: {}, events, active: closing ? [] : activity.snapshot(), serverPid: process.pid, external: external.snapshot() }; pools.forEach((p) => p.exportState(next)); return next; };
   // Every save first adopts any credential the TUI wrote since (a re-login),
   // then writes memory back — so a fresh token is picked up within a save
   // interval instead of being overwritten by the stale one it replaced.
@@ -126,6 +130,10 @@ export async function runServer(): Promise<void> {
   const markers = (): string => { const probe: PersistedState = { version: 1, accounts: {} }; pools.forEach((p) => p.exportState(probe)); return JSON.stringify([probe.next, probe.routes]); };
   const markerTimer = setInterval(() => { const now = markers(); if (now !== lastMarkers) { lastMarkers = now; persistActivity(); } }, 15_000); markerTimer.unref();
 
+  const readExternal = async (force = false): Promise<void> => { try { if (await external.tick(force)) persistActivity(); } catch { /* display only */ } };
+  const externalTimer = setInterval(() => void readExternal(), 30_000); externalTimer.unref();
+  setTimeout(() => void readExternal(), 5_000).unref();
+
   const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`); };
   void refreshProfiles(); const profileTimer = setInterval(() => void refreshProfiles(), 6 * 60 * 60_000); profileTimer.unref();
   // Token keep-alive: refresh idle accounts' lapsing tokens so a chain that
@@ -153,6 +161,9 @@ export async function runServer(): Promise<void> {
       // first measurement rather than one refresh cycle later.
       await Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0)));
     }
+    // R also re-reads the other agents, in the background: agy alone takes
+    // seconds and must not hold up the account re-measure.
+    void readExternal(true);
     const results = await Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll()));
     const total = results.reduce((acc, r) => ({ targets: acc.targets + r.targets, measured: acc.measured + r.measured }), { targets: 0, measured: 0 });
     const ready = total.measured > 0 || pools.some((p) => p.hasProbe());
@@ -171,7 +182,7 @@ export async function runServer(): Promise<void> {
   // moment, then cut what is left: the cut client retries, the rest reconnect
   // to the new process seconds later.
   const shutdown = async (): Promise<void> => {
-    clearInterval(profileTimer); clearInterval(lapsedTimer); clearInterval(markerTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    clearInterval(profileTimer); clearInterval(lapsedTimer); clearInterval(markerTimer); clearInterval(externalTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
     servers.forEach((server) => server.closeAllConnections());
