@@ -47,6 +47,12 @@ let requestCounter = 0;
 // an upstream stream that broke after the headers went out.
 interface RequestTrack { cut: boolean; setAccount(label: string): void }
 
+// The body parsed once, for the fields the activity line shows. Not kept.
+function parsedBody(body: Buffer): unknown {
+  if (body.length === 0) return null;
+  try { return JSON.parse(body.toString('utf8')) as unknown; } catch { return null; }
+}
+
 // Never let the activity log take a request down with it.
 function safely(fn: () => void): void { try { fn(); } catch { /* activity is best-effort */ } }
 
@@ -82,6 +88,10 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       track = { cut: false, setAccount: (label) => safely(() => activity.update(id, { account: label })) };
       try {
         const body = await readBody(req);
+        // Session, model and effort for the activity line — three fields, read
+        // once; nothing else from the body leaves this function.
+        const identity = pool.provider.displayIdentity?.(incomingHeaders(req), parsedBody(body));
+        if (identity) safely(() => activity.update(id, identity));
         await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track);
       } finally { pool.inFlightProxied--; }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }

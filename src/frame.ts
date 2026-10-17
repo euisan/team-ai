@@ -119,21 +119,43 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 const clock = (at: number): string => color(90, new Date(at).toLocaleTimeString('en-GB'));
 
+// A session's tag: the first six characters of its id, in a colour fixed by
+// the id, so one conversation's lines can be followed down the log. Red (an
+// error) and grey (the clock) are left out of the palette.
+const SESSION_COLORS = [36, 35, 34, 33, 94, 95, 96, 93, 92];
+function sessionTag(id: string): string {
+  let hash = 0; for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return color(SESSION_COLORS[hash % SESSION_COLORS.length]!, id.slice(0, 6).padEnd(6));
+}
+
+// " (model·effort)", the effort in a quieter grey.
+function modelText(model: string | null | undefined, effort: string | null | undefined, dim: boolean): string {
+  if (!model) return '';
+  const name = dim ? color(2, model) : model;
+  return ` (${name}${effort ? `${ESC}38;5;244m·${effort}${RESET}` : ''})`;
+}
+
 // In-flight requests first, in the order they started, then the log newest
 // first. A finished request is drawn from its structured fields so the status
 // and duration read the same on every line; anything else is its sentence.
-function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: number): string[] {
+// The session column is there only when some request line has a session, and
+// then it is six wide on every request line so methods stay aligned.
+function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: number, show: { sessionIds: boolean; models: boolean }): string[] {
   const now = Date.now(); const spin = SPINNER[Math.floor(now / 500) % SPINNER.length]!;
-  const out = active.slice(0, rows).map((entry) => {
+  const shownActive = active.slice(0, rows); const shownEvents = [...events].reverse().slice(0, Math.max(0, rows - shownActive.length));
+  const tagged = show.sessionIds && [...shownActive, ...shownEvents.map((e) => e.request)].some((r) => r?.sessionId);
+  const tag = (id: string | null | undefined): string => tagged ? `${id ? sessionTag(id) : ' '.repeat(6)} ` : '';
+  const model = (r: { model?: string | null; effort?: string | null }, dim: boolean): string => show.models ? modelText(r.model, r.effort, dim) : '';
+  const out = shownActive.map((entry) => {
     const account = entry.account ? ` → ${entry.account}` : '';
-    return `${color(36, spin)} ${clock(entry.startedAt)}  ${entry.providerLabel} ${entry.method} ${entry.path}${account} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
+    return `${color(36, spin)} ${clock(entry.startedAt)}  ${tag(entry.sessionId)}${entry.providerLabel} ${entry.method} ${entry.path}${model(entry, true)}${account} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
   });
-  for (const event of [...events].reverse().slice(0, Math.max(0, rows - out.length))) {
+  for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(`  ${clock(event.at)}  ${event.message}`); continue; }
     const failed = typeof request.status !== 'number' || request.status >= 400;
     const outcome = `(${request.status}, ${(request.durationMs / 1000).toFixed(1)}s)`;
-    out.push(`  ${clock(event.at)}  ${request.providerLabel} ${request.method} ${request.path}${request.account ? ` → ${request.account}` : ''} ${failed ? color(31, outcome) : outcome}`);
+    out.push(`  ${clock(event.at)}  ${tag(request.sessionId)}${request.providerLabel} ${request.method} ${request.path}${model(request, false)}${request.account ? ` → ${request.account}` : ''} ${failed ? color(31, outcome) : outcome}`);
   }
   return out;
 }
@@ -237,7 +259,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   const active = state.active || [];
   const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
   lines.push(`${activityTitle}${'─'.repeat(Math.max(0, width - visible(activityTitle)))}`);
-  lines.push(...activityLines(active, state.events || [], activityRows));
+  lines.push(...activityLines(active, state.events || [], activityRows, { sessionIds: config.activity?.sessionIds !== false, models: config.activity?.models !== false }));
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
   // 't' only does something on a Codex row, so it is only offered there.

@@ -40,6 +40,8 @@ export interface TeamAIConfig {
   // is not consumed by Opus/Sonnet requests that any account could serve.
   // 1 disables the split and restores plain least-spent routing.
   fableReserveThreshold?: number;
+  // What the Activity pane shows besides method and path. Both default on.
+  activity?: { sessionIds?: boolean; models?: boolean };
   // Codex reset credits ("Full reset" tickets). Off unless turned on; see
   // src/reset-credits.ts for what each key does.
   codexResetCredits?: boolean;
@@ -129,6 +131,11 @@ export interface ActiveRequest {
   path: string;
   account: string | null;
   startedAt: number;
+  // What the client said about itself: its own session id (never one the
+  // relay made up) and the model and reasoning effort the body asked for.
+  model?: string | null;
+  effort?: string | null;
+  sessionId?: string | null;
 }
 
 // The same request once it has ended. status is the HTTP status the client
@@ -142,6 +149,9 @@ export interface RequestSummary {
   account: string | null;
   status: number | string;
   durationMs: number;
+  model?: string | null;
+  effort?: string | null;
+  sessionId?: string | null;
 }
 
 // message is the readable sentence (and what capture redaction rewrites);
@@ -211,6 +221,11 @@ export interface Provider {
   // on the same account and its prompt cache stays warm. null when the request
   // names none; the proxy then falls back to per-connection identity.
   sessionKey?(headers: Headers, body: Buffer): string | null;
+  // The session, model and effort to show for a request — display only. Kept
+  // apart from sessionKey: that one routes, falls back to per-turn handles,
+  // and must not change because of what the dashboard wants to show. body is
+  // the request body already parsed (null when it is not JSON).
+  displayIdentity?(headers: Headers, body: unknown): RequestIdentity;
   defaultProbe?(): ProbeTemplate | null;
   captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };
@@ -225,6 +240,8 @@ export interface Provider {
   fetchResetCredits?(credential: OAuthCredential): Promise<ResetCredit[]>;
   consumeResetCredit?(credential: OAuthCredential, options: { redeemRequestId: string; creditId?: string; timeoutMs: number }): Promise<{ status: number; body: string }>;
 }
+
+export interface RequestIdentity { sessionId: string | null; model: string | null; effort: string | null }
 
 // Why the pool could not hand out an account, shaped for the 429 the client
 // is about to receive. retryAfterMs is the earliest known roll-over, or null

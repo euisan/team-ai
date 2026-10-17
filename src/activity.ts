@@ -8,7 +8,7 @@ import type { ActiveRequest, ActivityEvent, RequestSummary } from './types.js';
 // that throws must never break the request it describes.
 export interface ActivitySink {
   start(entry: ActiveRequest): void;
-  update(id: string, patch: Partial<Pick<ActiveRequest, 'account'>>): void;
+  update(id: string, patch: ActivityPatch): void;
   end(id: string, status: number | string, at?: number): void;
 }
 
@@ -22,11 +22,14 @@ export function clean(value: unknown, max: number): string | null {
   return text ? text.slice(0, max) : null;
 }
 
-export const LIMITS = { method: 16, path: 256, account: 64 } as const;
+export const LIMITS = { method: 16, path: 256, account: 64, model: 64, effort: 16, sessionId: 64 } as const;
+
+export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId'>>;
 
 export function requestMessage(request: RequestSummary): string {
   const account = request.account ? ` → ${request.account}` : '';
-  return `${request.providerLabel} ${request.method} ${request.path}${account} ${request.status} (${(request.durationMs / 1000).toFixed(1)}s)`;
+  const model = request.model ? ` (${request.model}${request.effort ? `·${request.effort}` : ''})` : '';
+  return `${request.providerLabel} ${request.method} ${request.path}${model}${account} ${request.status} (${(request.durationMs / 1000).toFixed(1)}s)`;
 }
 
 export class ActivityLog implements ActivitySink {
@@ -41,16 +44,16 @@ export class ActivityLog implements ActivitySink {
     this.changed();
   }
 
-  update(id: string, patch: Partial<Pick<ActiveRequest, 'account'>>): void {
+  update(id: string, patch: ActivityPatch): void {
     const entry = this.open.get(id); if (!entry) return;
-    if ('account' in patch) entry.account = clean(patch.account, LIMITS.account);
+    for (const key of ['account', 'model', 'effort', 'sessionId'] as const) if (key in patch) entry[key] = clean(patch[key], LIMITS[key]);
     this.changed();
   }
 
   end(id: string, status: number | string, at = Date.now()): void {
     const entry = this.open.get(id); if (!entry) return;
     this.open.delete(id);
-    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt) };
+    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null };
     this.record({ at, message: requestMessage(request), request });
   }
 

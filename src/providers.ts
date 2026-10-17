@@ -69,6 +69,14 @@ function claudeIdentity(body: Buffer): Record<string, unknown> | null {
 // cannot bloat the affinity map: real ids are UUIDs.
 function sessionId(value: unknown): string | null { return typeof value === 'string' && value.length > 0 ? value.slice(0, 200) : null; }
 
+// Display identity helpers. Only ids of the shape the official clients send are
+// shown; anything else is left blank rather than guessed.
+const CLAUDE_SESSION = /^[A-Za-z0-9._-]{1,128}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const shaped = (value: unknown, shape: RegExp): string | null => typeof value === 'string' && shape.test(value) ? value : null;
+const field = (value: unknown, ...keys: string[]): unknown => keys.reduce<unknown>((at, key) => (at && typeof at === 'object' ? (at as Record<string, unknown>)[key] : undefined), value);
+const text = (value: unknown): string | null => typeof value === 'string' ? value : null;
+
 async function tokenRefresh(url: string, contentType: string, body: string): Promise<Record<string, unknown>> {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': contentType, accept: 'application/json' }, body, signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`OAuth refresh failed (${response.status})`);
@@ -227,6 +235,16 @@ export const claudeProvider: Provider = {
   sessionKey(headers, body) {
     return sessionId(headers.get('x-claude-code-session-id')) ?? sessionId(claudeIdentity(body)?.session_id);
   },
+  // Header first; Claude Code also tucks the same id into metadata.user_id,
+  // whose other fields (device, account) are never read here.
+  displayIdentity(headers, body) {
+    let sessionId = shaped(headers.get('x-claude-code-session-id'), CLAUDE_SESSION);
+    if (!sessionId) {
+      const raw = field(body, 'metadata', 'user_id');
+      if (typeof raw === 'string') { try { sessionId = shaped((JSON.parse(raw) as Record<string, unknown>)?.session_id, CLAUDE_SESSION); } catch { /* not the JSON shape */ } }
+    }
+    return { sessionId, model: text(field(body, 'model')), effort: text(field(body, 'output_config', 'effort')) };
+  },
   defaultProbe() {
     // The shape Claude Code itself sends. Subscription (OAuth) credentials are
     // rejected for anything that doesn't look like the official client, so this
@@ -303,6 +321,15 @@ export const codexProvider: Provider = {
     if (fromHeaders) return fromHeaders;
     if (body.length === 0) return null;
     try { const value = JSON.parse(body.toString('utf8')) as Record<string, unknown>; return sessionId(value.prompt_cache_key) ?? sessionId(value.previous_response_id); } catch { return null; }
+  },
+  // Codex names its thread in a header and again in client_metadata; only a
+  // UUID counts. prompt_cache_key and previous_response_id, which sessionKey
+  // uses for routing, are not session ids and are never shown.
+  displayIdentity(headers, body) {
+    const sessionId = shaped(headers.get('session-id'), UUID) ?? shaped(field(body, 'client_metadata', 'session_id'), UUID)
+      ?? shaped(headers.get('thread-id'), UUID) ?? shaped(field(body, 'client_metadata', 'thread_id'), UUID)
+      ?? shaped(headers.get('x-codex-window-id')?.replace(/:\d+$/, ''), UUID);
+    return { sessionId, model: text(field(body, 'model')), effort: text(field(body, 'reasoning', 'effort')) };
   },
   readQuota(headers) {
     const codexWindows = ['primary', 'secondary'].flatMap((window) => {
