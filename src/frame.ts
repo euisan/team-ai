@@ -4,6 +4,7 @@
 // the terminal would have seen — same ordering, same gauges, same colors.
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, type Balance } from './pacing.js';
+import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
@@ -212,7 +213,7 @@ function externalBox(usage: ExternalUsage, width: number, barWidth: number): str
   return out;
 }
 
-export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits';
+export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits' | 'routes';
 
 // The reset-credit picker ('t' on a Codex row): the tickets on one account and
 // where the operator is in choosing and confirming one.
@@ -252,6 +253,7 @@ export interface FrameView {
   message: string;
   sortByHeadroom: boolean;
   credits?: CreditPicker;
+  routes?: RouteEditor;
 }
 
 export function buildFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
@@ -335,6 +337,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     lines.push(...box);
   }
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
+  if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
   const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push('');
   const active = state.active || [];
   const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
@@ -345,7 +348,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   lines.push('─'.repeat(width));
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
-  const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  ${codexSelected ? 't credits  ' : ''}p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
+  const footer = mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  ${codexSelected ? 't credits  ' : ''}p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  g routes  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
     : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
     : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
   // The message is the part that matters when there is one — a capture path,
