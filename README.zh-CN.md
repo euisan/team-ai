@@ -2,6 +2,8 @@
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · **中文** · [Español](README.es.md)
 
+> **翻译滞后说明：** 本译文尚未反映英文 README 的近期变更（自进行中 Activity 显示起新增的功能和配置项）。行为与配置请以[英文 README](README.md) 为准。
+
 TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
 
 ![TeamAI 仪表盘](docs/dashboard.png)

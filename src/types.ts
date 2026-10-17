@@ -90,10 +90,43 @@ export interface AccountRuntimeState {
   measuredAt?: number | null;
 }
 
+// One relayed request while it is in flight. Written to state.json so the
+// dashboard can draw it before it finishes; never carries a body or a token.
+export interface ActiveRequest {
+  id: string;
+  provider: ProviderId;
+  providerLabel: string;
+  method: string;
+  path: string;
+  account: string | null;
+  startedAt: number;
+}
+
+// The same request once it has ended. status is the HTTP status the client
+// got, 499 when the client went away first, or 'cut' when the upstream stream
+// broke after the headers were sent.
+export interface RequestSummary {
+  provider: ProviderId;
+  providerLabel: string;
+  method: string;
+  path: string;
+  account: string | null;
+  status: number | string;
+  durationMs: number;
+}
+
+// message is the readable sentence (and what capture redaction rewrites);
+// request is set only on a finished-request line.
+export interface ActivityEvent { at: number; message: string; request?: RequestSummary }
+
 export interface PersistedState {
   version: 1;
   accounts: Record<string, AccountRuntimeState>;
-  events?: Array<{ at: number; message: string }>;
+  events?: ActivityEvent[];
+  active?: ActiveRequest[];
+  // The server that wrote this file. The dashboard draws `active` only while
+  // that process is alive, so a crash cannot leave requests spinning forever.
+  serverPid?: number;
   // The warm-up probe shape learned from live traffic, per provider. Without it
   // a restarted proxy falls back to a hardcoded client version that upstream may
   // reject on version grounds, leaving every account unmeasured until real

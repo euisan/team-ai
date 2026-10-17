@@ -56,6 +56,10 @@ export function redactSnapshot(config: TeamAIConfig, state: PersistedState, leve
   const mask = redactor(config.accounts, level);
   return {
     config: { ...config, accounts: config.accounts.map((account, index) => ({ ...account, label: maskLabel(account.label, level, index) })) },
-    state: { ...state, events: (state.events || []).map((event) => ({ ...event, message: mask(event.message) })) },
+    state: {
+      ...state,
+      events: (state.events || []).map((event) => ({ ...event, message: mask(event.message), ...(event.request ? { request: { ...event.request, account: event.request.account && mask(event.request.account) } } : {}) })),
+      active: state.active?.map((entry) => ({ ...entry, account: entry.account && mask(entry.account) })),
+    },
   };
 }

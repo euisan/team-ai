@@ -4,7 +4,7 @@ import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, displayOrder, ESC, type FrameMode } from './frame.js';
-import { runningPid } from './runtime.js';
+import { liveState, runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
 import type { StoredAccount } from './types.js';
 
@@ -19,7 +19,7 @@ export async function runTui(): Promise<void> {
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   const render = async (): Promise<void> => {
-    const config = await loadConfig(); const state = await loadState(); const current = selected(displayOrder(config.accounts, state, sortByHeadroom)); if (current && !selectedId) selectedId = current.credentialId;
+    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom)); if (current && !selectedId) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40);
     const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom });
     process.stdout.write(`${ESC}H${lines.join('\n')}`);

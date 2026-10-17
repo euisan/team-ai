@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
 import { AccountPool } from './account-pool.js';
+import { ActivityLog, type ActivitySink } from './activity.js';
 import type { Provider, RuntimeAccount } from './types.js';
 
 // Upper bound on waiting for upstream response headers only. Never applies to the body.
@@ -38,30 +39,60 @@ const connectionIds = new WeakMap<Socket, string>();
 function connectionId(socket: Socket): string { let id = connectionIds.get(socket); if (!id) { id = randomUUID(); connectionIds.set(socket, id); } return id; }
 function sessionKey(provider: Provider, req: IncomingMessage, body: Buffer): string { return provider.sessionKey?.(incomingHeaders(req), body) || connectionId(req.socket); }
 
-export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number): Server {
+// Request ids for the activity log: unique per process, shared by the main
+// port and its legacy aliases.
+let requestCounter = 0;
+
+// Per-request bookkeeping dispatch fills in for the activity line. cut marks
+// an upstream stream that broke after the headers went out.
+interface RequestTrack { cut: boolean; setAccount(label: string): void }
+
+// Never let the activity log take a request down with it.
+function safely(fn: () => void): void { try { fn(); } catch { /* activity is best-effort */ } }
+
+// What the client ended up with. A finished response says it; a response the
+// client abandoned first is 499; a stream upstream broke is 'cut'.
+function finalStatus(res: ServerResponse, track: RequestTrack): number | string {
+  if (track.cut) return 'cut';
+  if (res.writableEnded) return res.statusCode;
+  return res.headersSent || res.destroyed ? 499 : 502;
+}
+
+export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message))): Server {
   return createServer(async (req, res) => {
+    let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {} };
     try {
       if (!authorized(req, clientToken)) return json(res, 401, { error: 'Unauthorized local client' });
       const path = pool.provider.normalizePath(req.url || '/');
       if (!path) return json(res, 404, { error: 'Unsupported proxy path' });
+      const id = String(++requestCounter);
+      const begin = (): void => safely(() => activity.start({ id, provider: pool.provider.id, providerLabel: pool.provider.label, method: req.method || 'GET', path, account: null, startedAt: Date.now() }));
       // Admission control: reject before buffering a body. localhost is trusted,
       // so a flood of local clients could otherwise pin one 32 MB buffer each.
       // The counter lives on the pool so the main port and its legacy aliases
-      // share one budget. Drain the request first or the socket leaks.
+      // share one budget. Drain the request first or the socket leaks. The
+      // refusal still gets its line, or a saturated relay looks idle.
       if (capacity && pool.inFlightProxied >= capacity()) {
-        req.resume();
+        req.resume(); begin(); opened = id;
         return json(res, 429, { error: `${pool.provider.label} relay is at capacity` }, { 'retry-after': '5', 'x-teamai-429-reason': 'concurrency_saturated' });
       }
       pool.inFlightProxied++;
+      // The line opens before the body is read, so a large upload already shows.
+      begin(); opened = id;
+      track = { cut: false, setAccount: (label) => safely(() => activity.update(id, { account: label })) };
       try {
         const body = await readBody(req);
-        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange);
+        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track);
       } finally { pool.inFlightProxied--; }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
+    finally {
+      // Every line that opened is closed exactly once, whatever happened above.
+      if (opened) { const id = opened; const status = finalStatus(res, track); safely(() => activity.end(id, status)); }
+    }
   });
 }
 
-async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void): Promise<void> {
+async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack): Promise<void> {
   const excluded = new Set<string>(); let authRetried = false;
   // Decided once from the request body: the retry loop must not re-read a body
   // it has already forwarded, and the answer cannot change between failovers.
@@ -110,6 +141,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));
       return json(res, 429, { error: shortfall.message }, headers);
     }
+    track.setAccount(account.label);
     let response: Response;
     let phase = 'token refresh';
     try {
@@ -208,7 +240,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
         if (transientAccounts.size) lastFailure = { response: lastFailure!.response, body: lastFailure!.body, transient: true };
         continue;
       }
-      copyHeaders(response, res); res.writeHead(response.status); res.end(errorBody); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}`); return;
+      copyHeaders(response, res); res.writeHead(response.status); res.end(errorBody); return;
     }
     for (const item of forbidden) { pool.cooldown(item.account, item.ms, 'forbidden'); onChange(`${pool.provider.label} ${item.account.label} benched: 403 while ${account.label} served the same request`); }
     pool.commitProbe(path, incomingHeaders(req), body, response.headers);
@@ -220,8 +252,10 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     try {
       if (!response.body) res.end();
       else await pipeStream(response.body, res);
-    } catch (error) { cut = (error as Error).message; throw error; }
-    finally { pool.release(account); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status}${cut ? ` stream cut mid-body: ${cut}` : ''}`); }
+    } catch (error) { cut = (error as Error).message; track.cut = true; throw error; }
+    // The finished-request line itself comes from the activity log; only a
+    // cut, with its cause, needs a sentence of its own.
+    finally { pool.release(account); if (cut) onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} stream cut mid-body: ${cut}`); }
     return;
   }
 }

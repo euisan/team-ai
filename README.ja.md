@@ -2,6 +2,8 @@
 
 [English](README.md) · [한국어](README.ko.md) · **日本語** · [中文](README.zh-CN.md) · [Español](README.es.md)
 
+> **翻訳の遅れについて:** この翻訳は英語版 README の最近の変更（進行中の Activity 表示以降に追加された機能と設定キー）をまだ反映していません。動作と設定は[英語版 README](README.md) を基準にしてください。
+
 TeamAI は **Claude Code** と公式 **Codex CLI** のためのローカル多アカウントリレーです。プロバイダーごとに独立したアカウントプールを保持し、選ばれたサブスクリプションが利用できない、またはクォータを使い切っている場合は別のアカウントでリクエストを再試行します。
 
 ![TeamAIダッシュボード](docs/dashboard.png)
