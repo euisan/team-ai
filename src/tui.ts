@@ -123,7 +123,7 @@ export async function runTui(): Promise<void> {
     if (busy) return; message = '';
     if (key === '' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
     if (mode === 'routes' && routeEditor) await routeKey(key);
-    else if (key === '\x1b') { mode = 'normal'; credits = undefined; }
+    else if (key === '\x1b' || mode === 'help') { mode = 'normal'; credits = undefined; }
     else if (mode === 'credits' && credits) {
       if (credits.phase === 'pick' && credits.items.length) {
         if (key === '\x1b[A' || key === 'k') credits = { ...credits, index: Math.max(0, credits.index - 1) };
@@ -145,7 +145,7 @@ export async function runTui(): Promise<void> {
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
       else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
-      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); }
+      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();
