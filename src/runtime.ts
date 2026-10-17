@@ -6,6 +6,7 @@ import { ActivityLog } from './activity.js';
 import { createProxy, secureEqual } from './proxy.js';
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
+import { parseRoutes } from './routes.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
@@ -30,6 +31,10 @@ export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
+  // Model routes are checked before anything listens: a malformed route is a
+  // startup error rather than a route that silently never applies.
+  const routeWarnings = pools.flatMap((pool) => pool.setRoutes(parseRoutes(config.routes?.[pool.provider.id], pool.provider.id)).map((warning) => `${pool.provider.label} ${warning}`));
+  for (const warning of routeWarnings) console.log(`[TeamAI] ${warning}`);
   let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events: ActivityEvent[] = [...(state.events || [])].slice(-200);
   // Requests in flight. Not restored from state.json: whatever a previous
   // process had open died with it.
@@ -50,6 +55,7 @@ export async function runServer(): Promise<void> {
   // Reset credits: the ledger goes to disk before and after each consume call,
   // through the same save chain so it never races a scheduled save.
   const saveImmediately = (): Promise<void> => { saving = saving.then(persistNow, persistNow); return saving; };
+  for (const warning of routeWarnings) persist(warning);
   for (const pool of pools) {
     pool.log = (message) => persist(message); pool.saveNow = saveImmediately;
     if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);

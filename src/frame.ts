@@ -2,6 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
+import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
 export const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
@@ -140,22 +141,23 @@ function modelText(model: string | null | undefined, effort: string | null | und
 // and duration read the same on every line; anything else is its sentence.
 // The session column is there only when some request line has a session, and
 // then it is six wide on every request line so methods stay aligned.
-function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: number, show: { sessionIds: boolean; models: boolean }): string[] {
+function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: number, show: { sessionIds: boolean; models: boolean }, tint: (provider: string, route: string) => number): string[] {
   const now = Date.now(); const spin = SPINNER[Math.floor(now / 500) % SPINNER.length]!;
   const shownActive = active.slice(0, rows); const shownEvents = [...events].reverse().slice(0, Math.max(0, rows - shownActive.length));
   const tagged = show.sessionIds && [...shownActive, ...shownEvents.map((e) => e.request)].some((r) => r?.sessionId);
   const tag = (id: string | null | undefined): string => tagged ? `${id ? sessionTag(id) : ' '.repeat(6)} ` : '';
   const model = (r: { model?: string | null; effort?: string | null }, dim: boolean): string => show.models ? modelText(r.model, r.effort, dim) : '';
+  const routed = (r: { provider: string; route?: string | null; routeFallback?: boolean }): string => r.route ? ` ${color(tint(r.provider, r.route), `[route:${r.route}${r.routeFallback ? '→fallback' : ''}]`)}` : '';
   const out = shownActive.map((entry) => {
     const account = entry.account ? ` → ${entry.account}` : '';
-    return `${color(36, spin)} ${clock(entry.startedAt)}  ${tag(entry.sessionId)}${entry.providerLabel} ${entry.method} ${entry.path}${model(entry, true)}${account} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
+    return `${color(36, spin)} ${clock(entry.startedAt)}  ${tag(entry.sessionId)}${entry.providerLabel} ${entry.method} ${entry.path}${model(entry, true)}${account}${routed(entry)} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
   });
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(`  ${clock(event.at)}  ${event.message}`); continue; }
     const failed = typeof request.status !== 'number' || request.status >= 400;
     const outcome = `(${request.status}, ${(request.durationMs / 1000).toFixed(1)}s)`;
-    out.push(`  ${clock(event.at)}  ${tag(request.sessionId)}${request.providerLabel} ${request.method} ${request.path}${model(request, false)}${request.account ? ` → ${request.account}` : ''} ${failed ? color(31, outcome) : outcome}`);
+    out.push(`  ${clock(event.at)}  ${tag(request.sessionId)}${request.providerLabel} ${request.method} ${request.path}${model(request, false)}${request.account ? ` → ${request.account}` : ''}${routed(request)} ${failed ? color(31, outcome) : outcome}`);
   }
   return out;
 }
@@ -236,11 +238,19 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     const usageTitles = provider === 'claude'
       ? `${slot('5h session')}${slot('7d overall')}${slot('7d Fable')}`
       : Array.from({ length: codexWindowCount }, (_, index) => slot(spanAt(index))).join('');
-    lines.push(color(90, fit(`  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
+    // One marker column per model route, left of the cursor: the route's
+    // colour on its accounts, grey where that account cannot serve now. No
+    // routes, no columns — the rows are then exactly as before.
+    const routes = (state.routes || []).filter((route) => route.provider === provider);
+    const marks = (account: StoredAccount): string => routes.map((route) => {
+      const member = route.members.find((m) => m.credentialId === account.credentialId);
+      return member ? color(member.usable ? routeColor(route.color) : 90, '▸') : ' ';
+    }).join('');
+    lines.push(color(90, fit(`${' '.repeat(routes.length)}  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
     for (const account of group) {
       const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
-      const head = `${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
+      const head = `${marks(account)}${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
         lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}`);
@@ -259,7 +269,8 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   const active = state.active || [];
   const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
   lines.push(`${activityTitle}${'─'.repeat(Math.max(0, width - visible(activityTitle)))}`);
-  lines.push(...activityLines(active, state.events || [], activityRows, { sessionIds: config.activity?.sessionIds !== false, models: config.activity?.models !== false }));
+  const tint = (provider: string, name: string): number => routeColor(config.routes?.[provider as 'claude' | 'codex']?.find((route) => route.name === name)?.color);
+  lines.push(...activityLines(active, state.events || [], activityRows, { sessionIds: config.activity?.sessionIds !== false, models: config.activity?.models !== false }, tint));
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
   // 't' only does something on a Codex row, so it is only offered there.

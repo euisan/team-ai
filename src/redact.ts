@@ -55,7 +55,8 @@ export function redactSnapshot(config: TeamAIConfig, state: PersistedState, leve
   if (level === 'none') return { config, state };
   const mask = redactor(config.accounts, level);
   return {
-    config: { ...config, accounts: config.accounts.map((account, index) => ({ ...account, label: maskLabel(account.label, level, index) })) },
+    // Route account references are usually labels too.
+    config: { ...config, accounts: config.accounts.map((account, index) => ({ ...account, label: maskLabel(account.label, level, index) })), ...(config.routes ? { routes: Object.fromEntries(Object.entries(config.routes).map(([provider, list]) => [provider, list?.map((route) => ({ ...route, accounts: route.accounts.map((ref) => typeof ref === 'string' ? mask(ref) : ref) }))])) } : {}) },
     state: {
       ...state,
       // Full redaction also drops session ids: they let lines be tied to one
