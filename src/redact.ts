@@ -63,6 +63,9 @@ export function redactSnapshot(config: TeamAIConfig, state: PersistedState, leve
       // conversation. Partial keeps them — the screen shows six characters.
       events: (state.events || []).map((event) => ({ ...event, message: mask(event.message), ...(event.request ? { request: { ...event.request, account: event.request.account && mask(event.request.account), ...(level === 'full' ? { sessionId: null } : {}) } } : {}) })),
       active: state.active?.map((entry) => ({ ...entry, account: entry.account && mask(entry.account), ...(level === 'full' ? { sessionId: null } : {}) })),
+      // Another app's account: already masked when read, masked again here,
+      // and dropped entirely under full redaction.
+      ...(state.external ? { external: Object.fromEntries(Object.entries(state.external).map(([provider, usage]) => [provider, usage && { ...usage, identity: level === 'full' ? null : usage.identity && mask(usage.identity) }])) } : {}),
     },
   };
 }

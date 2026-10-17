@@ -2,6 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
+import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
@@ -162,6 +163,32 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
   return out;
 }
 
+const EXTERNAL_TITLES: Record<ExternalProvider, string> = { antigravity: 'Antigravity (agy)', opencodeGo: 'OpenCode Go', grok: 'Grok' };
+
+// One provider's box: a row per usage group, its windows as the same gauges
+// the accounts use (same colour steps, so the screen reads one way), or a
+// grey line saying why there is nothing to show. A failed refresh keeps the
+// last good gauges for a while, labelled as cached.
+function externalBox(usage: ExternalUsage, width: number, barWidth: number): string[] {
+  const title = ` ${EXTERNAL_TITLES[usage.provider]} `;
+  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - title.length - 3))}┐`)];
+  const labels = [...new Set(usage.groups.flatMap((group) => group.windows.map((w) => w.label)))];
+  const name = (group: string): string => !usage.identity || usage.provider === 'antigravity' ? group : usage.provider === 'opencodeGo' ? `${group} (${usage.identity})` : `${group} ${usage.identity}`;
+  const problem = usage.status === 'ok' ? null
+    : usage.status === 'signed-out' ? (usage.note ?? 'not signed in') : usage.status === 'expired' ? (usage.note ?? 'sign-in expired')
+    : usage.status === 'unavailable' ? (usage.note ?? 'usage unavailable') : `${usage.note ?? 'error'}`;
+  if (labels.length) {
+    out.push(color(90, fit(`  ${fit('group', 34)}${labels.map((label) => ` ${fit(label, barWidth)}`).join('')}`, width)));
+    for (const group of usage.groups) {
+      const gauges = labels.map((label) => { const w = group.windows.find((x) => x.label === label); return w ? bar(w.usedPercent === null ? null : w.usedPercent / 100, w.resetsAt, barWidth) : ' '.repeat(barWidth); }).join(' ');
+      out.push(`  ${fit(name(group.name), 34)} ${gauges} ${age(usage.lastOkAt)}`);
+    }
+    if (problem) out.push(color(90, `  refresh failed — showing cached data (${problem})`));
+  } else out.push(color(90, `  ${problem ?? (usage.measuredAt ? 'no usage data' : 'not measured yet')}`));
+  out.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
+  return out;
+}
+
 export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits';
 
 // The reset-credit picker ('t' on a Codex row): the tickets on one account and
@@ -270,6 +297,15 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
+  }
+  // Other agents' usage, one box each, after the relayed accounts. In a live
+  // view a box is left out when it would squeeze the activity pane below its
+  // minimum; a provider that is not installed has no entry and no box.
+  for (const provider of EXTERNAL_PROVIDERS) {
+    const usage = state.external?.[provider]; if (!usage) continue;
+    const box = externalBox(usage, width, barWidth);
+    if (height !== undefined && lines.length + box.length + 5 + 4 > height) continue;
+    lines.push(...box);
   }
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
   const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push('');
