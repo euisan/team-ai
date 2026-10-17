@@ -194,7 +194,7 @@ export async function pressRouteKey(editor: RouteEditor, key: string, onSaving: 
   if (!result.save) return result.editor;
   const save = result.save; await onSaving(result.editor);
   try {
-    const outcome = await applyRoutes(save.provider, save.routes);
+    const outcome = await applyRoutes(save.provider, save.routes, save.expected);
     const reopened = openRouteEditor(await loadConfig(), save.provider, save.focus, `${save.notice} — ${describeReload(outcome)}`);
     return outcome.status === 'failed' ? { ...reopened, notice: undefined, warning: `${save.notice}: ${describeReload(outcome)}` } : reopened;
   } catch (error) { return { ...result.editor, phase: result.editor.phase === 'delete' ? 'list' : result.editor.phase, error: (error as Error).message }; }

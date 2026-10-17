@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
 import { createProxy } from '../src/proxy.js';
 import { handleRouteControl } from '../src/route-control.js';
+import { isLoopback } from '../src/reset-credit-control.js';
 import { parseRoutes } from '../src/routes.js';
 import type { OAuthCredential, Provider, StoredAccount } from '../src/types.js';
 
@@ -56,6 +58,31 @@ test('a malformed file is refused and the running routes stay as they were', asy
     const res = await call(); assert.equal(res.status, 400); assert.match((await res.json() as { error: string }).error, /route x: match/);
     assert.deepEqual(p.routeList.map((r) => r.name), ['keep']);
   } finally { server.close(); delete process.env.TEAMAI_HOME; }
+});
+
+test('a failure parsing one provider leaves every provider route unchanged', async () => {
+  const codex = pool(['a']); const claude = pool(['b'], { id: 'claude', label: 'Claude' });
+  codex.p.setRoutes(parseRoutes([{ name: 'old-codex', match: ['*'], accounts: ['a'] }], 'codex'));
+  claude.p.setRoutes(parseRoutes([{ name: 'old-claude', match: ['*'], accounts: ['b'] }], 'claude'));
+  await home({ codex: [{ name: 'new-codex', match: ['*'], accounts: ['a'] }], claude: [{ name: 'broken', match: [], accounts: ['b'] }] });
+  const { server, call } = await control([codex.p, claude.p]);
+  try {
+    assert.equal((await call()).status, 400);
+    assert.deepEqual(codex.p.routeList.map((route) => route.name), ['old-codex']);
+    assert.deepEqual(claude.p.routeList.map((route) => route.name), ['old-claude']);
+  } finally { server.close(); delete process.env.TEAMAI_HOME; }
+});
+
+test('route reload rejects a target outside the relay loopback address', async () => {
+  const { p } = pool(['a']);
+  let status = 0;
+  const req = { url: '/routes/reload', method: 'POST', headers: { authorization: 'Bearer tok' }, socket: { remoteAddress: '10.0.0.2' } } as unknown as IncomingMessage;
+  const res = { writeHead: (code: number) => { status = code; return res; }, end: () => res } as unknown as ServerResponse;
+  assert.equal(await handleRouteControl(req, res, [p], 'tok'), true);
+  assert.equal(status, 403);
+  assert.equal(isLoopback('127.0.0.1'), true);
+  assert.equal(isLoopback('::ffff:127.0.0.1'), true);
+  assert.equal(isLoopback('10.0.0.2'), false);
 });
 
 test('the reload needs the client token and a POST', async () => {

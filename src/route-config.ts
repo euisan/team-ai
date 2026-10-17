@@ -11,9 +11,30 @@ import type { ProviderId, StoredAccount } from './types.js';
 // Throws parseRoutes' own message and writes nothing when the list is invalid.
 // Everything else in config.json is written back as it was read; saveConfig
 // writes a 0600 temp file and renames it over the old one.
-export async function saveRoutes(provider: ProviderId, routes: RouteConfig[]): Promise<void> {
+function accountConfigured(accounts: StoredAccount[], provider: ProviderId, ref: string | number): boolean {
+  const own = accounts.filter((account) => account.provider === provider);
+  if (typeof ref === 'number') return Number.isInteger(ref) && ref >= 0 && ref < own.length;
+  return own.some((account) => account.label === ref || account.id === ref || account.credentialId === ref);
+}
+
+function assertExclusiveAccounts(provider: ProviderId, routes: RouteConfig[], accounts: StoredAccount[]): void {
+  for (const route of routes) {
+    if ((route.mode ?? 'prefer') !== 'exclusive') continue;
+    if (!route.accounts.some((ref) => accountConfigured(accounts, provider, ref))) {
+      throw new Error(`route ${route.name}: exclusive route must include a configured ${provider} account`);
+    }
+  }
+}
+
+const sameRoutes = (a: RouteConfig[] | undefined, b: RouteConfig[]): boolean => JSON.stringify(a ?? []) === JSON.stringify(b);
+
+export async function saveRoutes(provider: ProviderId, routes: RouteConfig[], expected?: RouteConfig[]): Promise<void> {
   parseRoutes(routes, provider);
   const config = await loadConfig();
+  assertExclusiveAccounts(provider, routes, config.accounts);
+  if (expected && !sameRoutes(config.routes?.[provider], expected)) {
+    throw new Error(`routes.${provider} changed while you were editing; reload and try again`);
+  }
   config.routes = { ...config.routes, [provider]: routes };
   await saveConfig(config);
 }
@@ -33,8 +54,8 @@ export async function reloadServerRoutes(): Promise<ReloadOutcome> {
   } catch (error) { return { status: 'failed', error: (error as Error).message }; }
 }
 
-export async function applyRoutes(provider: ProviderId, routes: RouteConfig[]): Promise<ReloadOutcome> {
-  await saveRoutes(provider, routes);
+export async function applyRoutes(provider: ProviderId, routes: RouteConfig[], expected?: RouteConfig[]): Promise<ReloadOutcome> {
+  await saveRoutes(provider, routes, expected);
   return reloadServerRoutes();
 }
 

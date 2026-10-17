@@ -67,3 +67,24 @@ test('account references are stored by label when they name an account', () => {
   assert.equal(accountLabel(accounts, 'codex', 'ghost'), 'ghost');
   assert.equal(accountLabel(accounts, 'claude', 'a'), 'a', 'another provider\'s account is not this one');
 });
+
+test('a TUI snapshot refuses to overwrite a route changed by the CLI', async () => {
+  const root = await home();
+  try {
+    const original = [{ name: 'cli', match: ['gpt-*'], accounts: ['a@example.com'] }];
+    await saveRoutes('codex', original);
+    await assert.rejects(
+      saveRoutes('codex', [{ name: 'tui', match: ['gpt-*'], accounts: ['a@example.com'] }], []),
+      /routes\.codex changed while you were editing/,
+    );
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'config.json'), 'utf8')).routes.codex, original);
+  } finally { delete process.env.TEAMAI_HOME; }
+});
+
+test('an exclusive route with no configured account is refused before writing', async () => {
+  const root = await home(); const before = await readFile(join(root, 'config.json'), 'utf8');
+  try {
+    await assert.rejects(saveRoutes('codex', [{ name: 'locked', match: ['gpt-*'], accounts: ['missing@example.com'], mode: 'exclusive' }]), /exclusive route must include a configured codex account/);
+    assert.equal(await readFile(join(root, 'config.json'), 'utf8'), before);
+  } finally { delete process.env.TEAMAI_HOME; }
+});
