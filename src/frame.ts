@@ -2,16 +2,16 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
+import { cellWidth, fit } from './columns.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
-export const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
+export const ESC = '\x1b['; const RESET = `${ESC}0m`;
 const color = (code: number, text: string): string => `${ESC}${code}m${text}${RESET}`;
-const visible = (text: string): number => text.replace(ANSI, '').length;
-const fit = (text: string, width: number): string => { const plain = text.replace(ANSI, ''); if (plain.length > width) return `${plain.slice(0, Math.max(0, width - 1))}…`; return text + ' '.repeat(Math.max(0, width - visible(text))); };
+const visible = cellWidth;
 
 function duration(reset: number | null | undefined): string {
   if (!reset || reset <= Date.now()) return '';
@@ -195,7 +195,7 @@ const EXTERNAL_TITLES: Record<ExternalProvider, string> = { antigravity: 'Antigr
 // last good gauges for a while, labelled as cached.
 function externalBox(usage: ExternalUsage, width: number, barWidth: number): string[] {
   const title = ` ${EXTERNAL_TITLES[usage.provider]} `;
-  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - title.length - 3))}┐`)];
+  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
   const labels = [...new Set(usage.groups.flatMap((group) => group.windows.map((w) => w.label)))];
   const name = (group: string): string => !usage.identity || usage.provider === 'antigravity' ? group : usage.provider === 'opencodeGo' ? `${group} (${usage.identity})` : `${group} ${usage.identity}`;
   const problem = usage.status === 'ok' ? null
@@ -232,7 +232,7 @@ function stamp(at: number | null): string {
 
 function pickerLines(picker: CreditPicker, width: number): string[] {
   const title = ` Reset credits — ${picker.account} `;
-  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - title.length - 3))}┐`)];
+  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
   if (picker.phase === 'loading') out.push(color(90, '  Loading…'));
   else if (!picker.items.length) out.push(color(90, '  No reset credits available'));
   else picker.items.forEach((item, i) => out.push(`${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', 28)} granted ${stamp(item.grantedAt)}  expires ${stamp(item.expiresAt)}`));
@@ -354,6 +354,6 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';
-  lines.push(status && footer.length + status.length > width ? `${fit(footer, Math.max(0, width - status.length))}${status}` : fit(`${footer}${status}`, width));
+  lines.push(status && visible(footer) + visible(status) > width ? `${fit(footer, Math.max(0, width - visible(status)))}${status}` : fit(`${footer}${status}`, width));
   return (height === undefined ? lines : lines.slice(0, height)).map((line) => fit(line, width));
 }
