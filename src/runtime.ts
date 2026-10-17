@@ -119,6 +119,13 @@ export async function runServer(): Promise<void> {
     setTimeout(() => void runWarmup(), 5_000).unref();
   }
 
+  // The next-account arrows change quietly — a cooldown runs out, a window
+  // rolls over — with no event to trigger a save. Re-derive them every 15s
+  // and write state.json only when they actually moved.
+  let lastMarkers = '';
+  const markers = (): string => { const probe: PersistedState = { version: 1, accounts: {} }; pools.forEach((p) => p.exportState(probe)); return JSON.stringify([probe.next, probe.routes]); };
+  const markerTimer = setInterval(() => { const now = markers(); if (now !== lastMarkers) { lastMarkers = now; persistActivity(); } }, 15_000); markerTimer.unref();
+
   const refreshProfiles = async (): Promise<void> => { const count = (await Promise.all(pools.map((pool) => pool.refreshProfiles()))).reduce((a, b) => a + b, 0); if (count) persist(`Refreshed subscription status for ${count} account(s)`); };
   void refreshProfiles(); const profileTimer = setInterval(() => void refreshProfiles(), 6 * 60 * 60_000); profileTimer.unref();
   // Token keep-alive: refresh idle accounts' lapsing tokens so a chain that
@@ -164,7 +171,7 @@ export async function runServer(): Promise<void> {
   // moment, then cut what is left: the cut client retries, the rest reconnect
   // to the new process seconds later.
   const shutdown = async (): Promise<void> => {
-    clearInterval(profileTimer); clearInterval(lapsedTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    clearInterval(profileTimer); clearInterval(lapsedTimer); clearInterval(markerTimer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
     servers.forEach((server) => server.closeAllConnections());
@@ -185,6 +192,6 @@ async function releaseServerFile(serverPath: string): Promise<void> {
 // server that recorded them is still the one running.
 export async function liveState(state: PersistedState): Promise<PersistedState> {
   const pid = await runningPid();
-  return pid !== null && pid === state.serverPid ? state : { ...state, active: [] };
+  return pid !== null && pid === state.serverPid ? state : { ...state, active: [], next: undefined };
 }
 export async function runningPid(): Promise<number | null> { try { const value = JSON.parse(await readFile(paths().server, 'utf8')) as { pid?: number }; if (!value.pid) return null; process.kill(value.pid, 0); return value.pid; } catch { return null; } }

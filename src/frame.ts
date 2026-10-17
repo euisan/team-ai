@@ -242,18 +242,25 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     // colour on its accounts, grey where that account cannot serve now. No
     // routes, no columns — the rows are then exactly as before.
     const routes = (state.routes || []).filter((route) => route.provider === provider);
+    // Where a new request would go (state.next, from the server): a green ►
+    // after the cursor, a magenta one before the Fable gauge, and a bold
+    // route marker for each route's own target.
+    const next = state.next?.[provider];
     const marks = (account: StoredAccount): string => routes.map((route) => {
       const member = route.members.find((m) => m.credentialId === account.credentialId);
-      return member ? color(member.usable ? routeColor(route.color) : 90, '▸') : ' ';
+      if (!member) return ' ';
+      const target = next?.routes?.[route.name] === account.credentialId;
+      return `${ESC}${target ? '1;' : ''}${member.usable ? routeColor(route.color) : 90}m▸${RESET}`;
     }).join('');
-    lines.push(color(90, fit(`${' '.repeat(routes.length)}  ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
+    const arrow = (account: StoredAccount): string => next?.general === account.credentialId ? color(32, '►') : ' ';
+    lines.push(color(90, fit(`${' '.repeat(routes.length)}   ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
     for (const account of group) {
       const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
-      const head = `${marks(account)}${cursor} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
+      const head = `${marks(account)}${cursor}${arrow(account)} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-        lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)} ${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}`);
+        lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)}${next?.fable === account.credentialId ? color(35, '►') : ' '}${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}`);
       } else {
         const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
         const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');

@@ -7,6 +7,9 @@ import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSna
 // on what one request has already tried.
 const NO_EXCLUSIONS = new Set<string>();
 
+type Judge = (account: RuntimeAccount, excluded: Set<string>, wantsFable: boolean, lastResort: boolean) => boolean;
+export interface NextTargets { general: string | null; fable?: string | null; routes?: Record<string, string | null> }
+
 export class AccountPool {
   readonly accounts: RuntimeAccount[];
   private affinity = new Map<string, string>();
@@ -280,7 +283,7 @@ export class AccountPool {
     const pinned = this.accounts.find((a) => a.id === this.affinity.get(key));
     // A prefer route ranks its accounts first, and moves a session off an
     // outside account whenever one of its own can take the request.
-    const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a) ? 1 : 0;
+    const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a);
     const memberOpen = route?.mode === 'prefer' && this.accounts.some((a) => !outside(a) && this.available(a, excluded, wantsFable));
     // Session affinity is a cache-locality preference, not a claim on the
     // account. Honour it while the account can take the request and while the
@@ -289,14 +292,29 @@ export class AccountPool {
     // week every account reserves, and refusing the pin then just scatters
     // the session over the fleet for nothing.
     if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded) && !(outside(pinned) && memberOpen)) { pinned.inflight++; this.remember(key, pinned.id); this.noteRoute(route, pinned); return pinned; }
+    const selected = this.pick(excluded, wantsFable, route, this.availableNow);
+    // A pinned account that is only excluded for this request (a transient
+    // failover) or at its concurrency cap is still the session's home: this
+    // request spills elsewhere, the pin stays, and the next turn comes back to
+    // its warm cache. Only a home that is genuinely gone is replaced.
+    if (selected) { selected.inflight++; if (!pinned || !this.isHome(pinned, wantsFable)) this.remember(key, selected.id); this.noteRoute(route, selected); }
+    return selected;
+  }
+
+  // The ranking acquire() applies after the session pin, shared with
+  // preview() so the dashboard's arrow cannot drift from real selection.
+  // `judge` decides availability: acquire's clears rolled-over windows as it
+  // looks, preview's only looks.
+  private pick(excluded: Set<string>, wantsFable: boolean, route: Route | null, judge: Judge): RuntimeAccount | null {
+    const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a) ? 1 : 0;
     const rank = this.spread(wantsFable);
     // An explicit priority orders accounts within the same reservation tier,
     // never across it: a #1 account still holding Fable budget used to take
     // every Opus and Haiku turn ahead of a spare whose Fable was already
     // spent, burning the one budget only Fable turns can use.
-    const diverts = (a: RuntimeAccount) => this.divertsOff(a, wantsFable, excluded) ? 1 : 0;
+    const diverts = (a: RuntimeAccount) => this.divertsOff(a, wantsFable, excluded, judge) ? 1 : 0;
     // A route the user wrote outranks the automatic Fable reservation.
-    const ranked = (lastResort: boolean) => this.accounts.filter((a) => this.available(a, excluded, wantsFable, lastResort)).sort((a, b) => {
+    const ranked = (lastResort: boolean) => this.accounts.filter((a) => judge(a, excluded, wantsFable, lastResort)).sort((a, b) => {
       const routed = outside(a) - outside(b); if (routed) return routed;
       const tier = diverts(a) - diverts(b); if (tier) return tier;
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
@@ -304,13 +322,24 @@ export class AccountPool {
     });
     // Prefer accounts under the switch threshold; only when none is left does
     // an account over it (but not spent) get the request rather than a 429.
-    const selected = ranked(false)[0] || ranked(true)[0] || null;
-    // A pinned account that is only excluded for this request (a transient
-    // failover) or at its concurrency cap is still the session's home: this
-    // request spills elsewhere, the pin stays, and the next turn comes back to
-    // its warm cache. Only a home that is genuinely gone is replaced.
-    if (selected) { selected.inflight++; if (!pinned || !this.isHome(pinned, wantsFable)) this.remember(key, selected.id); this.noteRoute(route, selected); }
-    return selected;
+    return ranked(false)[0] || ranked(true)[0] || null;
+  }
+  private readonly availableNow: Judge = (a, excluded, wantsFable, lastResort) => this.available(a, excluded, wantsFable, lastResort);
+  private readonly lookOnly: Judge = (a, excluded, wantsFable, lastResort) => this.eligible(a, excluded, wantsFable, lastResort) && !this.atConcurrencyCap(a);
+
+  // Where a new request — one with no session pin yet — would go right now,
+  // without taking a slot, pinning, clearing anything or calling upstream.
+  // A preview, not a promise: a pinned session or a request racing this one
+  // can land elsewhere. null when nothing could take it (all spent or full).
+  preview(wantsFable: boolean, route: Route | null = null): RuntimeAccount | null {
+    return this.pick(this.scope(NO_EXCLUSIONS, route), wantsFable, route, this.lookOnly);
+  }
+
+  // The preview targets the dashboard marks, by credential id.
+  nextTargets(): NextTargets {
+    const id = (a: RuntimeAccount | null) => a?.credentialId ?? null;
+    const routes = Object.fromEntries(this.routes.map((route) => [route.name, id(this.preview(false, route))]));
+    return { general: id(this.preview(false)), ...(this.provider.fableModel ? { fable: id(this.preview(true)) } : {}), ...(this.routes.length ? { routes } : {}) };
   }
 
   // A prefer route that has to send a request elsewhere says so once, and
@@ -338,8 +367,8 @@ export class AccountPool {
 
   // Whether a non-Fable request should leave this account for one that does
   // not reserve Fable — only when such an account can actually take it.
-  private divertsOff(account: RuntimeAccount, wantsFable: boolean, excluded: Set<string>): boolean {
-    return !wantsFable && this.reservesFable(account) && this.accounts.some((a) => a !== account && !this.reservesFable(a) && this.available(a, excluded, false));
+  private divertsOff(account: RuntimeAccount, wantsFable: boolean, excluded: Set<string>, judge: Judge = this.availableNow): boolean {
+    return !wantsFable && this.reservesFable(account) && this.accounts.some((a) => a !== account && !this.reservesFable(a) && judge(a, excluded, false, false));
   }
 
   // Whether an account is still a valid home for a session, judged without
@@ -902,6 +931,7 @@ export class AccountPool {
     // What the dashboard needs to mark route accounts, worked out here since
     // the dashboard cannot judge availability itself. Judged without side
     // effects and without any request's exclusions.
+    target.next ??= {}; target.next[this.provider.id] = this.nextTargets();
     if (this.routes.length) {
       target.routes ??= [];
       for (const route of this.routes) {
