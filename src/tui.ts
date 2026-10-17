@@ -4,6 +4,7 @@ import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, displayOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
+import { createHostTracker } from './host-metrics.js';
 import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
 import { liveState, runningPid } from './runtime.js';
@@ -22,9 +23,12 @@ export async function runTui(): Promise<void> {
   const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); return displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)); };
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
+  // This PC's CPU/RAM for the header, re-sampled on every redraw (the 500 ms
+  // tick), so the CPU% is the load over the last half second.
+  const host = createHostTracker();
   const screen = startScreen(process.stdout, async ({ width, height }) => {
     const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
-    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits, routes: routeEditor });
+    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits, routes: routeEditor, host: host.sample() });
   });
   const render = (): Promise<void> => screen.render();
 
