@@ -255,6 +255,7 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 | `proxy.maxBodyMb` | `512` | Opcional. Tamaño máximo del cuerpo de una petición que acepta el relé, en MB. Un número mayor que `0` y como mucho `4096`; otro valor detiene el arranque con el motivo. Un cuerpo mayor no se envía: el relé responde `413` y registra solo el tamaño y el límite. El `413` del propio upstream llega al cliente sin cambios. |
 | `proxy.maxInflightBodyMb` | `1024` | Opcional. Lo que pueden sumar, en MB, todos los cuerpos de petición retenidos en memoria a la vez (ambos proveedores). Sin definir, nunca menor que `proxy.maxBodyMb`; por debajo de él, o si no es un número mayor que `0` y como mucho `65536`, detiene el arranque con el motivo. Al superarlo la petición recibe `429` (`x-teamai-429-reason: body_budget`). |
+| `proxy.bodyTimeoutMs` | `300000` | Opcional. Cuánto puede tardar en llegar el cuerpo de una petición, en ms; `0` sin límite. Pasado ese tiempo responde `408` (`x-teamai-408-reason: body_timeout`) y devuelve su parte de `proxy.maxInflightBodyMb`. Un entero de `0` a `86400000`; otro valor detiene el arranque con el motivo. |
 
 Cambia un puerto si otro proceso ya lo ocupa: esa es la causa habitual de un
 arranque fallido, y el motivo aparece en `server-start.log`.

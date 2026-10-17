@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
-import { BodyBudget, createProxy, DEFAULT_MAX_BODY_MB, DEFAULT_MAX_INFLIGHT_BODY_MB, maxBodyBytes, maxInflightBodyBytes, type BodyOptions } from '../src/proxy.js';
+import { BodyBudget, bodyTimeoutMs, createProxy, DEFAULT_BODY_TIMEOUT_MS, DEFAULT_MAX_BODY_MB, DEFAULT_MAX_INFLIGHT_BODY_MB, maxBodyBytes, maxInflightBodyBytes, type BodyOptions } from '../src/proxy.js';
 import { defaultConfig } from '../src/storage.js';
 import type { Provider, StoredAccount } from '../src/types.js';
 
@@ -224,4 +224,44 @@ test('a body over 32 MB that is relayed leaves its size in the log, never its co
     assert.match(line, /Codex POST \/codex\/responses large request body 33\.0 MB \(34603008 bytes\)/);
     assert.equal(line.includes('MARKER'), false);
   } finally { r.close(); }
+});
+
+test('an upload that stalls is cut at the body time limit with a 408 that says so, and gives back its budget', async () => {
+  const budget = new BodyBudget(4 * MB);
+  const r = await rig(ok, { limit: 2 * MB, budget, timeoutMs: 300 });
+  try {
+    const started = Date.now();
+    const slow = upload(r.port, 2 * MB, MB);
+    const res = await slow.response;
+    assert.ok(Date.now() - started >= 250, 'not before the limit');
+    assert.equal(res.status, 408);
+    assert.equal(res.headers['x-teamai-408-reason'], 'body_timeout');
+    const answer = JSON.parse(res.text) as { error: { type: string; message: string } };
+    assert.equal(answer.error.type, 'request_timeout');
+    assert.match(answer.error.message, /proxy\.bodyTimeoutMs/); assert.match(answer.error.message, /1048576 bytes\) of 2097152 received/);
+    assert.deepEqual(r.received, [], 'never went upstream');
+    await until(() => budget.used === 0);
+    assert.ok(r.events.some((e) => /→ 408 body_timeout after 0\.3s, 1\.0 MB \(1048576 bytes\) of 2097152 received/.test(e)), r.events.join(' | '));
+    // A body that arrives in time is unaffected.
+    const fine = await r.call(bodyOf(MB)); assert.equal(fine.status, 200); await fine.text();
+  } finally { r.close(); }
+});
+
+test('an over-limit upload that stalls while it is drained is cut at the time limit too', async () => {
+  const r = await rig(ok, { limit: MB, timeoutMs: 300 });
+  try {
+    const slow = upload(r.port, 4 * MB, 2 * MB);
+    const res = await slow.response;
+    assert.equal(res.status, 408);
+  } finally { r.close(); }
+});
+
+test('proxy.bodyTimeoutMs: 300 s by default, 0 turns it off, anything else invalid is refused', () => {
+  assert.equal(DEFAULT_BODY_TIMEOUT_MS, 300_000);
+  assert.equal(bodyTimeoutMs(undefined), 300_000);
+  assert.equal(bodyTimeoutMs(0), 0);
+  assert.equal(bodyTimeoutMs(60_000), 60_000);
+  for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '300000', null, 86_400_001]) {
+    assert.throws(() => bodyTimeoutMs(bad), /proxy\.bodyTimeoutMs must be a whole number of milliseconds from 0 \(off\) to 86400000/, String(bad));
+  }
 });

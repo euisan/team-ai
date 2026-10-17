@@ -38,6 +38,9 @@ export interface TeamAIConfig {
     // What all request bodies held at once may add up to, in MB; 1024 (or
     // maxBodyMb, if larger) when absent (see proxy.ts).
     maxInflightBodyMb?: number;
+    // How long a request body may take to arrive, in ms; 300000 when absent,
+    // 0 for no limit (see proxy.ts).
+    bodyTimeoutMs?: number;
   };
   switchThreshold: number;
   warmupIntervalMs?: number;

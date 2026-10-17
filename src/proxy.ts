@@ -74,13 +74,32 @@ export class BodyBudget {
   give(bytes: number): void { this.used = Math.max(0, this.used - bytes); }
 }
 
+// How long a request body may take to arrive, from proxy.bodyTimeoutMs. A body
+// is read whole before anything goes upstream, and the budget above holds what
+// has arrived, so an upload that stalls near the limit would otherwise pin its
+// share for as long as the client keeps the socket open. 300 s is what Node's
+// own requestTimeout already allowed, silently; the relay now answers 408 and
+// says why. Clients upload over loopback, so a real body takes seconds at most.
+// 0 turns the limit off (Node's guard then too).
+export const DEFAULT_BODY_TIMEOUT_MS = 300_000;
+const MAX_BODY_TIMEOUT_MS = 86_400_000;
+export function bodyTimeoutMs(value: unknown): number {
+  if (value === undefined) return DEFAULT_BODY_TIMEOUT_MS;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_BODY_TIMEOUT_MS) throw new Error(`proxy.bodyTimeoutMs must be a whole number of milliseconds from 0 (off) to ${MAX_BODY_TIMEOUT_MS}, not ${JSON.stringify(value)}`);
+  return value;
+}
+
 // The body limits createProxy applies. A bare number is the per-body limit.
-export interface BodyOptions { limit: number; budget?: BodyBudget | null }
+export interface BodyOptions { limit: number; budget?: BodyBudget | null; timeoutMs?: number }
 
 export function formatBytes(bytes: number): string { return `${(bytes / MB).toFixed(1)} MB (${bytes} bytes)`; }
 
 class BodyTooLarge extends Error {
   constructor(readonly size: number, readonly limit: number) { super(`Request body is ${formatBytes(size)}, over the relay's ${formatBytes(limit)} limit (proxy.maxBodyMb in config.json)`); }
+}
+class BodyTimeout extends Error {
+  constructor(readonly size: number, readonly declared: number | null, readonly timeoutMs: number) { super(`Request body did not arrive within ${timeoutMs / 1000}s (proxy.bodyTimeoutMs in config.json): ${BodyTimeout.received(size, declared)}`); }
+  static received(size: number, declared: number | null): string { return `${formatBytes(size)}${declared !== null ? ` of ${declared}` : ''} received`; }
 }
 class BodyBudgetFull extends Error {
   constructor(readonly size: number, readonly held: number, readonly limit: number) { super(`Request body is ${formatBytes(size)}, and the relay already holds ${formatBytes(held)} of request bodies in flight, against its ${formatBytes(limit)} limit (proxy.maxInflightBodyMb in config.json). Retry in a few seconds.`); }
@@ -102,25 +121,35 @@ function authorized(req: IncomingMessage, token: string): boolean { const raw = 
 // a body that does not fit (by its declared length, or once a chunk does not)
 // gives back what it took at once and is drained the same way. On success the
 // caller owns body.length bytes of the budget and gives them back.
-async function readBody(req: IncomingMessage, limit: number, budget: BodyBudget | null): Promise<Buffer> {
-  const declared = Number(req.headers['content-length']);
-  let parts: Buffer[] = []; let size = 0; let taken = 0;
-  let over = Number.isFinite(declared) && declared > limit;
-  let full = !over && budget !== null && Number.isFinite(declared) && declared > budget.free;
-  let heldByOthers = full ? budget!.used : 0;
-  const drop = (): void => { budget?.give(taken); taken = 0; parts = []; };
-  try {
-    for await (const chunk of req) {
-      const value = chunk as Buffer; size += value.length;
+// A body that has not fully arrived within timeoutMs gives back its budget and
+// is answered 408; reading stops there.
+function readBody(req: IncomingMessage, limit: number, budget: BodyBudget | null, timeoutMs: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers['content-length']); const known = Number.isFinite(declared);
+    let parts: Buffer[] = []; let size = 0; let taken = 0;
+    let over = known && declared > limit;
+    let full = !over && budget !== null && known && declared > budget.free;
+    let heldByOthers = full ? budget!.used : 0;
+    const drop = (): void => { budget?.give(taken); taken = 0; parts = []; };
+    const onData = (value: Buffer): void => {
+      size += value.length;
       if (size > limit && !over) { over = true; drop(); }
-      if (over || full) continue;
-      if (budget && !budget.take(value.length)) { full = true; drop(); heldByOthers = budget.used; continue; }
+      if (over || full) return;
+      if (budget && !budget.take(value.length)) { full = true; drop(); heldByOthers = budget.used; return; }
       taken += value.length; parts.push(value);
-    }
-  } catch (error) { drop(); throw error; }
-  if (over) throw new BodyTooLarge(size, limit);
-  if (full) throw new BodyBudgetFull(size, heldByOthers, budget!.limit);
-  return parts.length === 1 ? parts[0]! : Buffer.concat(parts, size);
+    };
+    const settle = (outcome: () => void): void => { clearTimeout(timer); req.off('data', onData); req.off('end', onEnd); req.off('error', onError); req.off('close', onClose); outcome(); };
+    const onEnd = (): void => settle(() => {
+      if (over) return reject(new BodyTooLarge(size, limit));
+      if (full) return reject(new BodyBudgetFull(size, heldByOthers, budget!.limit));
+      resolve(parts.length === 1 ? parts[0]! : Buffer.concat(parts, size));
+    });
+    const onError = (error: Error): void => settle(() => { drop(); reject(error); });
+    // A client that goes away mid-upload: close without end.
+    const onClose = (): void => { if (!req.complete) onError(new Error('client closed the connection before the request body was complete')); };
+    const timer = timeoutMs > 0 ? setTimeout(() => settle(() => { drop(); req.pause(); reject(new BodyTimeout(size, known ? declared : null, timeoutMs)); }), timeoutMs) : undefined;
+    req.on('data', onData); req.once('end', onEnd); req.once('error', onError); req.once('close', onClose);
+  });
 }
 // "network error" alone hid whether a token refresh or the upstream call
 // failed, and why: fetch wraps the socket error, so the code lives on cause.
@@ -173,8 +202,8 @@ function finalStatus(res: ServerResponse, track: RequestTrack): number | string 
 }
 
 export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message)), body: number | BodyOptions = DEFAULT_MAX_BODY_MB * MB): Server {
-  const { limit: bodyLimit, budget = null } = typeof body === 'number' ? { limit: body } : body;
-  return createServer(async (req, res) => {
+  const { limit: bodyLimit, budget = null, timeoutMs = DEFAULT_BODY_TIMEOUT_MS } = typeof body === 'number' ? { limit: body } : body;
+  const server = createServer(async (req, res) => {
     let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {}, setEnd: () => {} };
     try {
       if (!authorized(req, clientToken)) return json(res, 401, { error: 'Unauthorized local client' });
@@ -200,7 +229,14 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       let held = 0;
       try {
         let body: Buffer;
-        try { body = await readBody(req, bodyLimit, budget); held = body.length; } catch (error) {
+        try { body = await readBody(req, bodyLimit, budget, timeoutMs); held = body.length; } catch (error) {
+          if (error instanceof BodyTimeout) {
+            onChange(`${pool.provider.label} ${req.method} ${path} → 408 body_timeout after ${error.timeoutMs / 1000}s, ${BodyTimeout.received(error.size, error.declared)}`);
+            // The rest of the upload is not read: close the connection once
+            // the answer is out, rather than leave the socket half-read.
+            res.once('finish', () => req.destroy());
+            return json(res, 408, { error: { type: 'request_timeout', message: error.message } }, { 'x-teamai-408-reason': 'body_timeout', connection: 'close' });
+          }
           if (error instanceof BodyBudgetFull) {
             // Not this request's fault and not for long: a 429 with a reason,
             // like a relay at its concurrency cap, in the 413's error shape.
@@ -231,6 +267,10 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       if (opened) { const id = opened; const status = finalStatus(res, track); safely(() => activity.end(id, status)); }
     }
   });
+  // Node's own whole-request limit (300 s by default) would otherwise cut a
+  // longer configured limit short, and silently; keep it just behind ours.
+  server.requestTimeout = timeoutMs === 0 ? 0 : Math.max(timeoutMs + 5_000, DEFAULT_BODY_TIMEOUT_MS);
+  return server;
 }
 
 async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack, route: Route | null = null): Promise<void> {

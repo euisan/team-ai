@@ -140,3 +140,20 @@ test('the server refuses to start when proxy.maxInflightBodyMb is below proxy.ma
     assert.equal(await listening(h.config.proxy.codexPort), false);
   } finally { await h.restore(); }
 });
+
+test('proxy.bodyTimeoutMs from config.json reaches the running proxy', async () => {
+  const h = await home((c) => { c.proxy.bodyTimeoutMs = 200; });
+  const server = await startServer({ background: false });
+  try {
+    const status = await new Promise<number>((resolve, reject) => {
+      const slow = request({ host: '127.0.0.1', port: h.config.proxy.codexPort, path: '/v1/responses', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-length': MB } }, (res) => { res.resume(); resolve(res.statusCode!); });
+      slow.on('error', reject); slow.write(Buffer.alloc(MB / 2, 'a'));
+    });
+    assert.equal(status, 408);
+  } finally { await server.stop(); await h.restore(); }
+});
+
+test('the server refuses to start on an invalid proxy.bodyTimeoutMs', async () => {
+  const h = await home((c) => { c.proxy.bodyTimeoutMs = -5; });
+  try { await assert.rejects(startServer({ background: false }), /proxy\.bodyTimeoutMs must be a whole number of milliseconds/); } finally { await h.restore(); }
+});

@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import type { Server } from 'node:http';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog } from './activity.js';
-import { BodyBudget, createProxy, maxBodyBytes, maxInflightBodyBytes, secureEqual, type BodyOptions } from './proxy.js';
+import { BodyBudget, bodyTimeoutMs, createProxy, maxBodyBytes, maxInflightBodyBytes, secureEqual, type BodyOptions } from './proxy.js';
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { handleRouteControl } from './route-control.js';
@@ -53,7 +53,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // that turns away every request or none.
   const bodyLimit = maxBodyBytes(config.proxy.maxBodyMb);
   // One budget for every proxy in this process: the memory is shared.
-  const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)) };
+  const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)), timeoutMs: bodyTimeoutMs(config.proxy.bodyTimeoutMs) };
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   const balance = config.routing?.balance ?? 'pacing';
