@@ -4,6 +4,8 @@ import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, displayOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
+import { applyRoutes, describeReload } from './route-config.js';
+import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
 import { liveState, runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
 import type { ResetCredit, StoredAccount } from './types.js';
@@ -16,13 +18,14 @@ export async function runTui(): Promise<void> {
   // it back in configured order for anyone reading it as a roster.
   let sortByHeadroom = true;
   let credits: CreditPicker | undefined; let creditList: ResetCredit[] = []; let creditAccount: string | null = null;
+  let routeEditor: RouteEditor | undefined;
   const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); return displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)); };
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   const render = async (): Promise<void> => {
     const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40);
-    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits });
+    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits, routes: routeEditor });
     process.stdout.write(`${ESC}H${lines.join('\n')}`);
   };
 
@@ -91,6 +94,23 @@ export async function runTui(): Promise<void> {
     finally { busy = false; }
   };
 
+  // Model routes ('g'), for the provider of the selected row. Every change is
+  // checked by the server's own route parser before it is written, so nothing
+  // saved here can stop the relay from starting; a running server then
+  // re-reads the routes in place. A failed reload leaves the (valid) file
+  // saved and says so.
+  const openRoutes = async (): Promise<void> => {
+    const account = selected(await rows());
+    routeEditor = openRouteEditor(await loadConfig(), account?.provider ?? 'claude'); mode = 'routes';
+  };
+  const routeKey = async (key: string): Promise<void> => {
+    const current = routeEditor; if (!current) return;
+    try { routeEditor = await pressRouteKey(current, key, async (pending) => { routeEditor = pending; busy = true; await render(); }); }
+    catch (error) { routeEditor = { ...current, error: (error as Error).message }; }
+    finally { busy = false; }
+    if (!routeEditor) mode = 'normal';
+  };
+
   const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
   const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
     busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
@@ -102,7 +122,8 @@ export async function runTui(): Promise<void> {
   await new Promise<void>((resolve) => process.stdin.on('data', async (key: string) => {
     if (busy) return; message = '';
     if (key === '' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
-    if (key === '\x1b') { mode = 'normal'; credits = undefined; }
+    if (mode === 'routes' && routeEditor) await routeKey(key);
+    else if (key === '\x1b') { mode = 'normal'; credits = undefined; }
     else if (mode === 'credits' && credits) {
       if (credits.phase === 'pick' && credits.items.length) {
         if (key === '\x1b[A' || key === 'k') credits = { ...credits, index: Math.max(0, credits.index - 1) };
@@ -124,12 +145,30 @@ export async function runTui(): Promise<void> {
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
       else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
-      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'p') { await capture(); }
+      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); }
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();
   }));
   clearInterval(timer); if (closed) { process.stdin.setRawMode(false); process.stdin.pause(); process.stdout.write(`${ESC}?25h${ESC}?1049l`); }
+}
+
+// One key in the route editor, saving when the key commits a change: through
+// applyRoutes (the server's own parser, then the write, then a reload), and
+// back to the list on the saved route. A refused save keeps the screen as it
+// was with the reason; a failed reload keeps the saved file and says so.
+// Returns undefined when the key closes the editor. onSaving sees the screen
+// before the save starts, so it can be drawn while the write is in progress.
+export async function pressRouteKey(editor: RouteEditor, key: string, onSaving: (editor: RouteEditor) => Promise<void> = async () => {}): Promise<RouteEditor | undefined> {
+  const result = routeEditorKey(editor, key);
+  if (result.close) return undefined;
+  if (!result.save) return result.editor;
+  const save = result.save; await onSaving(result.editor);
+  try {
+    const outcome = await applyRoutes(save.provider, save.routes);
+    const reopened = openRouteEditor(await loadConfig(), save.provider, save.focus, `${save.notice} — ${describeReload(outcome)}`);
+    return outcome.status === 'failed' ? { ...reopened, notice: undefined, warning: `${save.notice}: ${describeReload(outcome)}` } : reopened;
+  } catch (error) { return { ...result.editor, phase: result.editor.phase === 'delete' ? 'list' : result.editor.phase, error: (error as Error).message }; }
 }
 
 async function restartDaemon(): Promise<void> {
