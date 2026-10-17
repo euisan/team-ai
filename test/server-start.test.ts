@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, request, type Server } from 'node:http';
+import { watch } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -131,6 +132,28 @@ test('proxy.maxInflightBodyMb from config.json reaches the running proxy, shared
     assert.match(res.text, /1\.0 MB \(1048576 bytes\)/);
     slow.destroy();
   } finally { await server.stop(); await h.restore(); }
+});
+
+// stop() saves last: a request it cuts still closes its activity line after
+// the drain, and that line used to arm the 25 ms save debounce again, so
+// state.json and credentials.json were rewritten after stop() returned — and
+// under load the restore() below failed with ENOTEMPTY while removing the home.
+// Without the fix a write shows up in every run; the 200 ms only bounds how
+// long the test looks for one.
+test('nothing is written to TEAMAI_HOME once stop() has returned', async () => {
+  const h = await home((c) => { c.proxy.maxBodyMb = 1; c.proxy.maxInflightBodyMb = 1; });
+  const server = await startServer({ background: false });
+  let writes: string[] = [];
+  try {
+    const slow = request({ host: '127.0.0.1', port: h.config.proxy.codexPort, path: '/v1/responses', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-length': MB } });
+    slow.on('error', () => {}); slow.write(Buffer.alloc(MB / 2, 'a'));
+    await new Promise((r) => setTimeout(r, 100));
+    slow.destroy();
+    await server.stop();
+    const seen: string[] = []; const watcher = watch(h.root, (event, file) => seen.push(`${event} ${file}`));
+    await new Promise((r) => setTimeout(r, 200)); watcher.close(); writes = seen;
+  } finally { await h.restore(); }
+  assert.deepEqual(writes, []);
 });
 
 test('the server refuses to start when proxy.maxInflightBodyMb is below proxy.maxBodyMb', async () => {

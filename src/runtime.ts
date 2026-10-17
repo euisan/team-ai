@@ -67,6 +67,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // Requests in flight. Not restored from state.json: whatever a previous
   // process had open died with it.
   let closing = false;
+  // Set by stop() as it takes the final save: nothing reaches disk after it.
+  // A request cut by stop() still closes its activity line afterwards, and
+  // that used to arm a save that landed after stop() had returned.
+  let stopped = false;
   // Other agents' usage, read on its own timer and isolated from the relay:
   // a failure there is a row on the dashboard, never an error here.
   const external = new ExternalUsageMonitor(externalUsageSettings(config));
@@ -80,12 +84,12 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // shows, so it rewrites state.json alone; credentials wait for a real save.
   const persistStateOnly = async (): Promise<void> => { await saveState(snapshot()); };
   let fullSave = false;
-  const schedule = (): void => { if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; const run = fullSave ? persistNow : persistStateOnly; fullSave = false; saving = saving.then(run, run); }, 25); };
+  const schedule = (): void => { if (saveTimer || stopped) return; saveTimer = setTimeout(() => { saveTimer = null; const run = fullSave ? persistNow : persistStateOnly; fullSave = false; saving = saving.then(run, run); }, 25); };
   const persist = (event?: string | ActivityEvent): void => { if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
   const persistActivity = (): void => schedule();
   // Reset credits: the ledger goes to disk before and after each consume call,
   // through the same save chain so it never races a scheduled save.
-  const saveImmediately = (): Promise<void> => { saving = saving.then(persistNow, persistNow); return saving; };
+  const saveImmediately = (): Promise<void> => { if (stopped) return Promise.reject(new Error('server stopped')); saving = saving.then(persistNow, persistNow); return saving; };
   for (const warning of routeWarnings) persist(warning);
   for (const pool of pools) {
     pool.log = (message) => persist(message); pool.saveNow = saveImmediately;
@@ -227,7 +231,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
     servers.forEach((server) => server.closeAllConnections());
-    closing = true; await drained; await saving; await persistNow(); await releaseServerFile(serverPath);
+    closing = true; await drained;
+    // The final save goes through the save chain, after anything already on it,
+    // and is the last write: later events stay in memory only.
+    stopped = true; if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    saving = saving.then(persistNow, persistNow); await saving; await releaseServerFile(serverPath);
   };
   return { stop };
 }
