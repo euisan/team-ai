@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { chmod, mkdir, open, readFile, writeFile, lstat, symlink } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
-import { relayedCodexConfig } from './codex-config.js';
+import { linkShadowEntries, relayedCodexConfig } from './codex-config.js';
 import { isRedactLevel } from './redact.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { parseRoutes } from './routes.js';
@@ -126,8 +126,11 @@ async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
   }
   const shadow = join(process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai'), 'codex-home'); await mkdir(shadow, { recursive: true, mode: 0o700 });
   const originalHome = process.env.CODEX_HOME || join(homedir(), '.codex'); let original = ''; try { original = await readFile(join(originalHome, 'config.toml'), 'utf8'); } catch { /* optional */ }
-  await writeFile(join(shadow, 'config.toml'), relayedCodexConfig(original, config.proxy.host, config.proxy.codexPort), { mode: 0o600 }); await chmod(shadow, 0o700);
-  for (const name of ['skills', 'plugins', 'rules']) { const source = join(originalHome, name); const target = join(shadow, name); try { await lstat(target); } catch { try { await lstat(source); await symlink(source, target, 'dir'); } catch { /* optional */ } } }
+  // The relayed config is rewritten on every launch; the previous one is read
+  // first so hook trust granted inside a relayed session is not lost.
+  let previousShadow = ''; try { previousShadow = await readFile(join(shadow, 'config.toml'), 'utf8'); } catch { /* first launch */ }
+  await writeFile(join(shadow, 'config.toml'), relayedCodexConfig(original, config.proxy.host, config.proxy.codexPort, { originalHome, shadowHome: shadow, previousShadow }), { mode: 0o600 }); await chmod(shadow, 0o700);
+  await linkShadowEntries(originalHome, shadow);
   const overrides = [
     '-c', 'model_provider="teamai"',
     '-c', `model_providers.teamai.name="TeamAI Codex Relay"`,
