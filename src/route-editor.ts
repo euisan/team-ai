@@ -28,7 +28,15 @@ export interface RouteEditor {
 }
 // A key that commits something: the provider's whole new list, and the route
 // the cursor should rest on afterwards.
-export interface RouteSave { provider: ProviderId; routes: RouteConfig[]; focus: string | null; notice: string }
+export interface RouteSave {
+  provider: ProviderId;
+  routes: RouteConfig[];
+  focus: string | null;
+  notice: string;
+  // route-config checks this snapshot immediately before writing. A CLI edit
+  // made while this screen was open must survive the attempted TUI save.
+  expected: RouteConfig[];
+}
 
 export function openRouteEditor(config: Pick<TeamAIConfig, 'accounts' | 'routes'>, provider: ProviderId, focus: string | null = null, notice?: string): RouteEditor {
   const all = { claude: [...(config.routes?.claude ?? [])], codex: [...(config.routes?.codex ?? [])] };
@@ -85,7 +93,7 @@ export function routeEditorKey(editor: RouteEditor, key: string): { editor: Rout
     const route = routes[editor.index];
     if ((key === 'y' || key === '\r') && route) {
       const next = routes.filter((_, i) => i !== editor.index);
-      return { editor, save: { provider: editor.provider, routes: next, focus: next[Math.min(editor.index, next.length - 1)]?.name ?? null, notice: `Deleted route ${route.name}` } };
+      return { editor, save: { provider: editor.provider, routes: next, focus: next[Math.min(editor.index, next.length - 1)]?.name ?? null, notice: `Deleted route ${route.name}`, expected: routes } };
     }
     if (key === 'n' || key === '\x1b') return { editor: { ...editor, phase: 'list', notice: 'Delete cancelled' } };
     return { editor };
@@ -101,7 +109,7 @@ export function routeEditorKey(editor: RouteEditor, key: string): { editor: Rout
       if (key === '\t') return { editor };
       const route = draftToRoute(edit);
       const next = [...routes]; if (edit.at === null) next.push(route); else next[edit.at] = route;
-      return { editor, save: { provider: editor.provider, routes: next, focus: route.name, notice: `${edit.at === null ? 'Added' : 'Saved'} route ${route.name}` } };
+      return { editor, save: { provider: editor.provider, routes: next, focus: route.name, notice: `${edit.at === null ? 'Added' : 'Saved'} route ${route.name}`, expected: routes } };
     }
     if (field === 'name' || field === 'match') {
       if (BACKSPACE.has(key)) return set({}, { [field]: draft[field].slice(0, -1) });
@@ -139,7 +147,7 @@ export function routeEditorKey(editor: RouteEditor, key: string): { editor: Rout
   const to = editor.index + shift;
   if (shift && routes[editor.index] && to >= 0 && to < routes.length) {
     const next = [...routes]; [next[editor.index], next[to]] = [next[to]!, next[editor.index]!];
-    return { editor, save: { provider: editor.provider, routes: next, focus: routes[editor.index]!.name, notice: `Moved route ${routes[editor.index]!.name} ${shift < 0 ? 'up' : 'down'}` } };
+    return { editor, save: { provider: editor.provider, routes: next, focus: routes[editor.index]!.name, notice: `Moved route ${routes[editor.index]!.name} ${shift < 0 ? 'up' : 'down'}`, expected: routes } };
   }
   return { editor };
 }
