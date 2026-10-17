@@ -402,7 +402,11 @@ async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse,
 export type StreamEnd = 'completed' | 'incomplete' | 'failed';
 const STREAM_ENDS: Record<string, StreamEnd> = { 'response.completed': 'completed', 'response.done': 'completed', 'response.incomplete': 'incomplete', 'response.failed': 'failed', message_stop: 'completed' };
 
-function isEventStream(headers: Headers): boolean { return /^text\/event-stream\b/i.test(headers.get('content-type') ?? ''); }
+// chatgpt.com's /codex/responses sends its SSE stream with no content-type at
+// all, so an absent type is watched too. Any other declared type (JSON, text)
+// is not: the watcher only ever turns a 499 into a finished request, and a body
+// that says it is not an event stream has no terminal event to find.
+function isEventStream(headers: Headers): boolean { const type = headers.get('content-type')?.trim() ?? ''; return type === '' || /^text\/event-stream\b/i.test(type); }
 
 // Watches an SSE body for its terminal event without holding it: events are
 // cut at blank lines across chunk boundaries (LF, CRLF or CR), and of each
