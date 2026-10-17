@@ -33,6 +33,8 @@ export interface TeamAIConfig {
     // otherwise strand every open session; listing the old port here keeps those
     // sessions alive. The built-in default port is always included.
     legacyPorts?: Partial<Record<ProviderId, number[]>>;
+    // The largest request body relayed, in MB; 512 when absent (see proxy.ts).
+    maxBodyMb?: number;
   };
   switchThreshold: number;
   warmupIntervalMs?: number;

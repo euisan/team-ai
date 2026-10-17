@@ -9,17 +9,50 @@ import type { Provider, RuntimeAccount } from './types.js';
 // Upper bound on waiting for upstream response headers only. Never applies to the body.
 const HEADER_TIMEOUT_MS = 300_000;
 
-const MAX_BODY = 32 * 1024 * 1024;
+// The largest request body the relay accepts, in MB (MiB), from
+// proxy.maxBodyMb. It used to be a fixed 32 MB, and a long Codex session that
+// had opened several screenshots outgrew it: the relay answered 413 itself,
+// /compact (which resends the same history) hit the same 413, and the session
+// was lost without the request ever reaching OpenAI (2026-10-17). The default
+// is not smaller than either upstream: OpenAI documents up to 512 MB per
+// request, Anthropic's Messages API 32 MB. Above the upstream's own limit the
+// upstream answers, and that answer goes back to the client as it is.
+export const DEFAULT_MAX_BODY_MB = 512;
+// Node 20's Buffer cannot hold more than 4 GiB.
+const MAX_BODY_MB_CEILING = 4096;
+const MB = 1024 * 1024;
+
+// proxy.maxBodyMb as bytes, or a startup error that says what is wrong with it.
+export function maxBodyBytes(value: unknown): number {
+  if (value === undefined) return DEFAULT_MAX_BODY_MB * MB;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_BODY_MB_CEILING) throw new Error(`proxy.maxBodyMb must be a number of megabytes above 0 and at most ${MAX_BODY_MB_CEILING}, not ${JSON.stringify(value)}`);
+  return Math.floor(value * MB);
+}
+
+export function formatBytes(bytes: number): string { return `${(bytes / MB).toFixed(1)} MB (${bytes} bytes)`; }
+
+class BodyTooLarge extends Error {
+  constructor(readonly size: number, readonly limit: number) { super(`Request body is ${formatBytes(size)}, over the relay's ${formatBytes(limit)} limit (proxy.maxBodyMb in config.json)`); }
+}
 
 export function secureEqual(a: string, b: string): boolean {
   const aa = Buffer.from(a); const bb = Buffer.from(b); const size = Math.max(aa.length, bb.length, 1); const pa = Buffer.alloc(size); const pb = Buffer.alloc(size); aa.copy(pa); bb.copy(pb);
   return timingSafeEqual(pa, pb) && aa.length === bb.length;
 }
 function authorized(req: IncomingMessage, token: string): boolean { const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '') || String(req.headers['x-api-key'] || ''); return secureEqual(raw, token); }
-async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const parts: Buffer[] = []; let size = 0;
-  for await (const chunk of req) { const value = Buffer.from(chunk); size += value.length; if (size > MAX_BODY) throw Object.assign(new Error('Request too large'), { status: 413 }); parts.push(value); }
-  return Buffer.concat(parts);
+// The body is held whole, not streamed through: a failover (quota, transient,
+// auth refresh, network error, reset credit) resends the same bytes to another
+// account, Claude's body is rewritten per account, and the account itself is
+// chosen from the body's model and session. Chunks are kept as the socket
+// delivered them (no per-chunk copy). Past the limit the rest is read and
+// dropped, only counted, so the 413 names the real size and the client is not
+// cut off mid-upload before it can read the answer.
+async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+  const declared = Number(req.headers['content-length']);
+  const parts: Buffer[] = []; let size = 0; let over = Number.isFinite(declared) && declared > limit;
+  for await (const chunk of req) { const value = chunk as Buffer; size += value.length; if (size > limit) over = true; if (!over) parts.push(value); }
+  if (over) throw new BodyTooLarge(size, limit);
+  return parts.length === 1 ? parts[0]! : Buffer.concat(parts, size);
 }
 // "network error" alone hid whether a token refresh or the upstream call
 // failed, and why: fetch wraps the socket error, so the code lives on cause.
@@ -70,7 +103,7 @@ function finalStatus(res: ServerResponse, track: RequestTrack): number | string 
   return res.headersSent || res.destroyed ? 499 : 502;
 }
 
-export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message))): Server {
+export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message)), bodyLimit = DEFAULT_MAX_BODY_MB * MB): Server {
   return createServer(async (req, res) => {
     let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {} };
     try {
@@ -80,7 +113,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       const id = String(++requestCounter);
       const begin = (): void => safely(() => activity.start({ id, provider: pool.provider.id, providerLabel: pool.provider.label, method: req.method || 'GET', path, account: null, startedAt: Date.now() }));
       // Admission control: reject before buffering a body. localhost is trusted,
-      // so a flood of local clients could otherwise pin one 32 MB buffer each.
+      // so a flood of local clients could otherwise pin one full body each.
       // The counter lives on the pool so the main port and its legacy aliases
       // share one budget. Drain the request first or the socket leaks. The
       // refusal still gets its line, or a saturated relay looks idle.
@@ -93,7 +126,14 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       begin(); opened = id;
       track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })) };
       try {
-        const body = await readBody(req);
+        let body: Buffer;
+        try { body = await readBody(req, bodyLimit); } catch (error) {
+          if (!(error instanceof BodyTooLarge)) throw error;
+          // Never forwarded, so nothing upstream records it: the size and the
+          // limit go to the log; the body itself is not kept or shown.
+          onChange(`${pool.provider.label} ${req.method} ${path} → 413 request body ${formatBytes(error.size)} exceeds proxy.maxBodyMb ${formatBytes(error.limit)}`);
+          return json(res, 413, { error: { type: 'request_too_large', message: error.message } }, { 'x-teamai-413-reason': 'body_limit' });
+        }
         // Session, model and effort for the activity line — three fields, read
         // once; nothing else from the body leaves this function.
         const parsed = parsedBody(body);
@@ -192,6 +232,9 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       const headers = pool.provider.buildHeaders(incomingHeaders(req), account);
       const sendBody = pool.provider.rewriteBody(body, account);
       headers.set('content-length', String(sendBody.length));
+      // Handed to fetch as it is: fetch copies the bytes once on its own, and
+      // a second copy made here held a large body three times per attempt.
+      // Every Buffer here is backed by a plain ArrayBuffer.
       // AbortSignal.timeout(300_000) used to sit here, and it kept running
       // while the body streamed: a turn that thought for more than five
       // minutes was cut at exactly 300s and Claude Code showed "Connection
@@ -203,7 +246,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       dispatchedAt = Date.now();
       const headerTimer = setTimeout(() => headerGuard.abort(new Error('upstream sent no response headers within 300s')), HEADER_TIMEOUT_MS);
       try {
-        response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : new Uint8Array(sendBody), signal: headerGuard.signal });
+        response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : sendBody as Uint8Array<ArrayBuffer>, signal: headerGuard.signal });
       } finally { clearTimeout(headerTimer); }
     } catch (error) {
       // A dropped connection is the network, not the account: on 2026-10-14

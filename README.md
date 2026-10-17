@@ -266,6 +266,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `routes` | — | Optional. Model routes per provider, `{ "claude": [...], "codex": [...] }` (see Model routes). |
 | `externalUsage` | `{ "enabled": true }` | Other agents' usage boxes. `providers.antigravity` / `providers.opencodeGo` / `providers.grok` (`false` hides one), `refreshMs` (default `900000`, minimum `30000`), `source` (`"direct"` or `"orca"`). |
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
+| `proxy.maxBodyMb` | `512` | Optional. Largest request body the relay accepts, in MB. A number above `0` and at most `4096`; anything else stops startup with the reason. |
 
 Change a port if something else already owns it — that is the usual cause of a
 failed start, and the reason appears in `server-start.log`.
@@ -277,6 +278,15 @@ default port and any `proxy.legacyPorts` you list, keeping open sessions alive
 across a port change. A legacy port that something else already owns is skipped
 without affecting the main port, and a socket error after startup is logged
 rather than allowed to take the relay down.
+
+A request body over `proxy.maxBodyMb` is answered by the relay itself with
+`413` and `x-teamai-413-reason: body_limit`, and never sent upstream; the
+Activity pane logs its size and the limit (never its content). The default is
+not smaller than what either upstream documents (OpenAI: 512 MB per request,
+Anthropic Messages: 32 MB), so in practice the upstream decides — and its own
+`413` reaches the client unchanged. Each in-flight request holds its whole body
+in memory, because failing over to another account resends it: lower the limit
+if many very large requests run at once.
 
 ## Scope and compliance
 
