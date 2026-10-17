@@ -50,8 +50,8 @@ const COMPLETED = sse('response.completed', { type: 'response.completed', respon
 
 // Upstream writes its parts, then holds the connection open the way a slow
 // EOF does, until the relay lets go of it.
-const holdOpen = (parts: string[], gapMs = 0): Handler => async (req, res) => {
-  await drain(req); res.writeHead(200, { 'content-type': 'text/event-stream' });
+const holdOpen = (parts: string[], gapMs = 0, headers: Record<string, string> = { 'content-type': 'text/event-stream' }): Handler => async (req, res) => {
+  await drain(req); res.writeHead(200, headers);
   for (const part of parts) { if (res.destroyed) return; res.write(part); if (gapMs) await new Promise((r) => setTimeout(r, gapMs)); }
 };
 
@@ -129,6 +129,63 @@ test('(e) a Claude stream that hangs up before message_stop is still 499', async
   } finally { r.close(); }
 });
 
+// chatgpt.com's /codex/responses was measured sending its SSE stream with no
+// content-type header at all (35 headers, none of them content-type). The
+// relay must watch such a stream as well as a declared one.
+const NO_TYPE = {};
+
+test('(f) no content-type: a client that hangs up right after response.completed is 200', async () => {
+  const r = await rig(holdOpen([CREATED, DELTA, COMPLETED], 0, NO_TYPE));
+  try {
+    await r.call((b) => b.toString().endsWith(COMPLETED));
+    await until(() => r.ends.length === 1);
+    assert.deepEqual(r.ends, [200]);
+  } finally { r.close(); }
+});
+
+test('(f) no content-type: a client that hangs up before response.completed is still 499', async () => {
+  const half = COMPLETED.slice(0, COMPLETED.length - 1);
+  const r = await rig(holdOpen([CREATED, DELTA, half], 10, NO_TYPE));
+  try {
+    await r.call((b) => b.toString().endsWith(half));
+    await until(() => r.ends.length === 1);
+    assert.deepEqual(r.ends, [499]);
+  } finally { r.close(); }
+});
+
+test('(f) a declared application/json body is not watched, even if it reads like a terminal event', async () => {
+  const lookalike = 'data: {"type":"response.completed"}\n\n';
+  const r = await rig(holdOpen([lookalike], 0, { 'content-type': 'application/json' }));
+  try {
+    await r.call((b) => b.toString().endsWith(lookalike));
+    await until(() => r.ends.length === 1);
+    assert.deepEqual(r.ends, [499]);
+  } finally { r.close(); }
+});
+
+test('(f) no content-type: a JSON body is watched but never mistaken for a finished stream', async () => {
+  const body = `${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } }, null, 2)}\n\n`;
+  const r = await rig(holdOpen([body], 0, NO_TYPE));
+  try {
+    await r.call((b) => b.toString().endsWith(body));
+    await until(() => r.ends.length === 1);
+    assert.deepEqual(r.ends, [499]);
+  } finally { r.close(); }
+});
+
+test('(f) regression: the measured Codex response shape — no content-type, one event per chunk, hang-up after completed', async () => {
+  // Header names as measured; every value is synthetic.
+  const headers = { 'cache-control': 'no-cache', 'x-request-id': 'req_synthetic', 'openai-processing-ms': '1', 'cf-ray': 'synthetic', 'strict-transport-security': 'max-age=0', 'x-content-type-options': 'nosniff', 'set-cookie': 'synthetic=1; Path=/' };
+  const parts = [CREATED, sse('response.in_progress', { type: 'response.in_progress', response: { id: 'resp_synthetic' } }), DELTA, sse('response.output_text.done', { type: 'response.output_text.done', text: 'hello' }), COMPLETED];
+  const r = await rig(holdOpen(parts, 5, headers));
+  try {
+    // Codex closes about 2 ms after the last chunk.
+    await r.call((b) => b.toString().endsWith(COMPLETED));
+    await until(() => r.ends.length === 1);
+    assert.deepEqual(r.ends, [200]);
+  } finally { r.close(); }
+});
+
 // The parser on its own, split at every byte offset.
 function watch(chunks: Array<string | Buffer>): StreamEnd | null {
   const seen: StreamEnd[] = []; const w = new SseWatcher((end) => seen.push(end));
@@ -155,6 +212,10 @@ test('the watcher names each terminal event for what it is, and ignores the rest
   // Not over yet: no blank line, a delta that merely mentions the name, an
   // unrelated event, a comment.
   assert.equal(watch(['event: response.completed\ndata: {}\n']), null);
+  // A CRLF split across chunks is one line end, not a blank line: the LF that
+  // opens the next chunk must not end the event early.
+  assert.equal(watch(['event: response.completed\r', '\ndata: {}\r\n']), null);
+  assert.equal(watch(['event: response.completed\r', '\ndata: {}\r\n', '\r\n']), 'completed');
   assert.equal(watch([sse('response.output_text.delta', { type: 'response.output_text.delta', delta: 'response.completed' })]), null);
   assert.equal(watch([sse('message_delta', { type: 'message_delta' }), ': message_stop\n\n']), null);
   // The event field wins over the data's type, and the first terminal event sticks.
