@@ -48,12 +48,12 @@ test('the narrow layout gives every provider its current account and its 5h and 
     assert.match(alice, /3d/, `width ${width}: when the most-spent window resets`);
     // Codex: d1fp9a is current and has only a weekly window.
     const current = line(lines, 'd1fp9a@');
-    assert.match(current, /^ ►/); assert.match(current, /1w +10%/);
-    assert.match(line(lines, 'carol@'), /5h +30% +1w +75%/);
+    assert.match(current, /^ ►/); assert.match(current, /7d +10%/);
+    assert.match(line(lines, 'carol@'), /5h +30% +7d +75%/);
     // The other agents on the same one-line rule.
-    assert.match(line(lines, 'Gemini'), /5h +20% +1w +55%/);
-    assert.match(line(lines, 'Grok'), /1w +25%/);
-    assert.match(line(lines, 'OpenCode'), /5h +5% +1w +33%/);
+    assert.match(line(lines, 'Gemini'), /5h +20% +7d +55%/);
+    assert.match(line(lines, 'Grok'), /7d +25%/);
+    assert.match(line(lines, 'OpenCode'), /5h +5% +7d +33%/);
     if (width >= 46) assert.match(line(lines, 'OpenCode'), /30d +71%/, `width ${width}: the extra window when it fits`);
   }
 });
@@ -96,7 +96,7 @@ test('a very short terminal still shows each provider\'s current account and its
     for (const height of [4, 6, 8]) {
       const lines = frame(width, { height });
       assert.match(line(lines, 'alice'), /5h +62% +7d +84%/, `${width}x${height}`);
-      assert.match(line(lines, 'd1fp9a@'), /1w +10%/, `${width}x${height}`);
+      assert.match(line(lines, 'd1fp9a@'), /7d +10%/, `${width}x${height}`);
     }
     for (let height = 4; height <= 30; height++) {
       const lines = plain(frame(width, { height })); const title = lines.findIndex((text) => text.startsWith('─ Activity'));
