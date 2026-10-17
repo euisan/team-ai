@@ -33,7 +33,9 @@ export async function captureDashboard(options: CaptureOptions): Promise<Capture
   const rawConfig = await loadConfig(); const rawState = await liveState(await loadState());
   const { config, state } = redactSnapshot(rawConfig, rawState, options.level);
   const sortByHeadroom = options.sortByHeadroom ?? true;
-  const width = Math.max(80, options.width ?? 120);
+  // As narrow as the terminal it is taken from, so a capture from a phone
+  // shows the narrow layout that phone was looking at.
+  const width = Math.max(40, options.width ?? 120);
   const selectedId = options.selectedId ?? displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))[0]?.credentialId ?? null;
   // The footer message may name an account ("Added …"), so it goes through
   // the same mask as everything else.
