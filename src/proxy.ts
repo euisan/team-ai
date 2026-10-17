@@ -414,13 +414,20 @@ function isEventStream(headers: Headers): boolean { const type = headers.get('co
 // leading `"type"` of a data line, never a whole response.completed payload.
 // The event name comes from the event field, else from the data's type.
 export class SseWatcher {
-  private static readonly HEAD = 256;
+  static readonly HEAD = 256;
   private head: Buffer[] = []; private headBytes = 0; private afterCr = false;
   private event = ''; private dataType = ''; private sawData = false;
   ended: StreamEnd | null = null;
   constructor(private readonly onEnd: (end: StreamEnd) => void = () => {}) {}
 
+  // Bytes kept of the line being read; never more than HEAD.
+  get held(): number { return this.headBytes; }
+
   feed(chunk: Uint8Array): void {
+    // fetch's reader can deliver an empty chunk. It says nothing, and must not
+    // clear afterCr: the LF that follows would then end a blank line that was
+    // never sent, and an event would count as finished before it is.
+    if (chunk.length === 0) return;
     let start = 0;
     // A CRLF split across chunks: the LF belongs to the line already ended.
     if (this.afterCr && chunk[0] === 10) start = 1;

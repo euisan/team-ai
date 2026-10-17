@@ -232,3 +232,45 @@ test('the watcher leaves the chunks it reads untouched and keeps only line heads
   const big = new SseWatcher(); big.feed(Buffer.from(`event: response.output_text.delta\ndata: "${'y'.repeat(1 << 20)}"\n\n`)); big.feed(Buffer.from(sse('response.completed', {})));
   assert.equal(big.ended, 'completed');
 });
+
+test('a CRLF split across chunks never ends an event before its blank line, even with an empty chunk between', () => {
+  // A short terminal event in CRLF. Its blank line is the CR at length - 2:
+  // until that byte arrives the event is not over, however the bytes are cut.
+  const text = sse('response.completed', { type: 'response.completed' }).replace(/\n/g, '\r\n');
+  const blank = text.length - 2;
+  for (let split = 1; split < text.length; split++) {
+    if (text[split - 1] !== '\r' || text[split] !== '\n') continue;
+    for (let end = split; end <= text.length; end++) {
+      const expected = end > blank ? 'completed' : null;
+      // fetch's reader can hand over a zero-length chunk; it must not forget
+      // that the previous chunk ended on a CR.
+      assert.equal(watch([text.slice(0, split), Buffer.alloc(0), text.slice(split, end)]), expected, `split at ${split}, fed to ${end}`);
+      assert.equal(watch([text.slice(0, split), text.slice(split, end)]), expected, `split at ${split}, fed to ${end}, no empty chunk`);
+    }
+  }
+});
+
+test('the watcher reads only the first 256 bytes of a line, across chunks too', () => {
+  assert.equal(SseWatcher.HEAD, 256);
+  // A data line whose "type" closes exactly at byte 256 is read; one byte of
+  // padding more and the type falls past the head and is not.
+  const line = (pad: number) => `data: {"p":"${'x'.repeat(pad)}","type":"response.completed"}`;
+  const fits = Array.from({ length: 300 }, (_, pad) => pad).find((pad) => line(pad).indexOf('"}') === SseWatcher.HEAD - 1);
+  assert.ok(fits !== undefined);
+  for (const [pad, expected] of [[fits, 'completed'], [fits + 1, null]] as const) {
+    const text = `${line(pad)}\n\n`;
+    assert.equal(watch([text]), expected, `pad ${pad}`);
+    for (let i = 1; i < text.length; i++) assert.equal(watch([text.slice(0, i), text.slice(i)]), expected, `pad ${pad} split at ${i}`);
+  }
+  // The same for the event field.
+  const named = (pad: number) => `event:${' '.repeat(pad)}response.completed\ndata: {}\n\n`;
+  assert.equal(watch([named(256 - 'event:response.completed'.length)]), 'completed');
+  assert.equal(watch([named(257 - 'event:response.completed'.length)]), null);
+  // What is held of a line never exceeds the head, whatever its length, and a
+  // long line's tail does not leak into the next line.
+  const w = new SseWatcher();
+  w.feed(Buffer.from(`data: ${'z'.repeat(5000)}`)); assert.equal(w.held, SseWatcher.HEAD);
+  w.feed(Buffer.from('z'.repeat(5000))); assert.equal(w.held, SseWatcher.HEAD);
+  w.feed(Buffer.from('\nevent: response.completed\n\n')); assert.equal(w.held, 0);
+  assert.equal(w.ended, 'completed');
+});
