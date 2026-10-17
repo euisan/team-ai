@@ -7,7 +7,7 @@ import { BACKGROUND, renderFrame } from '../src/png.js';
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
 // Five panels from synthetic data: two Claude accounts, a Codex account with
-// 5h + 1w windows and one with only a weekly window, Antigravity with a group
+// 5h + 7d windows and one with only a weekly window, Antigravity with a group
 // that has no session window and one with a Hangul name, OpenCode Go with all
 // three, and Grok with only its weekly window. A route on the Claude side only,
 // so the two account boxes have different marker counts.
@@ -77,7 +77,7 @@ test('Grok\'s weekly window is drawn in the weekly gauge, not the session one', 
     const lines = frame(width); const slots = gauges(row(lines, 'alice@'));
     assert.deepEqual(gauges(row(lines, 'Grok SuperGrok')), [slots[1]], `width ${width}`);
     const header = panel(lines, 'Grok')[1]!;
-    assert.equal(columnOf(header, 'wk'), slots[1]![0], `width ${width}: Grok's wk title over the weekly gauge`);
+    assert.equal(columnOf(header, '7d'), slots[1]![0], `width ${width}: Grok's 7d title over the weekly gauge`);
   }
 });
 
@@ -97,10 +97,10 @@ test('column titles sit over their gauges in every panel', () => {
   for (const width of WIDTHS) {
     const lines = frame(width); const slots = gauges(row(lines, 'alice@')).map(([start]) => start);
     const titles: Array<[string, string, number]> = [
-      ['Claude accounts', '5h session', 0], ['Claude accounts', '7d overall', 1], ['Claude accounts', '7d Fable', 2],
-      ['Codex accounts', '5h limit', 0], ['Codex accounts', '1w limit', 1],
-      ['Antigravity (agy)', '5h', 0], ['Antigravity (agy)', 'wk', 1],
-      ['OpenCode Go', '5h', 0], ['OpenCode Go', 'wk', 1], ['OpenCode Go', '30d', 2],
+      ['Claude accounts', '5h session', 0], ['Claude accounts', '7d', 1], ['Claude accounts', '7d Fable', 2],
+      ['Codex accounts', '5h limit', 0], ['Codex accounts', '7d limit', 1],
+      ['Antigravity (agy)', '5h', 0], ['Antigravity (agy)', '7d', 1],
+      ['OpenCode Go', '5h', 0], ['OpenCode Go', '7d', 1], ['OpenCode Go', '30d', 2],
     ];
     for (const [title, name, slot] of titles) {
       const header = panel(lines, title)[1]!;

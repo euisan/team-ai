@@ -64,7 +64,7 @@ test('buildFrame draws both sections, the column titles and the footer within th
   assert.ok(lines.every((line) => [...line].length <= 120), 'no line wider than the frame');
   assert.ok(lines.some((line) => line.includes('Claude accounts (1)')));
   assert.ok(lines.some((line) => line.includes('Codex accounts (1)')));
-  assert.ok(lines.some((line) => line.includes('5h session') && line.includes('7d overall') && line.includes('7d Fable')));
+  assert.ok(lines.some((line) => line.includes('5h session') && line.includes(' 7d ') && line.includes('7d Fable')));
   assert.ok(lines.some((line) => line.startsWith('>  c@example.com')), 'cursor on the selected row (then the next-account column)');
   const footer = lines.at(-1)!;
   assert.match(footer, /p capture/); assert.match(footer, /c quota-sort/); assert.match(footer, /hello$/);

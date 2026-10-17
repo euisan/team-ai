@@ -5,7 +5,7 @@
 import { AccountPool, type Ranked as RankedAccount } from './account-pool.js';
 import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, usageLayout, type GridRow } from './columns.js';
 import { hostText, type HostSample } from './host-metrics.js';
-import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
+import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage, type ExternalWindow } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, parseBalance, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
 import { routeColor } from './routes.js';
@@ -79,16 +79,17 @@ function activeWindow(window: { usage: number | null; resetsAt: number | null; m
 
 // A quota window's own length, named the way a person would say it ("5h", "7d").
 // Codex reports the span in its headers; Claude's window names already carry it.
+// A week is always "7d", never "1w", so every panel writes it the way Claude's
+// own windows do.
 function windowLabel(minutes: number | null | undefined, fallback: string): string {
   if (!minutes) return fallback;
-  if (minutes % 10080 === 0) return `${minutes / 10080}w`;
   if (minutes % 1440 === 0) return `${minutes / 1440}d`;
   if (minutes % 60 === 0) return `${minutes / 60}h`;
   return `${minutes}m`;
 }
 
 // A Codex account's windows in the three gauges: a 5h limit in the session
-// gauge, a 1w limit in the weekly one, whichever ChatGPT sends it as; a window
+// gauge, a 7d limit in the weekly one, whichever ChatGPT sends it as; a window
 // of unknown length keeps its primary/secondary place.
 function codexWindows(state: PersistedState, account: StoredAccount) {
   const saved = state.accounts[account.credentialId];
@@ -190,6 +191,11 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
   return out;
 }
 
+// Another agent's window as the screen names it: by its length like every
+// other gauge, so a week reads "7d". The stored label ('wk', or Orca's
+// 'weekly' when it sends no length) is kept as is for saved state.
+const externalLabel = (window: ExternalWindow): string => windowLabel(window.minutes, /^(wk|weekly)$/i.test(window.label) ? '7d' : window.label);
+
 const EXTERNAL_TITLES: Record<ExternalProvider, string> = { antigravity: 'Antigravity (agy)', opencodeGo: 'OpenCode Go', grok: 'Grok' };
 
 // One provider's box: a row per usage group, its windows as the same gauges
@@ -203,9 +209,9 @@ function externalBox(usage: ExternalUsage, width: number, gauge: number): Array<
   const title = ` ${EXTERNAL_TITLES[usage.provider]} `;
   const out: Array<string | GridRow> = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
   const placed = new Map(usage.groups.map((group) => [group, placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1)]));
-  // Each gauge is titled with the provider's own name for the first window
-  // drawn in it; a gauge no group uses has no title.
-  const titles = Array.from({ length: SLOTS }, (_, slot) => usage.groups.map((group) => placed.get(group)![slot]?.label).find(Boolean));
+  // Each gauge is titled with the length of the first window drawn in it
+  // ("5h", "7d", "30d"); a gauge no group uses has no title.
+  const titles = Array.from({ length: SLOTS }, (_, slot) => usage.groups.map((group) => placed.get(group)![slot]).find(Boolean)).map((window) => window && externalLabel(window));
   const name = (group: string): string => !usage.identity || usage.provider === 'antigravity' ? group : usage.provider === 'opencodeGo' ? `${group} (${usage.identity})` : `${group} ${usage.identity}`;
   const problem = usage.status === 'ok' ? null
     : usage.status === 'signed-out' ? (usage.note ?? 'not signed in') : usage.status === 'expired' ? (usage.note ?? 'sign-in expired')
@@ -338,7 +344,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       const seen = new Set(windows.map((window) => windowLabel(window!.minutes, '')).filter(Boolean));
       return seen.size === 1 ? `${[...seen][0]} limit` : ['usage limit', 'second limit', 'third limit'][slot]!;
     };
-    const usageTitles = provider === 'claude' ? ['5h session', '7d overall', '7d Fable'] : Array.from({ length: SLOTS }, (_, slot) => spanAt(slot));
+    const usageTitles = provider === 'claude' ? ['5h session', '7d', '7d Fable'] : Array.from({ length: SLOTS }, (_, slot) => spanAt(slot));
     // One marker column per model route, left of the cursor: the route's
     // colour on its accounts, grey where that account cannot serve now. No
     // routes, no columns — the rows are then exactly as before.
@@ -566,7 +572,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
       : usage.status === 'unavailable' ? (usage.note ?? 'usage unavailable') : `${usage.note ?? 'error'}`;
     const rows: NarrowRow[] = usage.groups.map((group) => ({
       lead: '  ', name: group.name, tint: problem ? 33 : undefined,
-      cells: placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1).map((w) => w && { label: windowLabel(w.minutes, w.label), usage: w.usedPercent === null ? null : w.usedPercent / 100, resetsAt: w.resetsAt }),
+      cells: placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1).map((w) => w && { label: externalLabel(w), usage: w.usedPercent === null ? null : w.usedPercent / 100, resetsAt: w.resetsAt }),
     }));
     if (!rows.length) rows.push({ lead: '  ', name: EXTERNAL_TITLES[provider], cells: [], note: problem ?? (usage.measuredAt ? 'no usage data' : 'not measured yet') });
     push(externalRank--, ...rows);
