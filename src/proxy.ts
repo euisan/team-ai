@@ -45,8 +45,9 @@ function sessionKey(provider: Provider, req: IncomingMessage, body: Buffer): str
 let requestCounter = 0;
 
 // Per-request bookkeeping dispatch fills in for the activity line. cut marks
-// an upstream stream that broke after the headers went out.
-interface RequestTrack { cut: boolean; setAccount(label: string, outsideRoute?: boolean): void }
+// an upstream stream that broke after the headers went out; finished is the
+// terminal SSE event the stream delivered, if any.
+interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void }
 
 // The body parsed once, for the fields the activity line shows. Not kept.
 function parsedBody(body: Buffer): unknown {
@@ -58,10 +59,14 @@ function parsedBody(body: Buffer): unknown {
 function safely(fn: () => void): void { try { fn(); } catch { /* activity is best-effort */ } }
 
 // What the client ended up with. A finished response says it; a response the
-// client abandoned first is 499; a stream upstream broke is 'cut'.
+// client abandoned first is 499; a stream upstream broke is 'cut'. A stream
+// whose terminal event went out is finished even if the client hung up before
+// upstream's EOF: Codex CLI closes the moment it reads response.completed, and
+// 38 of 39 Codex requests were logged as 499 that way (2026-10-17), every one
+// of them a complete answer, indistinguishable from a real abort.
 function finalStatus(res: ServerResponse, track: RequestTrack): number | string {
   if (track.cut) return 'cut';
-  if (res.writableEnded) return res.statusCode;
+  if (res.writableEnded || (track.finished && res.headersSent)) return res.statusCode;
   return res.headersSent || res.destroyed ? 499 : 502;
 }
 
@@ -303,7 +308,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     let cut: string | null = null;
     try {
       if (!response.body) res.end();
-      else await pipeStream(response.body, res);
+      else await pipeStream(response.body, res, isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; }) : null);
     } catch (error) { cut = (error as Error).message; track.cut = true; throw error; }
     // The finished-request line itself comes from the activity log; only a
     // cut, with its cause, needs a sentence of its own.
@@ -328,7 +333,7 @@ async function waitForRetry(ms: number, res: ServerResponse): Promise<void> {
 // hung here forever and the account's inflight slot leaked until restart. On
 // close the upstream read is cancelled too, so the model stops generating into
 // the void instead of spending the account's quota on a response nobody reads.
-async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<void> {
+async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse, watcher: SseWatcher | null = null): Promise<void> {
   const reader = body.getReader();
   const closed = new Promise<void>((resolve) => { if (res.destroyed) resolve(); else res.once('close', () => resolve()); });
   const onClose = () => { void reader.cancel().catch(() => {}); };
@@ -336,10 +341,72 @@ async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse)
   try {
     while (!res.destroyed) {
       const part = await reader.read(); if (part.done) break;
-      if (!res.write(Buffer.from(part.value)) && !res.destroyed) await Promise.race([new Promise<void>((resolve) => res.once('drain', resolve)), closed]);
+      if (res.destroyed) break;
+      // The watcher reads what was just written, after it is on its way:
+      // the bytes are untouched and nothing waits on the parse.
+      const flowing = res.write(Buffer.from(part.value)); watcher?.feed(part.value);
+      if (!flowing && !res.destroyed) await Promise.race([new Promise<void>((resolve) => res.once('drain', resolve)), closed]);
     }
     if (!res.destroyed) res.end();
   } finally { res.removeListener('close', onClose); await reader.cancel().catch(() => {}); }
+}
+
+// How a streamed response said it was over. Codex Responses ends with
+// response.completed (response.done in some versions), response.incomplete
+// (stopped early, e.g. at max_output_tokens) or response.failed; Claude
+// Messages with message_stop. Each is the last event of a response that
+// upstream finished, so a client hanging up after one has abandoned nothing.
+export type StreamEnd = 'completed' | 'incomplete' | 'failed';
+const STREAM_ENDS: Record<string, StreamEnd> = { 'response.completed': 'completed', 'response.done': 'completed', 'response.incomplete': 'incomplete', 'response.failed': 'failed', message_stop: 'completed' };
+
+function isEventStream(headers: Headers): boolean { return /^text\/event-stream\b/i.test(headers.get('content-type') ?? ''); }
+
+// Watches an SSE body for its terminal event without holding it: events are
+// cut at blank lines across chunk boundaries (LF, CRLF or CR), and of each
+// line only the first bytes are kept — enough for `event: <name>` or the
+// leading `"type"` of a data line, never a whole response.completed payload.
+// The event name comes from the event field, else from the data's type.
+export class SseWatcher {
+  private static readonly HEAD = 256;
+  private head: Buffer[] = []; private headBytes = 0; private afterCr = false;
+  private event = ''; private dataType = ''; private sawData = false;
+  ended: StreamEnd | null = null;
+  constructor(private readonly onEnd: (end: StreamEnd) => void = () => {}) {}
+
+  feed(chunk: Uint8Array): void {
+    let start = 0;
+    // A CRLF split across chunks: the LF belongs to the line already ended.
+    if (this.afterCr && chunk[0] === 10) start = 1;
+    this.afterCr = false;
+    while (start < chunk.length) {
+      const lf = chunk.indexOf(10, start); const cr = chunk.indexOf(13, start);
+      const stop = lf < 0 ? cr : cr < 0 ? lf : Math.min(lf, cr);
+      if (stop < 0) { this.keep(chunk, start, chunk.length); return; }
+      this.keep(chunk, start, stop); this.line();
+      start = stop + 1;
+      if (chunk[stop] === 13) { if (start === chunk.length) this.afterCr = true; else if (chunk[start] === 10) start++; }
+    }
+  }
+
+  private keep(chunk: Uint8Array, from: number, to: number): void {
+    const room = SseWatcher.HEAD - this.headBytes; if (room <= 0 || to <= from) return;
+    const piece = Buffer.from(chunk.buffer, chunk.byteOffset + from, Math.min(to - from, room));
+    this.head.push(piece); this.headBytes += piece.length;
+  }
+
+  private line(): void {
+    const text = this.head.length === 1 ? this.head[0]!.toString('latin1') : Buffer.concat(this.head).toString('latin1');
+    this.head = []; this.headBytes = 0;
+    if (text === '') return this.dispatch();
+    if (text.startsWith('event:')) this.event = text.slice(6).trim();
+    else if (text.startsWith('data:') && !this.sawData) { this.sawData = true; this.dataType = /"type"\s*:\s*"([^"\\]+)"/.exec(text)?.[1] ?? ''; }
+  }
+
+  private dispatch(): void {
+    const end = STREAM_ENDS[this.event || this.dataType];
+    this.event = ''; this.dataType = ''; this.sawData = false;
+    if (end && !this.ended) { this.ended = end; this.onEnd(end); }
+  }
 }
 
 // fetch decompresses the upstream body transparently, so what we forward is

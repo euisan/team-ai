@@ -154,7 +154,7 @@ export interface ActiveRequest {
 }
 
 // The same request once it has ended. status is the HTTP status the client
-// got, 499 when the client went away first, or 'cut' when the upstream stream
+// got, 499 when the client went away before the response finished, or 'cut' when the upstream stream
 // broke after the headers were sent.
 export interface RequestSummary {
   provider: ProviderId;
