@@ -2,7 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
-import type { PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
+import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
 export const ESC = '\x1b['; const RESET = `${ESC}0m`; const ANSI = new RegExp(`${ESC.replace('[', '\\[')}[0-9;]*m`, 'g');
 const color = (code: number, text: string): string => `${ESC}${code}m${text}${RESET}`;
@@ -114,6 +114,30 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
   return ordered;
 }
 
+// Braille spinner for requests still in flight. The frame is derived from the
+// clock, so the 500ms redraw animates it with no state of its own.
+const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const clock = (at: number): string => color(90, new Date(at).toLocaleTimeString('en-GB'));
+
+// In-flight requests first, in the order they started, then the log newest
+// first. A finished request is drawn from its structured fields so the status
+// and duration read the same on every line; anything else is its sentence.
+function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: number): string[] {
+  const now = Date.now(); const spin = SPINNER[Math.floor(now / 500) % SPINNER.length]!;
+  const out = active.slice(0, rows).map((entry) => {
+    const account = entry.account ? ` → ${entry.account}` : '';
+    return `${color(36, spin)} ${clock(entry.startedAt)}  ${entry.providerLabel} ${entry.method} ${entry.path}${account} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
+  });
+  for (const event of [...events].reverse().slice(0, Math.max(0, rows - out.length))) {
+    const request = event.request;
+    if (!request) { out.push(`  ${clock(event.at)}  ${event.message}`); continue; }
+    const failed = typeof request.status !== 'number' || request.status >= 400;
+    const outcome = `(${request.status}, ${(request.durationMs / 1000).toFixed(1)}s)`;
+    out.push(`  ${clock(event.at)}  ${request.providerLabel} ${request.method} ${request.path}${request.account ? ` → ${request.account}` : ''} ${failed ? color(31, outcome) : outcome}`);
+  }
+  return out;
+}
+
 export type FrameMode = 'normal' | 'order' | 'delete' | 'add';
 
 export interface FrameView {
@@ -178,8 +202,11 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
   }
-  const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push(''); lines.push(` Activity ${'─'.repeat(Math.max(0, width - 10))}`);
-  for (const event of [...(state.events || [])].reverse().slice(0, activityRows)) lines.push(`${color(90, new Date(event.at).toLocaleTimeString('en-GB'))} ${event.message}`);
+  const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push('');
+  const active = state.active || [];
+  const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
+  lines.push(`${activityTitle}${'─'.repeat(Math.max(0, width - visible(activityTitle)))}`);
+  lines.push(...activityLines(active, state.events || [], activityRows));
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
   const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';

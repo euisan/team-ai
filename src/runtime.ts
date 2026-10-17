@@ -2,11 +2,12 @@ import { writeFile, readFile, rm, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Server } from 'node:http';
 import { AccountPool } from './account-pool.js';
+import { ActivityLog } from './activity.js';
 import { createProxy, secureEqual } from './proxy.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
-import type { PersistedState, ProviderId, TeamAIConfig } from './types.js';
+import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
 const DRAIN_MS = 5_000;
@@ -27,17 +28,28 @@ export async function runServer(): Promise<void> {
   const config = await loadConfig(); const credentials = await loadCredentials(); const state = await loadState();
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
-  let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events = [...(state.events || [])].slice(-200);
+  let saveTimer: NodeJS.Timeout | null = null; let saving = Promise.resolve(); const events: ActivityEvent[] = [...(state.events || [])].slice(-200);
+  // Requests in flight. Not restored from state.json: whatever a previous
+  // process had open died with it.
+  let closing = false;
+  const activity = new ActivityLog((event) => persist(event), () => persistActivity());
+  const snapshot = (): PersistedState => { const next: PersistedState = { version: 1, accounts: {}, events, active: closing ? [] : activity.snapshot(), serverPid: process.pid }; pools.forEach((p) => p.exportState(next)); return next; };
   // Every save first adopts any credential the TUI wrote since (a re-login),
   // then writes memory back — so a fresh token is picked up within a save
   // interval instead of being overwritten by the stale one it replaced.
-  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next: PersistedState = { version: 1, accounts: {}, events }; pools.forEach((p) => p.exportState(next)); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
-  const persist = (event?: string): void => { if (event) { events.push({ at: Date.now(), message: event }); if (events.length > 200) events.splice(0, events.length - 200); } if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; saving = saving.then(persistNow, persistNow); }, 25); };
+  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
+  // A request starting or picking an account changes only what the dashboard
+  // shows, so it rewrites state.json alone; credentials wait for a real save.
+  const persistStateOnly = async (): Promise<void> => { await saveState(snapshot()); };
+  let fullSave = false;
+  const schedule = (): void => { if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; const run = fullSave ? persistNow : persistStateOnly; fullSave = false; saving = saving.then(run, run); }, 25); };
+  const persist = (event?: string | ActivityEvent): void => { if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
+  const persistActivity = (): void => schedule();
   const servers: Server[] = [];
   for (const pool of pools) {
     if (!pool.accounts.length) continue;
     const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
-    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity()); servers.push(server);
+    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity); servers.push(server);
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
     // Past startup, a socket-level error must never end the process: the relay
     // is the only route its clients have, and killing it over one bad socket
@@ -53,7 +65,7 @@ export async function runServer(): Promise<void> {
     // Failures here are not fatal: a port taken by something else just means
     // that one legacy address is unavailable, not that the proxy cannot serve.
     for (const legacy of legacyPorts(config, pool.provider.id)) {
-      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity());
+      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity);
       try {
         await new Promise<void>((resolve, reject) => { alias.once('error', reject); alias.listen(legacy, config.proxy.host, () => { alias.removeListener('error', reject); resolve(); }); });
         servers.push(alias);
@@ -140,7 +152,7 @@ export async function runServer(): Promise<void> {
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
     servers.forEach((server) => server.closeAllConnections());
-    await drained; await saving; await persistNow(); await releaseServerFile(serverPath); process.exit(0);
+    closing = true; await drained; await saving; await persistNow(); await releaseServerFile(serverPath); process.exit(0);
   };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
 }
@@ -152,5 +164,11 @@ export async function runServer(): Promise<void> {
 async function releaseServerFile(serverPath: string): Promise<void> {
   try { const value = JSON.parse(await readFile(serverPath, 'utf8')) as { pid?: number }; if (value.pid !== process.pid) return; } catch { return; }
   await rm(serverPath, { force: true });
+}
+// The state as the dashboard should draw it: in-flight requests only while the
+// server that recorded them is still the one running.
+export async function liveState(state: PersistedState): Promise<PersistedState> {
+  const pid = await runningPid();
+  return pid !== null && pid === state.serverPid ? state : { ...state, active: [] };
 }
 export async function runningPid(): Promise<number | null> { try { const value = JSON.parse(await readFile(paths().server, 'utf8')) as { pid?: number }; if (!value.pid) return null; process.kill(value.pid, 0); return value.pid; } catch { return null; } }

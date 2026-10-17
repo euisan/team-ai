@@ -6,6 +6,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildFrame, displayOrder, type FrameMode } from './frame.js';
 import { renderFrame } from './png.js';
+import { liveState } from './runtime.js';
 import { redactSnapshot, redactor, type RedactLevel } from './redact.js';
 import { dataDir, loadConfig, loadState } from './storage.js';
 
@@ -29,7 +30,7 @@ function stamp(date: Date): string {
 }
 
 export async function captureDashboard(options: CaptureOptions): Promise<CaptureResult> {
-  const rawConfig = await loadConfig(); const rawState = await loadState();
+  const rawConfig = await loadConfig(); const rawState = await liveState(await loadState());
   const { config, state } = redactSnapshot(rawConfig, rawState, options.level);
   const sortByHeadroom = options.sortByHeadroom ?? true;
   const width = Math.max(80, options.width ?? 120);
