@@ -44,6 +44,31 @@ export function describeReload(outcome: ReloadOutcome): string {
   return `saved, but the running server did not reload (${outcome.error}) — applies after restart`;
 }
 
+export interface RouteInput { name: string; match: string[]; accounts: string[]; mode?: string; color?: string }
+
+// `teamai route add`: a new route goes last; one with the same name is
+// replaced where it stands, so the CLI can also edit. Values are passed through
+// as given — parseRoutes in saveRoutes is what judges them.
+export async function addRoute(provider: ProviderId, input: RouteInput): Promise<{ replaced: boolean; unknown: string[]; outcome: ReloadOutcome }> {
+  const config = await loadConfig(); const list = [...(config.routes?.[provider] ?? [])];
+  const accounts = input.accounts.map((ref) => accountLabel(config.accounts, provider, ref));
+  const unknown = accounts.filter((ref) => !config.accounts.some((account) => account.provider === provider && account.label === ref)).map(String);
+  const entry = { name: input.name, match: input.match, accounts, mode: input.mode ?? 'prefer', ...(input.color ? { color: input.color } : {}) } as RouteConfig;
+  const at = list.findIndex((route) => route.name === input.name);
+  if (at >= 0) list[at] = entry; else list.push(entry);
+  return { replaced: at >= 0, unknown, outcome: await applyRoutes(provider, list) };
+}
+
+// `teamai route rm`: by name, in the given provider or whichever one has it.
+export async function removeRoute(name: string, provider?: ProviderId): Promise<{ provider: ProviderId; outcome: ReloadOutcome }> {
+  const config = await loadConfig();
+  const owners = (provider ? [provider] : (['claude', 'codex'] as const)).filter((id) => (config.routes?.[id] ?? []).some((route) => route.name === name));
+  if (!owners.length) throw new Error(`Route not found: ${name}`);
+  if (owners.length > 1) throw new Error(`Route ${name} exists for both claude and codex; pass --provider`);
+  const owner = owners[0]!;
+  return { provider: owner, outcome: await applyRoutes(owner, (config.routes?.[owner] ?? []).filter((route) => route.name !== name)) };
+}
+
 // An account reference as the editor and the CLI store it: the label when the
 // reference names an account of this provider (label, id or credential id, as
 // the pool matches them), otherwise unchanged.

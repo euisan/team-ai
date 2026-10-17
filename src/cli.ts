@@ -10,6 +10,7 @@ import { captureDashboard } from './capture.js';
 import { linkShadowEntries, relayedCodexConfig } from './codex-config.js';
 import { isRedactLevel } from './redact.js';
 import { resetCreditSettings } from './reset-credits.js';
+import { addRoute, describeReload, removeRoute } from './route-config.js';
 import { parseRoutes } from './routes.js';
 import { runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
     case 'codex': await runClient('codex', args.filter((x) => x !== '--')); break;
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
     case 'tui': await runTui(); break;
+    case 'route': case 'routes': await route(); break;
     case 'capture': {
       const level = flag('--redact') ?? 'partial'; if (!isRedactLevel(level)) throw new Error('--redact must be partial, full or none');
       const result = await captureDashboard({ level, outDir: flag('--out'), width: process.stdout.columns });
@@ -80,6 +82,39 @@ async function routeStatus(): Promise<void> {
     console.log(`Routes (${id}):`);
     for (const route of routes) console.log(`  ${route.name} [${route.mode}]: ${route.match.join(', ')} → ${route.accounts.join(', ')}`);
   }
+}
+
+// `teamai route list|add|rm`. Saved through the same validation and reload as
+// the dashboard's route editor.
+async function route(): Promise<void> {
+  const [action = 'list', name] = args; const only = flag('--provider'); const id = only === undefined ? undefined : provider(only);
+  const list = (value: string | undefined): string[] => (value ?? '').split(',').map((part) => part.trim()).filter(Boolean);
+  if (action === 'list' || action === 'ls') {
+    const config = await loadConfig(); let any = false;
+    for (const each of id ? [id] : (['claude', 'codex'] as const)) {
+      const routes = parseRoutes(config.routes?.[each], each); if (!routes.length) continue; any = true;
+      console.log(`Routes (${each}) — first match wins:`);
+      routes.forEach((r, i) => console.log(`  ${i + 1}. ${r.name} [${r.mode}${r.color ? `, ${r.color}` : ''}]: ${r.match.join(', ')} → ${r.accounts.join(', ')}`));
+    }
+    if (!any) console.log('No routes configured');
+    return;
+  }
+  if (!name || name.startsWith('--')) throw new Error(`Usage: teamai route ${action === 'rm' || action === 'remove' ? 'rm <name> [--provider claude|codex]' : 'add <name> [--provider claude|codex] --match a,b --accounts x,y [--mode prefer|exclusive] [--color c]'}`);
+  if (action === 'add') {
+    const target = id ?? 'claude';
+    const result = await addRoute(target, { name, match: list(flag('--match')), accounts: list(flag('--accounts')), mode: flag('--mode'), color: flag('--color') });
+    for (const ref of result.unknown) console.log(`warning: account ${ref} not found among ${target} accounts — the server will skip it`);
+    console.log(`${result.replaced ? 'Updated' : 'Added'} ${target} route ${name}: ${describeReload(result.outcome)}`);
+    if (result.outcome.status === 'failed') process.exitCode = 1;
+    return;
+  }
+  if (action === 'rm' || action === 'remove') {
+    const result = await removeRoute(name, id);
+    console.log(`Removed ${result.provider} route ${name}: ${describeReload(result.outcome)}`);
+    if (result.outcome.status === 'failed') process.exitCode = 1;
+    return;
+  }
+  throw new Error(`Unknown route action: ${action} (list, add or rm)`);
 }
 
 // Codex reset credits per account, from what the server last recorded.
@@ -174,6 +209,12 @@ Usage:
   teamai start|restart|status|stop
   teamai enable|disable <provider> <account>
   teamai priority <provider> <account> <rank|auto>
+  teamai route list [--provider claude|codex]
+  teamai route add <name> [--provider claude|codex] --match a,b --accounts x,y
+                   [--mode prefer|exclusive] [--color red|green|yellow|blue|magenta|cyan]
+  teamai route rm <name> [--provider claude|codex]
+                                       Model routes; saved and applied to a
+                                       running server without a restart
   teamai capture [--redact partial|full|none] [--out DIR]
                                        Save the dashboard as .txt and .png,
                                        account addresses masked (no TTY needed)
