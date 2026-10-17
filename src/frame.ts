@@ -420,7 +420,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
 
 function modeFooter(view: FrameView, codexSelected: boolean): string {
   const { mode } = view;
-  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'normal' ? ` ${normalKeys(codexSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
+  return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'normal' ? ` ${normalKeys(codexSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ←→ rank -/+   ↑↓ select   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
     : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
     : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
 }
