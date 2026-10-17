@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { createServer, request } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer, request, type Server } from 'node:http';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -76,4 +76,43 @@ test('stop() closes every port the server opened', async () => {
     assert.equal(await listening(h.config.proxy.codexPort), false);
     assert.equal(await listening(h.config.proxy.controlPort!), false);
   } finally { await h.restore(); }
+});
+
+async function occupy(port: number): Promise<Server> {
+  const blocker = createServer((_req, res) => res.end('someone else')); await new Promise<void>((r) => blocker.listen(port, '127.0.0.1', r)); return blocker;
+}
+
+test('the server refuses to start when its proxy port is taken, and leaves nothing listening', async () => {
+  const h = await home((c) => { c.accounts.push({ id: 'y', provider: 'claude', label: 'y@example.com', enabled: true, priority: null, credentialId: 'claude:y', createdAt: '' }); });
+  await writeFile(join(h.root, 'credentials.json'), JSON.stringify({ 'codex:x': { accessToken: 'synthetic', refreshToken: null, expiresAt: null, accountId: 'x' }, 'claude:y': { accessToken: 'synthetic', refreshToken: null, expiresAt: null, accountId: 'y' } }));
+  // Claude binds first and succeeds; Codex's port is taken.
+  const blocker = await occupy(h.config.proxy.codexPort);
+  try {
+    await assert.rejects(startServer({ background: false }), /EADDRINUSE/);
+    assert.equal(await listening(h.config.proxy.claudePort), false, 'the Claude port opened before the failure is closed again');
+    assert.equal(await listening(h.config.proxy.controlPort!), false);
+    await assert.rejects(readFile(join(h.root, 'server.json')), /ENOENT/, 'no server.json for a server that never ran');
+  } finally { blocker.close(); await h.restore(); }
+});
+
+test('the server refuses to start when its control port is taken, and closes the proxy ports', async () => {
+  const h = await home();
+  const blocker = await occupy(h.config.proxy.controlPort!);
+  try {
+    await assert.rejects(startServer({ background: false }), /EADDRINUSE/);
+    assert.equal(await listening(h.config.proxy.codexPort), false);
+  } finally { blocker.close(); await h.restore(); }
+});
+
+test('the server refuses to start on an invalid routing.balance, naming it', async () => {
+  const h = await home((c) => { (c as unknown as { routing: unknown }).routing = { balance: 'fastest' }; });
+  try {
+    await assert.rejects(startServer({ background: false }), /routing\.balance must be "pacing" or "level", not "fastest"/);
+    assert.equal(await listening(h.config.proxy.codexPort), false);
+  } finally { await h.restore(); }
+});
+
+test('the server refuses to start with no accounts', async () => {
+  const h = await home((c) => { c.accounts = []; });
+  try { await assert.rejects(startServer({ background: false }), /No accounts configured/); } finally { await h.restore(); }
 });
