@@ -157,6 +157,9 @@ teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # o bien: auto
 teamai capture [--redact partial|full|none] [--out DIR]   # guarda el panel como .txt y .png (sin TTY)
+teamai route list                              # rutas por modelo, en el orden en que se prueban
+teamai route add luna --provider codex --match 'gpt-6-luna*' --accounts a@x.com,b@y.com --mode prefer --color blue
+teamai route rm luna
 ```
 
 Las cuentas con la misma prioridad se ordenan por **ritmo semanal**, tanto en el
@@ -208,6 +211,8 @@ La TUI a pantalla completa agrupa las cuentas de Claude y de Codex, y mantiene a
 
 El pie de página ofrece el mismo flujo de trabajo de cuentas que TeamClaude: lanzar Claude/Codex, seleccionar, cambiar, habilitar/deshabilitar, ordenar, eliminar, agregar/iniciar sesión, volver a medir (`R`) y salir. `switch` fija la cuenta seleccionada al frente del grupo de su proveedor; el modo de orden permite asignar un puesto o devolver una cuenta a la programación automática. Al actualizar el perfil de Claude se muestra el nivel del plan y, en rojo, los estados de suscripción problemáticos como `past_due`.
 
+**Rutas por modelo.** `routes.claude` / `routes.codex` envían las peticiones de ciertos modelos a ciertas cuentas (se aplica la primera ruta que coincide). En el panel, `g` abre las rutas del proveedor de la fila seleccionada: listar, añadir (`a`), editar (`e`), borrar (`d`, se confirma con `y`) y reordenar (`[` `]`); `Tab` cambia entre Claude y Codex y `Esc` sale sin guardar. Antes de guardar, la ruta se valida con el mismo analizador que usa el servidor al arrancar; si falla, no se escribe nada y el motivo queda en pantalla. Guardar reescribe de forma atómica solo `routes` en `config.json` y pide al servidor en marcha que relea las rutas por el puerto de control, sin reiniciar. `teamai route list|add|rm` sigue el mismo camino. El significado de cada campo (`match`, `accounts`, `prefer` / `exclusive`, `color`) está en las secciones Model routes / Editing routes del README en inglés.
+
 `p` guarda una captura del panel, y `teamai capture` hace lo mismo desde un script o un agente sin necesidad de terminal. Cada captura es un par de archivos bajo `~/.config/teamai/captures/` (o `--out DIR`): el cuadro como texto con sus colores intactos, y el mismo cuadro como PNG dibujado con una fuente de mapa de bits integrada, así que no hace falta nada más que Node. Las direcciones de las cuentas se enmascaran antes de dibujar el cuadro —en la columna de cuentas, en el pie y en el registro de actividad por igual— como `de•••••••••w@gm•••.com` de forma predeterminada; `--redact full` las reemplaza por `account #N`, y `--redact none` las conserva para una captura que se quede en privado. Desde el panel, `p` además muestra el PNG en el administrador de archivos y copia la imagen al portapapeles —en macOS sin configurar nada, en Linux si están instalados `xdg-open` y `wl-copy` o `xclip`— y el pie indica cuáles de esas acciones ocurrieron. La imagen al comienzo de este README es una de esas capturas.
 
 `R` vuelve a medir la cuota de toda la flota. La cuota nunca se consulta desde un endpoint aparte: se aprende de los encabezados de límite de tasa que devuelve el upstream, así que una cuenta que no ha atendido tráfico muestra `-` hasta que algo la mida. `R` reproduce en paralelo una forma de solicitud que ya se sabe aceptada contra cada cuenta inactiva (incluidas las ya medidas y las limitadas, cuyos 429 igualmente traen encabezados autoritativos) e informa un recuento honesto de `measured/targets`. Esa forma de solicitud solo se fija a partir de un 2xx real que haya pasado por el proxy, de modo que hasta que una solicitud no haya tenido éxito, `R` informa que todavía no existe una plantilla de sondeo en lugar de adivinar una carga útil. Las cuentas a las que les falta la ventana semanal por modelo (Fable) reciben un sondeo complementario adicional, porque esa ventana solo aparece en las respuestas a solicitudes de nivel Fable.
@@ -242,6 +247,7 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
 | `fableReserveThreshold` | `0.8` | Uso de la ventana Fable a partir del cual la cuenta se prefiere para solicitudes que no son Fable. `1` desactiva el enrutamiento según el modelo. |
 | `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). |
+| `routes` | — | Opcional. Rutas por modelo y proveedor, `{ "claude": [...], "codex": [...] }`; se editan con `g` en el panel o con `teamai route`. |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 
 Cambia un puerto si otro proceso ya lo ocupa: esa es la causa habitual de un

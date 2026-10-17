@@ -82,7 +82,15 @@ teamai enable  <claude|codex> <account>
 teamai disable <claude|codex> <account>
 teamai priority <claude|codex> <account> <rank|auto>
 teamai capture [--redact partial|full|none] [--out DIR]   # dashboard → .txt + .png; no TTY needed
+teamai route list [--provider claude|codex]
+teamai route add <name> [--provider claude|codex] --match a,b --accounts x,y [--mode prefer|exclusive] [--color c]
+teamai route rm <name> [--provider claude|codex]
 ```
+
+`teamai route` validates with the server's own route parser before writing,
+changes only `routes.<provider>` in `config.json`, and asks a running server to
+reload over the control port; prefer it to hand-editing `routes`, which a typo
+turns into a server that refuses to start.
 
 `<account>` is the account's label (usually the email) or its id, exactly as
 `teamai accounts` prints it.
@@ -139,6 +147,10 @@ before speculating; a port conflict is the common cause.
 | `src/redact.ts` | Account-address masking (partial / full / none), applied to data before drawing |
 | `src/png.ts` | Dependency-free PNG encoder (own CRC-32: `zlib.crc32` is Node 22.2+) and SGR-to-pixel renderer |
 | `src/font.ts` | Generated 9×18 bitmap glyphs; regenerate with `scripts/gen-font.py` (needs Pillow, build-time only) |
+| `src/routes.ts` | Model-route parsing and matching (`parseRoutes` is the one validator) |
+| `src/route-config.ts` | Saving routes (validate, write only `routes`, reload a running server); `teamai route` |
+| `src/route-control.ts` | Control-port `POST /routes/reload` |
+| `src/route-editor.ts` | The dashboard's route editor (`g`): pure key handling and drawing |
 | `src/storage.ts` | Config/state persistence, paths |
 | `src/auth.ts` | Login and credential import |
 | `test/` | `node --test` suites |

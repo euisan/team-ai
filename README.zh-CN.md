@@ -134,6 +134,9 @@ teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 或者：auto
 teamai capture [--redact partial|full|none] [--out DIR]   # 把仪表盘保存为 .txt 和 .png（无需 TTY）
+teamai route list                              # 模型路由（按尝试顺序）
+teamai route add luna --provider codex --match 'gpt-6-luna*' --accounts a@x.com,b@y.com --mode prefer --color blue
+teamai route rm luna
 ```
 
 同一优先级的账号按 **每周进度** 排序，仪表盘与账号池自身的选择使用同一顺序——最上面一行就是下一个请求会去的账号。每周预算被看作一条直线：一周开始时为 0%，重置时为 100%；账号的偏差 = 周用量 − 本周已过去的比例。落后于这条线（负值）的账号手里有不用就会在重置时作废的预算，所以排在前面。这只是顺序而不是拦截：所有账号都超前时，就用超前最少的那个。临近重置且仍有余量的账号本身就是落后最多的，因此没有单独的“即将重置”规则。周窗口指请求实际消耗的那个：Claude 用 `7d`（Fable 请求用 Fable 周窗口），Codex 用长度为 10080 分钟的窗口，不看名字。偏差相差 5 个百分点以内视为并列，避免每个请求都来回切换；并列时依次看：会话已在使用的账号、每剩余一周所剩周预算更多者、周重置更早者、5 小时窗口重置更早且用量更低者。没有未来重置的周窗口（未测量或重置已过）的账号排在有周窗口的账号之后。Fable 预留、显式优先级、切换阈值（5 小时窗口达到阈值的账号无论周进度如何都会被排除）、会话固定和并发上限仍像以前一样先行生效。每行以 `+12%p` / `-30%p` 显示偏差。`routing.balance: "level"` 恢复旧的排序（5 小时与周窗口中较满者，按 10% 分档，在途请求少者优先），`c` 可切换回配置顺序。
@@ -145,6 +148,8 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `5h`／`7d` 窗口仍为允许�
 全屏 TUI 会把 Claude 和 Codex 账号分组显示，并在用量变化时保持当前选中的账号位置不动。Claude 行分别独立显示 `5h session`、`7d overall` 以及按模型划分的 `7d Fable` 三个窗口；Codex 行显示其主、次两个窗口，每个窗口的标题取自该账号实际上报的时间跨度（`1w limit`）。配额是从官方客户端的响应中学习得来的，并会在重启后保留。
 
 底栏提供与 TeamClaude 相同的账号操作流程：启动 Claude/Codex、选择、切换、启用／禁用、排序、删除、添加／登录、重新测量（`R`）以及退出。`switch` 会把选中的账号固定到其所属服务商账号池的最前面；排序模式下可以指定名次，也可以把某个账号交回自动调度。刷新 Claude 资料时会显示套餐等级，并以红色标出 `past_due` 这类异常的订阅状态。
+
+**模型路由。** `routes.claude` / `routes.codex` 可以把指定模型的请求发往指定账号（第一个匹配的路由生效）。在仪表盘按 `g` 可管理所选行所属提供方的路由：列表、添加（`a`）、编辑（`e`）、删除（`d`，按 `y` 确认）、调整顺序（`[` `]`）；`Tab` 切换 Claude/Codex，`Esc` 不保存直接退出。保存前用服务器启动时同一个解析器校验，失败则不写入并在屏幕上显示原因。保存只以原子方式改写 `config.json` 中的 `routes`，并通过 control 端口让运行中的服务器重新读取（无需重启）。`teamai route list|add|rm` 走同一路径。各字段（`match`、`accounts`、`prefer` / `exclusive`、`color`）的详细含义见英文 README 的 Model routes / Editing routes。
 
 `p` 会把仪表盘截取并保存，`teamai capture` 则可以在没有终端的情况下从脚本或代理完成同样的事。每次截取会在 `~/.config/teamai/captures/`（或 `--out DIR`）下留下一对文件：保留原有颜色的文本帧，以及用内置位图字体绘制的同一帧 PNG，除 Node 之外不需要任何东西。账号地址在绘制帧之前就已被遮盖，因此账号列、页脚和活动日志中都不会残留。默认是 `de•••••••••w@gm•••.com` 这样的部分遮盖；`--redact full` 会替换为 `account #N`；`--redact none` 则保留地址，用于只给自己看的截取。在仪表盘中按 `p`，除了保存之外，还会在文件管理器中定位到该 PNG，并把图片复制到剪贴板——macOS 上开箱即用，Linux 上需要安装 `xdg-open` 以及 `wl-copy` 或 `xclip`。页脚会说明哪些操作实际完成了。本 README 顶部的图片就是这样得到的一次截取。
 
@@ -178,6 +183,7 @@ Fable 档的 429（`7d_oi` 被拒，而共享的 `5h`／`7d` 窗口仍为允许�
 | `maxConcurrentPerAccount` | `16` | 每个账号允许的并发在途请求数。设为 `0` 表示无限制。 |
 | `fableReserveThreshold` | `0.8` | 当账号的 Fable 窗口用量达到或超过该值时，优先把非 Fable 请求分给它。设为 1 关闭模型感知路由。 |
 | `routing.balance` | `"pacing"` | 同一优先级账号的排序方式：`pacing`（每周进度，见上文）或 `level`（窗口最空者优先，按 10% 分档）。 |
+| `routes` | — | 可选。按提供方的模型路由 `{ "claude": [...], "codex": [...] }`，可用仪表盘的 `g` 或 `teamai route` 编辑。 |
 | `proxy.legacyPorts` | — | 可选。按提供方继续应答的额外端口 — 例如 { "claude": [3400] }。 |
 
 如果某个端口已被别的程序占用，请改掉它——这正是启动失败最常见的原因，具体原因会记录在 `server-start.log` 中。
