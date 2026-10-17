@@ -271,6 +271,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `externalUsage` | `{ "enabled": true }` | Other agents' usage boxes. `providers.antigravity` / `providers.opencodeGo` / `providers.grok` (`false` hides one), `refreshMs` (default `900000`, minimum `30000`), `source` (`"direct"` or `"orca"`). |
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
 | `proxy.maxBodyMb` | `512` | Optional. Largest request body the relay accepts, in MB. A number above `0` and at most `4096`; anything else stops startup with the reason. |
+| `proxy.maxInflightBodyMb` | `1024` | Optional. What all request bodies held in memory at once may add up to, in MB, across both providers. Never below `proxy.maxBodyMb` when unset; set below it, or to anything but a number above `0` and at most `65536`, it stops startup with the reason. |
 
 Change a port if something else already owns it — that is the usual cause of a
 failed start, and the reason appears in `server-start.log`.
@@ -289,8 +290,14 @@ Activity pane logs its size and the limit (never its content). The default is
 not smaller than what either upstream documents (OpenAI: 512 MB per request,
 Anthropic Messages: 32 MB), so in practice the upstream decides — and its own
 `413` reaches the client unchanged. Each in-flight request holds its whole body
-in memory, because failing over to another account resends it: lower the limit
-if many very large requests run at once.
+in memory, because failing over to another account resends it. What all of
+them hold together is capped by `proxy.maxInflightBodyMb` (1024 MB by default,
+for both providers together; an upload still in progress counts): a request
+whose body does not fit is answered `429` with `retry-after: 5` and
+`x-teamai-429-reason: body_budget`, in the same error shape as the `413`, and is
+not sent upstream. Without that cap the worst case was `maxBodyMb` ×
+`maxConcurrentPerAccount` × accounts. Peak memory can reach up to about three times
+the budget: the body is copied when it is sent, and Claude's is rewritten per account.
 
 ## Scope and compliance
 

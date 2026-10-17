@@ -116,3 +116,27 @@ test('the server refuses to start with no accounts', async () => {
   const h = await home((c) => { c.accounts = []; });
   try { await assert.rejects(startServer({ background: false }), /No accounts configured/); } finally { await h.restore(); }
 });
+
+test('proxy.maxInflightBodyMb from config.json reaches the running proxy, shared by its requests', async () => {
+  const h = await home((c) => { c.proxy.maxBodyMb = 1; c.proxy.maxInflightBodyMb = 1; });
+  const server = await startServer({ background: false });
+  try {
+    // One upload holds most of the budget and never finishes; nothing goes upstream.
+    const slow = request({ host: '127.0.0.1', port: h.config.proxy.codexPort, path: '/v1/responses', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-length': MB } });
+    slow.on('error', () => {}); slow.write(Buffer.alloc(3 * MB / 4, 'a'));
+    await new Promise((r) => setTimeout(r, 100));
+    const res = await post(h.config.proxy.codexPort, Buffer.alloc(MB / 2, 'a'));
+    assert.equal(res.status, 429);
+    assert.equal(res.headers['x-teamai-429-reason'], 'body_budget');
+    assert.match(res.text, /1\.0 MB \(1048576 bytes\)/);
+    slow.destroy();
+  } finally { await server.stop(); await h.restore(); }
+});
+
+test('the server refuses to start when proxy.maxInflightBodyMb is below proxy.maxBodyMb', async () => {
+  const h = await home((c) => { c.proxy.maxBodyMb = 64; c.proxy.maxInflightBodyMb = 32; });
+  try {
+    await assert.rejects(startServer({ background: false }), /proxy\.maxInflightBodyMb \(32\) must be at least proxy\.maxBodyMb \(64\)/);
+    assert.equal(await listening(h.config.proxy.codexPort), false);
+  } finally { await h.restore(); }
+});
