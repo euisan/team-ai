@@ -6,6 +6,7 @@ import { ActivityLog } from './activity.js';
 import { createProxy, secureEqual } from './proxy.js';
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
+import { handleRouteControl } from './route-control.js';
 import { parseRoutes } from './routes.js';
 import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
 import { createServer } from 'node:http';
@@ -152,6 +153,8 @@ export async function runServer(): Promise<void> {
   const control = createServer(async (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
     if (await handleResetCreditControl(req, res, pools.find((p) => p.provider.id === 'codex'), config.proxy.clientToken)) return;
+    // Routes edited in the dashboard or with `teamai route`, applied in place.
+    if (await handleRouteControl(req, res, pools, config.proxy.clientToken, (warnings, counts) => { persist(`Routes reloaded: claude ${counts.claude ?? 0}, codex ${counts.codex ?? 0}`); for (const warning of warnings) persist(warning); })) return;
     if (!secureEqual(token, config.proxy.clientToken)) { res.writeHead(401).end('{}'); return; }
     if (!req.url?.startsWith('/probe')) { res.writeHead(404).end('{}'); return; }
     // Pick up accounts added or removed by the TUI (a separate process) before
