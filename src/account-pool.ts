@@ -204,6 +204,8 @@ export class AccountPool {
   private routeFellBack = new Set<string>();
   setRoutes(routes: Route[]): string[] {
     this.routes = routes;
+    // A reload can drop a route; forget its fallback note with it.
+    for (const name of this.routeFellBack) if (!routes.some((route) => route.name === name)) this.routeFellBack.delete(name);
     return routes.flatMap((route) => route.accounts.filter((ref) => !this.accounts.some((a, i) => AccountPool.names(a, i, ref))).map((ref) => `route ${route.name}: account ${ref} not found — skipped`));
   }
   routeFor(model: string | null | undefined): Route | null { return matchRoute(this.routes, model); }
