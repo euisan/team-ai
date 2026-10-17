@@ -213,3 +213,32 @@ test('in-flight lines are drawn only while the server that wrote them is running
     assert.deepEqual((await liveState({ version: 1, accounts: {}, active, serverPid: process.pid + 1 })).active, [], 'left behind by another process');
   } finally { delete process.env.TEAMAI_HOME; }
 });
+
+test('a stream that ended with response.failed or response.incomplete is logged and drawn as a failure', async () => {
+  for (const [event, end] of [['response.failed', 'failed'], ['response.incomplete', 'incomplete'], ['response.completed', null]] as const) {
+    const r = await rig(async (req, res) => { await drain(req); res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(`event: ${event}\ndata: {"type":"${event}"}\n\n`); });
+    try {
+      const res = await r.call(); assert.equal(res.status, 200); await res.text();
+      await until(() => r.rec.events.length === 1);
+      const request = r.rec.events[0]!.request!;
+      assert.equal(request.status, 200, 'the client still got a 200');
+      assert.equal(request.streamEnd ?? null, end, event);
+      if (end) assert.match(r.rec.events[0]!.message, new RegExp(` 200 ${end} \\(`), 'the log line says it');
+      else assert.match(r.rec.events[0]!.message, / 200 \(/);
+    } finally { r.close(); }
+  }
+  const now = Date.now();
+  const line = (streamEnd?: 'failed' | 'incomplete') => ({ at: now, message: '', request: { provider: 'codex' as const, providerLabel: 'Codex', method: 'POST', path: '/codex/responses', account: 'x@example.com', status: 200, durationMs: 1_200, ...(streamEnd ? { streamEnd } : {}) } });
+  const red = `${String.fromCharCode(27)}[31m`;
+  for (const width of [100, 60]) {
+    const draw = (events: ActivityEvent[]) => buildFrame(config, { version: 1, accounts: {}, events }, { width, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true });
+    const failed = draw([line('failed')]).find((l) => l.includes('x@example.com') && l.includes('200'))!;
+    assert.ok(failed.includes(`${red}`) && /200/.test(plain(failed)), `width ${width}: drawn red`);
+    if (width === 100) assert.match(plain(failed), /\(200 failed, 1\.2s\)/);
+    const incomplete = draw([line('incomplete')]).find((l) => l.includes('x@example.com') && l.includes('200'))!;
+    assert.ok(incomplete.includes(red), `width ${width}: incomplete drawn red`);
+    if (width === 100) assert.match(plain(incomplete), /\(200 incomplete, 1\.2s\)/);
+    const fine = draw([line()]).find((l) => l.includes('x@example.com') && l.includes('200'))!;
+    assert.equal(fine.includes(red), false, `width ${width}: a completed stream is not red`);
+  }
+});

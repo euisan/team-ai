@@ -153,6 +153,9 @@ export interface ActiveRequest {
   // The model route the request matched, and whether it ended up outside it.
   route?: string | null;
   routeFallback?: boolean;
+  // A stream that delivered its terminal event as response.failed or
+  // response.incomplete: the status says 200, the answer is not a whole one.
+  streamEnd?: 'failed' | 'incomplete';
 }
 
 // The same request once it has ended. status is the HTTP status the client
@@ -171,6 +174,7 @@ export interface RequestSummary {
   sessionId?: string | null;
   route?: string | null;
   routeFallback?: boolean;
+  streamEnd?: 'failed' | 'incomplete';
 }
 
 // message is the readable sentence (and what capture redaction rewrites);

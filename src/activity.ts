@@ -24,13 +24,14 @@ export function clean(value: unknown, max: number): string | null {
 
 export const LIMITS = { method: 16, path: 256, account: 64, model: 64, effort: 16, sessionId: 64 } as const;
 
-export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId' | 'route' | 'routeFallback'>>;
+export type ActivityPatch = Partial<Pick<ActiveRequest, 'account' | 'model' | 'effort' | 'sessionId' | 'route' | 'routeFallback' | 'streamEnd'>>;
 
 export function requestMessage(request: RequestSummary): string {
   const account = request.account ? ` → ${request.account}` : '';
   const model = request.model ? ` (${request.model}${request.effort ? `·${request.effort}` : ''})` : '';
   const route = request.route ? ` [route:${request.route}${request.routeFallback ? '→fallback' : ''}]` : '';
-  return `${request.providerLabel} ${request.method} ${request.path}${model}${account}${route} ${request.status} (${(request.durationMs / 1000).toFixed(1)}s)`;
+  const ended = request.streamEnd ? ` ${request.streamEnd}` : '';
+  return `${request.providerLabel} ${request.method} ${request.path}${model}${account}${route} ${request.status}${ended} (${(request.durationMs / 1000).toFixed(1)}s)`;
 }
 
 export class ActivityLog implements ActivitySink {
@@ -50,13 +51,14 @@ export class ActivityLog implements ActivitySink {
     for (const key of ['account', 'model', 'effort', 'sessionId'] as const) if (key in patch) entry[key] = clean(patch[key], LIMITS[key]);
     if ('route' in patch) entry.route = clean(patch.route, LIMITS.account);
     if ('routeFallback' in patch) entry.routeFallback = patch.routeFallback === true;
+    if (patch.streamEnd === 'failed' || patch.streamEnd === 'incomplete') entry.streamEnd = patch.streamEnd;
     this.changed();
   }
 
   end(id: string, status: number | string, at = Date.now()): void {
     const entry = this.open.get(id); if (!entry) return;
     this.open.delete(id);
-    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null, route: entry.route ?? null, routeFallback: entry.routeFallback ?? false };
+    const request: RequestSummary = { provider: entry.provider, providerLabel: entry.providerLabel, method: entry.method, path: entry.path, account: entry.account, status, durationMs: Math.max(0, at - entry.startedAt), model: entry.model ?? null, effort: entry.effort ?? null, sessionId: entry.sessionId ?? null, route: entry.route ?? null, routeFallback: entry.routeFallback ?? false, ...(entry.streamEnd ? { streamEnd: entry.streamEnd } : {}) };
     this.record({ at, message: requestMessage(request), request });
   }
 
