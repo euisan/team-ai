@@ -272,6 +272,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `proxy.legacyPorts` | — | Optional. Extra ports to keep answering on, per provider — e.g. `{ "claude": [3400] }`. |
 | `proxy.maxBodyMb` | `512` | Optional. Largest request body the relay accepts, in MB. A number above `0` and at most `4096`; anything else stops startup with the reason. |
 | `proxy.maxInflightBodyMb` | `1024` | Optional. What all request bodies held in memory at once may add up to, in MB, across both providers. Never below `proxy.maxBodyMb` when unset; set below it, or to anything but a number above `0` and at most `65536`, it stops startup with the reason. |
+| `proxy.bodyTimeoutMs` | `300000` | Optional. How long a request body may take to arrive, in ms; `0` for no limit. A body still arriving after it is answered `408` with `x-teamai-408-reason: body_timeout` and gives back its share of `proxy.maxInflightBodyMb`. A whole number from `0` to `86400000`, or startup stops with the reason. |
 
 Change a port if something else already owns it — that is the usual cause of a
 failed start, and the reason appears in `server-start.log`.
@@ -303,6 +304,10 @@ whose body does not fit is answered `429` with `retry-after: 5` and
 not sent upstream. Without that cap the worst case was `maxBodyMb` ×
 `maxConcurrentPerAccount` × accounts. Peak memory can reach up to about three times
 the budget: the body is copied when it is sent, and Claude's is rewritten per account.
+A body has `proxy.bodyTimeoutMs` (300 s, which Node already enforced silently)
+to arrive; a stalled upload is then answered `408` with
+`x-teamai-408-reason: body_timeout` and logged, rather than holding its share
+of the budget for as long as the client keeps the connection open.
 
 ## Scope and compliance
 
