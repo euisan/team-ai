@@ -136,7 +136,7 @@ test('route markers: none without routes, a coloured column per route otherwise'
   assert.deepEqual(exported.routes, [{ provider: 'codex', name: 'r', color: 'magenta', mode: 'prefer', members: [{ credentialId: 'cred-a', usable: true }, { credentialId: 'cred-b', usable: false }] }]);
   const raw = buildFrame(config, exported, view);
   const rowA = raw.find((l) => plain(l).includes('a@example.com'))!; const rowB = raw.find((l) => plain(l).includes('b@example.com'))!;
-  assert.ok(rowA.startsWith(`${String.fromCharCode(27)}[35m▸`), 'usable: the route colour');
+  assert.ok(rowA.startsWith(`${String.fromCharCode(27)}[35m▸`) || rowA.startsWith(`${String.fromCharCode(27)}[1;35m▸`), 'usable: the route colour');
   assert.ok(rowB.startsWith(`${String.fromCharCode(27)}[90m▸`), 'cannot serve now: grey');
   assert.ok(raw.map(plain).every((l) => [...l].length <= 100));
 });

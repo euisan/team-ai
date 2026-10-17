@@ -19,7 +19,7 @@ THRESHOLD = 110
 
 # Printable ASCII plus the handful of symbols src/tui.ts and src/redact.ts use.
 ASCII = "".join(chr(c) for c in range(32, 127))
-EXTRA = "─━│┌┐└┘●↑↓…→—•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·▸"
+EXTRA = "─━│┌┐└┘●↑↓…→—•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·▸►"
 GLYPHS = ASCII + EXTRA
 
 font = ImageFont.truetype(FONT, SIZE)

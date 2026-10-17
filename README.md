@@ -163,6 +163,8 @@ its Fable window, Codex on its weekly one). An unmeasured
 account sorts last (unknown is not the same as empty), a pinned priority still
 wins, and `c` toggles back to configured order.
 
+A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — tiers, priority, spread, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
+
 **Model-aware routing.** Only the top model (Claude's Fable tier) draws on the
 model-weekly window, so a request that does not need it — Opus, Sonnet, Haiku —
 is routed away from accounts that still have Fable budget and onto accounts

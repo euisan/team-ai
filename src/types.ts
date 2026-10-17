@@ -177,6 +177,10 @@ export interface PersistedState {
   serverPid?: number;
   // Each configured model route and whether its accounts can serve right now,
   // for the dashboard's route markers.
+  // Where a new request would go right now, per provider (see
+  // AccountPool.preview): the general target, Claude's Fable target, and one
+  // per model route. Credential ids.
+  next?: Partial<Record<ProviderId, { general: string | null; fable?: string | null; routes?: Record<string, string | null> }>>;
   routes?: Array<{ provider: ProviderId; name: string; color: RouteColor | null; mode: 'prefer' | 'exclusive'; members: Array<{ credentialId: string; usable: boolean }> }>;
   // The warm-up probe shape learned from live traffic, per provider. Without it
   // a restarted proxy falls back to a hardcoded client version that upstream may
