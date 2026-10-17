@@ -58,8 +58,10 @@ export function redactSnapshot(config: TeamAIConfig, state: PersistedState, leve
     config: { ...config, accounts: config.accounts.map((account, index) => ({ ...account, label: maskLabel(account.label, level, index) })) },
     state: {
       ...state,
-      events: (state.events || []).map((event) => ({ ...event, message: mask(event.message), ...(event.request ? { request: { ...event.request, account: event.request.account && mask(event.request.account) } } : {}) })),
-      active: state.active?.map((entry) => ({ ...entry, account: entry.account && mask(entry.account) })),
+      // Full redaction also drops session ids: they let lines be tied to one
+      // conversation. Partial keeps them — the screen shows six characters.
+      events: (state.events || []).map((event) => ({ ...event, message: mask(event.message), ...(event.request ? { request: { ...event.request, account: event.request.account && mask(event.request.account), ...(level === 'full' ? { sessionId: null } : {}) } } : {}) })),
+      active: state.active?.map((entry) => ({ ...entry, account: entry.account && mask(entry.account), ...(level === 'full' ? { sessionId: null } : {}) })),
     },
   };
 }
