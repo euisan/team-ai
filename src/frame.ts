@@ -2,10 +2,11 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
+import { AccountPool, type Ranked as RankedAccount } from './account-pool.js';
 import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, usageLayout, type GridRow } from './columns.js';
 import { hostText, type HostSample } from './host-metrics.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
-import { comparePacing, formatDeviation, pacingDeviation, type Balance } from './pacing.js';
+import { comparePacing, formatDeviation, pacingDeviation, parseBalance, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
@@ -98,7 +99,8 @@ function codexWindows(state: PersistedState, account: StoredAccount) {
 // reserve line, read the same way the server reads them.
 export interface OrderOptions { balance: Balance; fableReserve: number; now?: number }
 export function orderOptions(config: Pick<TeamAIConfig, 'routing' | 'fableReserveThreshold'>): OrderOptions {
-  return { balance: config.routing?.balance === 'level' ? 'level' : 'pacing', fableReserve: config.fableReserveThreshold ?? 0.8 };
+  let balance: Balance; try { balance = parseBalance(config.routing?.balance); } catch { balance = 'pacing'; }
+  return { balance, fableReserve: config.fableReserveThreshold ?? 0.8 };
 }
 
 // The accounts in the order the screen draws them: grouped by provider, and
@@ -107,41 +109,33 @@ export function orderOptions(config: Pick<TeamAIConfig, 'routing' | 'fableReserv
 // initial cursor — goes through this one function, so the cursor always lands
 // on the adjacent visible row rather than the adjacent entry in config.json.
 export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean, options: OrderOptions = { balance: 'pacing', fableReserve: 0.8 }): StoredAccount[] {
-  // Mirrors AccountPool.byHeadroom: least-spent first on the binding window
-  // (Claude's Fable bucket, Codex's main one), then — once they all tie at
-  // spent — whichever frees up soonest, unmeasured last, pinned priority first.
-  const rank = (account: StoredAccount): { usage: number | null; resetsAt: number | null } => {
-    const saved = state.accounts[account.credentialId];
-    const windows = saved?.windows || {};
-    const binding = Object.entries(windows).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]
-      ?? windows.primary ?? windows.requests ?? windows['7d'];
-    return { usage: binding?.usage ?? saved?.usage ?? null, resetsAt: binding?.resetsAt ?? saved?.resetsAt ?? null };
-  };
-  // With pacing, the same order the pool gives a new non-Fable request: the
-  // Fable tier, then priority, then comparePacing — so the top row is where the
-  // green arrow points unless something is unavailable.
+  // The same order the pool gives a new non-Fable request: the Fable tier,
+  // then priority, then the balance's own comparison — comparePacing, or with
+  // 'level' the pool's levelOrder over the saved windows and the requests in
+  // flight — so the top row is where the green arrow points unless something
+  // is unavailable.
   const now = options.now ?? Date.now();
   const windows = (account: StoredAccount) => state.accounts[account.credentialId]?.windows || {};
   const fableSpent = (account: StoredAccount): boolean => {
     const usage = Object.entries(windows(account)).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage;
     return options.fableReserve < 1 && usage !== null && usage !== undefined && usage >= options.fableReserve;
   };
+  const ranked = (account: StoredAccount): RankedAccount => {
+    const saved = state.accounts[account.credentialId];
+    const inflight = (state.active ?? []).filter((entry) => entry.provider === account.provider && entry.account === account.label).length;
+    return { usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: windows(account), inflight };
+  };
+  const balanced = options.balance === 'level'
+    ? ((level) => (a: StoredAccount, b: StoredAccount) => level(ranked(a), ranked(b)))(AccountPool.levelOrder(false, options.fableReserve))
+    : (a: StoredAccount, b: StoredAccount) => comparePacing({ id: a.id, windows: windows(a) }, { id: b.id, windows: windows(b) }, false, now);
   const ordered: StoredAccount[] = [];
   for (const provider of ['claude', 'codex'] as const) {
     const group = accounts.filter((account) => account.provider === provider);
-    if (byHeadroom && options.balance === 'pacing') {
+    if (byHeadroom) {
       group.sort((a, b) => {
         const tier = (fableSpent(a) ? 0 : 1) - (fableSpent(b) ? 0 : 1); if (tier) return tier;
         if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
-        return comparePacing({ id: a.id, windows: windows(a) }, { id: b.id, windows: windows(b) }, false, now);
-      });
-    } else if (byHeadroom) {
-      group.sort((a, b) => {
-        if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
-        const ra = rank(a); const rb = rank(b);
-        if (ra.usage === null || rb.usage === null) return (ra.usage === null ? 1 : 0) - (rb.usage === null ? 1 : 0);
-        if (ra.usage !== rb.usage) return ra.usage - rb.usage;
-        return (ra.resetsAt ?? Number.MAX_SAFE_INTEGER) - (rb.resetsAt ?? Number.MAX_SAFE_INTEGER);
+        return balanced(a, b);
       });
     }
     ordered.push(...group);

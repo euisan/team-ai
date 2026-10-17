@@ -177,7 +177,8 @@ an account whose 5-hour window is at it, however far behind its week is — the
 session pin and the concurrency cap all apply first, as before. Each row shows
 its deviation as `+12%p` / `-30%p`. `routing.balance: "level"` restores the
 older order (the fuller of the 5-hour and weekly windows, in 10% steps, fewest
-requests in flight first), and `c` toggles back to configured order.
+requests in flight first; the dashboard draws that order too), and `c`
+toggles back to configured order.
 
 A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — tiers, priority, pacing, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
 
@@ -258,7 +259,7 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `warmupIntervalMs` | `300000` | Background re-measure interval. `0` disables it. |
 | `maxConcurrentPerAccount` | `16` | In-flight requests allowed per account. `0` means unlimited. |
 | `fableReserveThreshold` | `0.8` | Fable-window usage at or above which an account is preferred for non-Fable requests. `1` turns model-aware routing off. |
-| `routing.balance` | `"pacing"` | How accounts of equal priority are ordered: `pacing` (weekly progress, see above) or `level` (least-full windows in 10% steps). |
+| `routing.balance` | `"pacing"` | How accounts of equal priority are ordered: `pacing` (weekly progress, see above) or `level` (least-full windows in 10% steps). Anything else stops startup with the reason; the dashboard then draws the `pacing` order. |
 | `codexResetCredits` | `false` | Spend Codex reset credits automatically (see above). |
 | `codexResetCreditsPolicy` | `"fleet"` | `fleet`: only when no Codex account has budget. `account`: also on an account's own exhaustion 429. |
 | `codexResetCreditsCooldownMs` | `1800000` | Minimum time between two attempts on one account, whatever the outcome. |

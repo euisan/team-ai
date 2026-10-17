@@ -18,6 +18,15 @@ export const PACING_BAND = 0.05;
 
 export type Balance = 'pacing' | 'level';
 
+// routing.balance from config.json: absent is 'pacing'; anything but the two
+// names is an error that says what was found. The one reading of the key: the
+// server refuses to start on the error, the dashboard draws the default order.
+export function parseBalance(value: unknown): Balance {
+  if (value === undefined) return 'pacing';
+  if (value === 'pacing' || value === 'level') return value;
+  throw new Error(`routing.balance must be "pacing" or "level", not ${JSON.stringify(value)}`);
+}
+
 interface Window { usage: number | null; resetsAt?: number | null; minutes?: number | null }
 export interface Paced { id?: string; windows: Record<string, Window> }
 
