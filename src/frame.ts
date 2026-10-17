@@ -309,7 +309,9 @@ function packHints(hints: string[], width: number): string[] {
 // The '?' list: every key, in either layout.
 function helpLines(keys: string[], width: number): string[] {
   const title = ' Keys ';
-  return [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`), ...packHints([...keys, '? this list'], width), color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`)];
+  const body = packHints([...keys, '? this list'], Math.max(1, width - 2))
+    .map((line) => color(36, `│${fit(line, Math.max(0, width - 2))}│`));
+  return [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`), ...body, color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`)];
 }
 
 export function buildFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
@@ -565,9 +567,13 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   // Grok) already say whose they are. A group still showing cached figures
   // after a failed refresh is yellow.
   let externalRank: number = RANK.external; let ruled = false;
+  let otherAgentsRule: Ranked | undefined;
   for (const provider of EXTERNAL_PROVIDERS) {
     const usage = state.external?.[provider]; if (!usage) continue;
-    if (!ruled) { push(RANK.external, rule('Other agents', width)); ruled = true; }
+    if (!ruled) {
+      otherAgentsRule = { text: rule('Other agents', width), rank: RANK.external };
+      lines.push(otherAgentsRule); ruled = true;
+    }
     const problem = usage.status === 'ok' ? null
       : usage.status === 'signed-out' ? (usage.note ?? 'not signed in') : usage.status === 'expired' ? (usage.note ?? 'sign-in expired')
       : usage.status === 'unavailable' ? (usage.note ?? 'usage unavailable') : `${usage.note ?? 'error'}`;
@@ -599,7 +605,10 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
     if (!left.length && visible(next) + (help ? 2 + visible(help) : 0) <= width) footer = next; else left.push(key);
   }
   if (help && left.length) footer = footer ? `${footer}  ${help}` : ` ${help}`;
-  if (!help && left.length) push(RANK.overlay, ...packHints(left, width).map((line) => color(90, line)));
+  // Overflow hints are expendable rows. Keep them out of the footer's slot;
+  // when the terminal is short enough that no separate row is available,
+  // dropping them leaves the footer as the final, unambiguous line.
+  if (!help && left.length) push(RANK.log, ...packHints(left, width).map((line) => color(90, line)));
   if (message) push(RANK.message, ` ${message}`);
   push(RANK.footer, footer);
 
@@ -609,6 +618,13 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
       const lowest = Math.min(...lines.map((line) => line.rank));
       lines.splice(lines.map((line) => line.rank).lastIndexOf(lowest), 1);
     }
+  }
+  // The other-agents rule has no meaning without at least one group below it.
+  // Height trimming can remove every group while leaving the rule's higher
+  // rank behind, so discard that orphan before drawing.
+  if (otherAgentsRule) {
+    const index = lines.indexOf(otherAgentsRule);
+    if (index >= 0 && (index + 1 >= lines.length || typeof lines[index + 1]!.text === 'string')) lines.splice(index, 1);
   }
   if (height !== undefined && lines.includes(pad)) lines.splice(lines.indexOf(pad), 1, ...Array.from({ length: height - lines.length + 1 }, () => ({ text: '', rank: 0 })));
   else if (lines.includes(pad)) lines.splice(lines.indexOf(pad), 1);

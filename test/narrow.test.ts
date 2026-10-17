@@ -123,6 +123,26 @@ test('a mode footer too long for the line keeps every hint on screen above it', 
   for (const hint of ['a add', 'e/Enter edit', 'd delete', 'Tab Claude/Codex', 'Esc close']) assert.ok(all.includes(hint), `route editor hint ${hint}`);
 });
 
+test('overflow hints yield to the footer when the narrow terminal has no spare row', () => {
+  const lines = plain(frame(40, { height: 12, mode: 'routes', routes: openRouteEditor(config, 'claude') }));
+  assert.match(lines.at(-1)!, /^ ROUTES:/);
+  assert.ok(!lines.slice(0, -1).some((line) => line.includes('Esc close') || line.includes('Tab Claude/Codex')));
+});
+
+test('the other-agents rule is omitted when height trimming removes every group', () => {
+  const lines = plain(frame(60, { height: 13 }));
+  assert.ok(!lines.some((line) => line.includes('Other agents')));
+});
+
+test('the narrow help box has side borders on every content row', () => {
+  const lines = plain(frame(60, { height: 12, mode: 'help' }));
+  const top = lines.findIndex((line) => line.startsWith('┌─ Keys '));
+  assert.ok(top >= 0);
+  const bottom = lines.findIndex((line, index) => index > top && line.startsWith('└'));
+  assert.ok(bottom > top);
+  for (const line of lines.slice(top + 1, bottom)) assert.match(line, /^│.*│$/);
+});
+
 test('a footer message gets its own line in the narrow layout', () => {
   const lines = plain(frame(46, { height: 20, message: 'Sorted by remaining quota' }));
   assert.equal(lines.at(-2)!.trim(), 'Sorted by remaining quota');
