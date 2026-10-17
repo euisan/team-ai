@@ -13,14 +13,25 @@ const HEADER_TIMEOUT_MS = 300_000;
 // proxy.maxBodyMb. It used to be a fixed 32 MB, and a long Codex session that
 // had opened several screenshots outgrew it: the relay answered 413 itself,
 // /compact (which resends the same history) hit the same 413, and the session
-// was lost without the request ever reaching OpenAI (2026-10-17). The default
-// is not smaller than either upstream: OpenAI documents up to 512 MB per
-// request, Anthropic's Messages API 32 MB. Above the upstream's own limit the
-// upstream answers, and that answer goes back to the client as it is.
+// was lost without the request ever reaching OpenAI (2026-10-17). That is the
+// one real large request on record, and only as "over 32 MB": its exact size
+// was not kept. Screenshots travel inline as base64 data URLs (a third larger
+// than the image), and Codex resends the whole history every turn, so such a
+// session only grows.
+//
+// 512 is not a measured size. It is the largest single size either upstream
+// documents: OpenAI's per-file upload limit (Files API). No per-request limit
+// is documented for the Responses API that this relays; Anthropic's Messages
+// API documents 32 MB per request. Above the upstream's own limit the upstream
+// answers, and that answer goes back to the client as it is. Bodies over
+// LARGE_BODY are logged with their size (never their content), so real sizes
+// are on record from now on.
 export const DEFAULT_MAX_BODY_MB = 512;
 // Node 20's Buffer cannot hold more than 4 GiB.
 const MAX_BODY_MB_CEILING = 4096;
 const MB = 1024 * 1024;
+// Anthropic's documented request limit: past it a body is worth a log line.
+const LARGE_BODY = 32 * MB;
 
 // proxy.maxBodyMb as bytes, or a startup error that says what is wrong with it.
 export function maxBodyBytes(value: unknown): number {
@@ -202,6 +213,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
           onChange(`${pool.provider.label} ${req.method} ${path} → 413 request body ${formatBytes(error.size)} exceeds proxy.maxBodyMb ${formatBytes(error.limit)}`);
           return json(res, 413, { error: { type: 'request_too_large', message: error.message } }, { 'x-teamai-413-reason': 'body_limit' });
         }
+        if (body.length > LARGE_BODY) onChange(`${pool.provider.label} ${req.method} ${path} large request body ${formatBytes(body.length)}`);
         // Session, model and effort for the activity line — three fields, read
         // once; nothing else from the body leaves this function.
         const parsed = parsedBody(body);
