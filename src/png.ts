@@ -3,6 +3,7 @@
 // frame already carries, so the image is the terminal rendering, not a
 // re-drawing of the data.
 import { deflateSync } from 'node:zlib';
+import { charWidth } from './columns.js';
 import { BITMAP, CELL_HEIGHT, CELL_WIDTH, GLYPHS } from './font.js';
 
 // CRC-32 as PNG specifies it (reflected, polynomial 0xEDB88320). zlib.crc32
@@ -55,7 +56,17 @@ const SGR = new RegExp(`${String.fromCharCode(27)}\\[([0-9;]*)m`, 'g');
 // guessed at.
 function parseLine(line: string): Cell[] {
   const cells: Cell[] = []; let fg: Rgb = FOREGROUND; let bg: Rgb | null = null; let bold = false; let last = 0;
-  const emit = (text: string): void => { for (const glyph of text) cells.push({ glyph, fg: bold && fg === FOREGROUND ? PALETTE[97]! : fg, bg }); };
+  // A wide character takes two cells, as on the terminal: its glyph in the
+  // first and an empty continuation (painted with the same background) in the
+  // second, so columns after it line up with the text frame. Zero-width ones
+  // take none.
+  const emit = (text: string): void => {
+    for (const glyph of text) {
+      const width = charWidth(glyph); if (!width) continue;
+      const cell = { fg: bold && fg === FOREGROUND ? PALETTE[97]! : fg, bg };
+      cells.push({ glyph, ...cell }); if (width === 2) cells.push({ glyph: '', ...cell });
+    }
+  };
   for (const match of line.matchAll(SGR)) {
     emit(line.slice(last, match.index)); last = match.index + match[0].length;
     for (const code of (match[1] || '0').split(';').map(Number)) {
