@@ -22,12 +22,11 @@ export async function runTui(): Promise<void> {
   const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); return displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)); };
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
-  const render = async (): Promise<void> => {
+  const screen = startScreen(process.stdout, async ({ width, height }) => {
     const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
-    const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40);
-    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits, routes: routeEditor });
-    process.stdout.write(`${ESC}H${lines.join('\n')}`);
-  };
+    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits, routes: routeEditor });
+  });
+  const render = (): Promise<void> => screen.render();
 
   const move = async (delta: number): Promise<void> => { const accounts = await rows(); const index = Math.max(0, accounts.findIndex((a) => a.credentialId === selectedId)); selectedId = accounts[Math.min(accounts.length - 1, Math.max(0, index + delta))]?.credentialId || null; };
   const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const config = await loadConfig(); const account = selected(config.accounts); if (!account) return; fn(account, config.accounts); await saveConfig(config); await restartDaemon(); };
@@ -56,7 +55,7 @@ export async function runTui(): Promise<void> {
   const capture = async (): Promise<void> => {
     busy = true;
     try {
-      const result = await captureDashboard({ level: 'partial', width: Math.max(80, process.stdout.columns || 120), selectedId, mode, sortByHeadroom });
+      const result = await captureDashboard({ level: 'partial', width: terminalSize(process.stdout).width, selectedId, mode, sortByHeadroom });
       const [copied, revealed] = await Promise.all([copyImageToClipboard(result.png), revealInFolder(result.png)]);
       const extras = [copied ? 'copied to clipboard' : 'clipboard unavailable', revealed ? 'opened folder' : ''].filter(Boolean).join(', ');
       message = `Captured ${result.png.slice(result.png.lastIndexOf('/') + 1)} — ${extras}`;
@@ -150,7 +149,35 @@ export async function runTui(): Promise<void> {
     }
     await render();
   }));
-  clearInterval(timer); if (closed) { process.stdin.setRawMode(false); process.stdin.pause(); process.stdout.write(`${ESC}?25h${ESC}?1049l`); }
+  clearInterval(timer); screen.stop(); if (closed) { process.stdin.setRawMode(false); process.stdin.pause(); process.stdout.write(`${ESC}?25h${ESC}?1049l`); }
+}
+
+// The terminal's size as the frame should be drawn: its real columns and
+// rows, so a phone viewing the same terminal at 46 columns gets a 46-column
+// frame rather than an 80-column one wrapped onto two lines each.
+export function terminalSize(out: { columns?: number; rows?: number }): { width: number; height: number } {
+  return { width: Math.max(20, out.columns || 120), height: Math.max(4, out.rows || 40) };
+}
+
+export interface TerminalOut { columns?: number; rows?: number; write(text: string): unknown; on(event: 'resize', listener: () => void): unknown; off(event: 'resize', listener: () => void): unknown }
+
+// Draws frames to the terminal at its current size, and again the moment
+// the size changes (Node turns SIGWINCH into 'resize' on stdout). The frame
+// after a resize clears the screen first: the old frame, reflowed to the new
+// width, would otherwise leave pieces outside the new one. A frame whose
+// size changed while its data was loading is dropped; the resize's own
+// redraw follows with the right size.
+export function startScreen(out: TerminalOut, draw: (size: { width: number; height: number }) => Promise<string[]>): { render(): Promise<void>; stop(): void } {
+  let wipe = false;
+  const render = async (): Promise<void> => {
+    const size = terminalSize(out); const lines = await draw(size); const now = terminalSize(out);
+    if (now.width !== size.width || now.height !== size.height) return;
+    const text = `${wipe ? `${ESC}2J` : ''}${ESC}H${lines.join('\n')}`; wipe = false;
+    out.write(text);
+  };
+  const resized = (): void => { wipe = true; void render(); };
+  out.on('resize', resized);
+  return { render, stop: () => { out.off('resize', resized); } };
 }
 
 // One key in the route editor, saving when the key commits a change: through

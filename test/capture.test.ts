@@ -62,3 +62,13 @@ test('none keeps labels for a private capture', async () => {
     assert.match(text, /bob@example\.com/);
   } finally { delete process.env.TEAMAI_HOME; }
 });
+
+test('a capture taken at a narrow width is the narrow layout the terminal shows', async () => {
+  const root = await seedHome(); process.env.TEAMAI_HOME = root;
+  try {
+    const result = await captureDashboard({ level: 'partial', width: 46 });
+    const lines = (await readFile(result.text, 'utf8')).trimEnd().split('\n').map((line) => line.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), ''));
+    assert.ok(lines.some((line) => line.startsWith('─ Claude 1')), 'narrow section rule');
+    assert.ok(lines.every((line) => [...line].length <= 46));
+  } finally { delete process.env.TEAMAI_HOME; }
+});
