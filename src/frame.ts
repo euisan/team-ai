@@ -138,7 +138,34 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
   return out;
 }
 
-export type FrameMode = 'normal' | 'order' | 'delete' | 'add';
+export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits';
+
+// The reset-credit picker ('t' on a Codex row): the tickets on one account and
+// where the operator is in choosing and confirming one.
+export interface CreditPicker {
+  account: string;
+  phase: 'loading' | 'pick' | 'confirm' | 'applying' | 'done';
+  items: Array<{ title: string | null; grantedAt: number | null; expiresAt: number | null }>;
+  index: number;
+  result?: string;
+}
+
+function stamp(at: number | null): string {
+  if (!at) return '—'; const d = new Date(at); const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function pickerLines(picker: CreditPicker, width: number): string[] {
+  const title = ` Reset credits — ${picker.account} `;
+  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - title.length - 3))}┐`)];
+  if (picker.phase === 'loading') out.push(color(90, '  Loading…'));
+  else if (!picker.items.length) out.push(color(90, '  No reset credits available'));
+  else picker.items.forEach((item, i) => out.push(`${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', 28)} granted ${stamp(item.grantedAt)}  expires ${stamp(item.expiresAt)}`));
+  if (picker.phase === 'applying') out.push(color(33, '  Applying…'));
+  if (picker.phase === 'done') out.push(`  Result: ${picker.result ?? 'error'}`);
+  out.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
+  return out;
+}
 
 export interface FrameView {
   width: number;
@@ -150,6 +177,7 @@ export interface FrameView {
   mode: FrameMode;
   message: string;
   sortByHeadroom: boolean;
+  credits?: CreditPicker;
 }
 
 export function buildFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
@@ -197,11 +225,14 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       } else {
         const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
         const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');
-        lines.push(`${head} ${gauges ? `${gauges} ${age(saved?.measuredAt)}` : color(90, 'no quota data yet')}`);
+        // Reset credits on hand, when the usage endpoint has counted some.
+        const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? ` ${color(36, `RC${saved.resetCredits}`)}` : '';
+        lines.push(`${head} ${gauges ? `${gauges} ${age(saved?.measuredAt)}` : color(90, 'no quota data yet')}${credits}`);
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
   }
+  if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
   const activityRows = height === undefined ? 8 : Math.max(4, height - lines.length - 5); lines.push('');
   const active = state.active || [];
   const activityTitle = ` Activity${active.length ? `  ${color(36, `${active.length} active`)}` : ''} `;
@@ -209,7 +240,11 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   lines.push(...activityLines(active, state.events || [], activityRows));
   if (height !== undefined) while (lines.length < height - 2) lines.push('');
   lines.push('─'.repeat(width));
-  const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : ' ADD: 1 Claude login   2 Codex login   Esc cancel';
+  // 't' only does something on a Codex row, so it is only offered there.
+  const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
+  const footer = mode === 'normal' ? ` 1 Claude  2 Codex  ↑↓ select  s switch  e enable  o order  d delete  a add  ${codexSelected ? 't credits  ' : ''}p capture  R Reload  c ${sortByHeadroom ? 'quota' : 'config'}-sort  q quit` : mode === 'order' ? ' ORDER: ↑↓ rank   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
+    : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
+    : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
   // The message is the part that matters when there is one — a capture path,
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';

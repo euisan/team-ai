@@ -3,10 +3,10 @@ import { fileURLToPath } from 'node:url';
 import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
-import { buildFrame, displayOrder, ESC, type FrameMode } from './frame.js';
+import { buildFrame, displayOrder, ESC, type CreditPicker, type FrameMode } from './frame.js';
 import { liveState, runningPid } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
-import type { StoredAccount } from './types.js';
+import type { ResetCredit, StoredAccount } from './types.js';
 
 export async function runTui(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('TUI requires a terminal');
@@ -15,13 +15,14 @@ export async function runTui(): Promise<void> {
   // account has room left", and that ordering answers it at a glance. 'c' puts
   // it back in configured order for anyone reading it as a roster.
   let sortByHeadroom = true;
+  let credits: CreditPicker | undefined; let creditList: ResetCredit[] = []; let creditAccount: string | null = null;
   const rows = async (): Promise<StoredAccount[]> => displayOrder((await loadConfig()).accounts, await loadState(), sortByHeadroom);
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   const render = async (): Promise<void> => {
     const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom)); if (current && !selectedId) selectedId = current.credentialId;
     const width = Math.max(80, process.stdout.columns || 120); const height = Math.max(24, process.stdout.rows || 40);
-    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom });
+    const lines = buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits });
     process.stdout.write(`${ESC}H${lines.join('\n')}`);
   };
 
@@ -60,6 +61,36 @@ export async function runTui(): Promise<void> {
     finally { busy = false; }
   };
 
+  // Reset credits by hand ('t' on a Codex row). The server holds the tokens,
+  // so the list and the redemption both go through the control port.
+  const control = async (path: string, method = 'GET'): Promise<Response> => {
+    const config = await loadConfig(); const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
+    return fetch(`http://${config.proxy.host}:${port}${path}`, { method, headers: { authorization: `Bearer ${config.proxy.clientToken}` }, signal: AbortSignal.timeout(60_000) });
+  };
+  const openCredits = async (): Promise<void> => {
+    const account = selected(await rows());
+    if (!account || account.provider !== 'codex') { message = 'Reset credits: select a Codex account first'; return; }
+    creditAccount = account.credentialId; mode = 'credits'; credits = { account: account.label, phase: 'loading', items: [], index: 0 }; busy = true; await render();
+    try {
+      const response = await control(`/codex/reset-credits?account=${encodeURIComponent(account.credentialId)}`);
+      const body = await response.json() as { credits?: ResetCredit[]; error?: string };
+      if (!response.ok) throw new Error(body.error || `control ${response.status}`);
+      // Listed soonest-to-expire first, so the default choice is that one.
+      creditList = body.credits ?? []; credits = { ...credits, phase: 'pick', items: creditList, index: 0 };
+    } catch (error) { mode = 'normal'; credits = undefined; message = `Reset credits failed: ${(error as Error).message}`; }
+    finally { busy = false; }
+  };
+  const redeemCredit = async (): Promise<void> => {
+    if (!credits || !creditAccount) return;
+    const chosen = creditList[credits.index]; credits = { ...credits, phase: 'applying' }; busy = true; await render();
+    try {
+      const response = await control(`/codex/reset-credit?account=${encodeURIComponent(creditAccount)}${chosen ? `&credit_id=${encodeURIComponent(chosen.id)}` : ''}`, 'POST');
+      const body = await response.json() as { outcome?: string; error?: string };
+      credits = { ...credits, phase: 'done', result: body.outcome ?? body.error ?? `error ${response.status}` };
+    } catch (error) { credits = { ...credits, phase: 'done', result: `error: ${(error as Error).message}` }; }
+    finally { busy = false; }
+  };
+
   const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
   const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
     busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
@@ -71,7 +102,16 @@ export async function runTui(): Promise<void> {
   await new Promise<void>((resolve) => process.stdin.on('data', async (key: string) => {
     if (busy) return; message = '';
     if (key === '' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
-    if (key === '\x1b') mode = 'normal';
+    if (key === '\x1b') { mode = 'normal'; credits = undefined; }
+    else if (mode === 'credits' && credits) {
+      if (credits.phase === 'pick' && credits.items.length) {
+        if (key === '\x1b[A' || key === 'k') credits = { ...credits, index: Math.max(0, credits.index - 1) };
+        else if (key === '\x1b[B' || key === 'j') credits = { ...credits, index: Math.min(credits.items.length - 1, credits.index + 1) };
+        else if (key === '\r') credits = { ...credits, phase: 'confirm' };
+      } else if (credits.phase === 'confirm') {
+        if (key === 'y') await redeemCredit(); else if (key === 'n') credits = { ...credits, phase: 'pick' };
+      }
+    }
     else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); }
     else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; message = `Deleted ${account.label}`; await restartDaemon(); } mode = 'normal'; } }
     else if (mode === 'order') {
@@ -84,7 +124,7 @@ export async function runTui(): Promise<void> {
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
       else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
-      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 'p') { await capture(); }
+      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'p') { await capture(); }
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();

@@ -9,6 +9,7 @@ import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { relayedCodexConfig } from './codex-config.js';
 import { isRedactLevel } from './redact.js';
+import { resetCreditSettings } from './reset-credits.js';
 import { runServer, runningPid } from './runtime.js';
 import { dataDir, loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
@@ -68,7 +69,21 @@ async function accounts(filter?: ProviderId): Promise<void> {
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
 async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }
 
-async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); }
+async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); await resetCreditStatus(); }
+
+// Codex reset credits per account, from what the server last recorded.
+async function resetCreditStatus(): Promise<void> {
+  const config = await loadConfig(); const state = await loadState(); const settings = resetCreditSettings(config);
+  const codex = config.accounts.filter((a) => a.provider === 'codex'); if (!codex.length) return;
+  console.log(`Reset credits: auto-redeem ${settings.enabled ? `on (policy ${settings.policy}, cooldown ${Math.round(settings.cooldownMs / 60_000)}m, reserve ${settings.reserve}${settings.sessionWindow ? ', 5h window too' : ''})` : 'off'}`);
+  for (const account of codex) {
+    const saved = state.accounts[account.credentialId];
+    const count = typeof saved?.resetCredits === 'number' ? saved.resetCredits : null;
+    const used = saved?.resetCreditsConsumed ? `, ${saved.resetCreditsConsumed} redeemed` : '';
+    const last = saved?.resetCreditLastOutcome ? ` (last: ${saved.resetCreditLastOutcome})` : '';
+    console.log(`  ${account.label}: ${count === null ? (settings.enabled ? 'unknown (no usage read has reported a count yet)' : 'unknown') : `${count} available${used}${last}`}`);
+  }
+}
 async function stop(quiet = false): Promise<void> { const pid = await runningPid(); if (!pid) { if (!quiet) console.log('TeamAI server is not running'); return; } process.kill(pid, 'SIGTERM'); for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((r) => setTimeout(r, 100)); if (!quiet) console.log(`Stopped TeamAI server ${pid}`); }
 
 // Start the relay on demand. This is what makes the launchers work whether or

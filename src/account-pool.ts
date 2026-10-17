@@ -1,4 +1,6 @@
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import { randomUUID } from 'node:crypto';
+import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
+import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
 // An empty exclusion set, for judging an account on its own merits rather than
 // on what one request has already tried.
@@ -14,6 +16,14 @@ export class AccountPool {
   private refreshes = new Map<string, Promise<void>>();
   private sweepInFlight = false;
   private usageRead: Promise<unknown> | null = null;
+  // Codex reset credits. The server fills these in: the settings from config,
+  // saveNow to put state on disk immediately (a redemption is recorded before
+  // the call and again after it, never left to the debounced save), and log
+  // for the activity pane. The defaults keep the feature inert.
+  resetCredits: ResetCreditSettings = RESET_CREDIT_DEFAULTS;
+  saveNow: () => Promise<void> = async () => {};
+  log: (message: string) => void = () => {};
+  private deadEndLoggedAt = 0;
 
   // Accounts still holding Fable budget are kept for Fable. An account measured
   // below this line reserves its remainder; at or above it, it is the preferred
@@ -34,11 +44,17 @@ export class AccountPool {
       // retry-after came back to park seven accounts across restarts. If the
       // account really is spent, the next request re-derives the right cooldown
       // (model-quota → Fable only, real quota → whole account).
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0 };
+      // The reset-credit ledger is restored, unlike the cooldown: a ticket
+      // redeemed (or possibly redeemed) before a restart stays counted.
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0, ...AccountPool.ledger(saved) };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
     this.probeTemplate = state.probes?.[provider.id] ?? null;
+  }
+
+  static ledger(saved: ResetCreditLedger | undefined): Required<ResetCreditLedger> {
+    return { resetCredits: saved?.resetCredits ?? null, resetCreditsAt: saved?.resetCreditsAt ?? null, resetCreditLastAt: saved?.resetCreditLastAt ?? null, resetCreditLastOutcome: saved?.resetCreditLastOutcome ?? null, resetCreditsConsumed: saved?.resetCreditsConsumed ?? 0, resetCreditResetAt: saved?.resetCreditResetAt ?? null };
   }
 
   // How spent an account is, on the window that actually gates it. Claude's
@@ -327,8 +343,43 @@ export class AccountPool {
     const plan = headers.get('x-codex-plan-type');
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
   }
-  private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot): void {
-    account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = Date.now();
+  private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot, source: 'headers' | 'usage' = 'headers'): void {
+    const now = Date.now();
+    this.applyCreditCount(account, quota, now);
+    // Shortly after a reset, a usage read may still describe the windows as
+    // they were before it: let it lower usage, never raise it.
+    if (source === 'usage' && this.inResetGrace(account, now)) {
+      const windows = Object.fromEntries(Object.entries(quota.windows).map(([name, w]) => {
+        const held = account.windows[name]?.usage;
+        return [name, { ...w, usage: held === null || held === undefined || w.usage === null ? w.usage : Math.min(held, w.usage) }];
+      }));
+      const usage = account.usage === null || quota.routingUsage === null ? quota.routingUsage : Math.min(account.usage, quota.routingUsage);
+      account.usage = usage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...windows }; account.measuredAt = now;
+      return;
+    }
+    account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = now;
+  }
+
+  // Only the usage endpoint reports a count; a header reading leaves it be.
+  private applyCreditCount(account: RuntimeAccount, quota: QuotaSnapshot, now: number): void {
+    if (typeof quota.resetCredits === 'number') { account.resetCredits = quota.resetCredits; account.resetCreditsAt = now; }
+  }
+
+  private inResetGrace(account: RuntimeAccount, now = Date.now()): boolean {
+    return account.resetCreditResetAt !== null && account.resetCreditResetAt !== undefined && now - account.resetCreditResetAt < RESET_GRACE_MS;
+  }
+
+  // updateQuota for a relayed response, fenced against a reset credit: a
+  // response to a request sent before the reset says nothing about the
+  // windows after it ('stale'), and for a short while after the reset an
+  // ordinary response's figures are held back too ('held'). A 429 sent after
+  // the reset is always applied — it is the proof the reset did not take.
+  observeResponse(account: RuntimeAccount, headers: Headers, dispatchedAt: number, status: number): 'stale' | 'held' | 'applied' {
+    const resetAt = account.resetCreditResetAt;
+    if (resetAt !== null && resetAt !== undefined && dispatchedAt < resetAt) return 'stale';
+    if (status !== 429 && this.inResetGrace(account)) return 'held';
+    this.updateQuota(account, headers);
+    return 'applied';
   }
   cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
 
@@ -426,7 +477,11 @@ export class AccountPool {
     while (this.usageRead) await this.usageRead;
     const read = (async () => {
       const cutoff = Date.now() - maxAgeMs;
-      const due = this.accounts.filter((a) => !a.error && (a.measuredAt ?? 0) <= cutoff);
+      // With reset credits on, an account whose ticket count has gone stale is
+      // read too: busy accounts stay fresh through headers, which never carry
+      // the count, and would otherwise never have one.
+      const countsDue = (a: RuntimeAccount) => this.resetCredits.enabled && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff;
+      const due = this.accounts.filter((a) => !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a)));
       await Promise.all(due.map(async (account) => {
         try {
           await this.refresh(account);
@@ -434,8 +489,8 @@ export class AccountPool {
           const quota = await this.provider.fetchUsage!(account.credential);
           // A proxied response may have landed while this read was in flight;
           // its headers are newer than this snapshot, so they are kept.
-          if (quota && (account.measuredAt ?? 0) < started) { this.applyQuota(account, quota); measured.add(account.id); }
-          else if (quota) measured.add(account.id);
+          if (quota && (account.measuredAt ?? 0) < started) { this.applyQuota(account, quota, 'usage'); measured.add(account.id); }
+          else if (quota) { this.applyCreditCount(account, quota, Date.now()); measured.add(account.id); }
         } catch { /* a failed read leaves the account to the probe fallback */ }
       }));
     })();
@@ -512,7 +567,7 @@ export class AccountPool {
         next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority }));
       } else {
         added++;
-        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0 });
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0, ...AccountPool.ledger(undefined) });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
@@ -654,8 +709,140 @@ export class AccountPool {
     return updated;
   }
 
+  // Take a slot on one particular account, for a retry that must go back to
+  // the account a reset credit was just spent on.
+  claim(account: RuntimeAccount, excluded: Set<string>, wantsFable = false): boolean {
+    if (!this.available(account, excluded, wantsFable, true)) return false;
+    account.inflight++; return true;
+  }
+
+  private async saveSafely(): Promise<boolean> {
+    try { await this.saveNow(); return true; } catch { return false; }
+  }
+
+  // Spend one reset credit on this account. Only one redemption runs per
+  // account; a second caller (another request, or the operator) shares its
+  // result instead of starting another. With enforce, the account must pass
+  // eligibility() first; the operator's manual path skips that check.
+  redeemResetCredit(account: RuntimeAccount, reason: string, options: { enforce?: boolean; creditId?: string; recheck?: boolean } = {}): Promise<RedeemResult> {
+    if (account.resetCreditPromise) return account.resetCreditPromise;
+    const skipped = (why: string): Promise<RedeemResult> => Promise.resolve({ kind: 'no-spend', code: why, windowsReset: null, error: null, skipped: true, reason });
+    if (!this.provider.consumeResetCredit) return skipped('unsupported');
+    if (options.enforce) { const why = eligibility(account, this.resetCredits, this.provider.id); if (why !== 'ok') return skipped(why); }
+    const label = this.provider.label;
+    const run = (async (): Promise<RedeemResult> => {
+      try { await this.refresh(account); } catch (error) {
+        account.resetCreditLastAt = Date.now(); account.resetCreditLastOutcome = 'token_refresh_failed'; await this.saveSafely();
+        this.log(`${label} reset credit on "${account.label}" (${reason}) skipped — credential unusable (${(error as Error).message.slice(0, 120)})`);
+        return { kind: 'no-spend', code: 'token_refresh_failed', windowsReset: null, error: null, skipped: true, reason };
+      }
+      // On disk before the call: if the process dies between here and the
+      // answer, the restart finds 'pending' and will not spend another.
+      account.resetCreditLastAt = Date.now(); account.resetCreditLastOutcome = 'pending';
+      if (!(await this.saveSafely())) {
+        account.resetCreditLastOutcome = 'save_failed';
+        this.log(`${label} reset credit NOT applied on "${account.label}" (${reason}): state could not be saved first`);
+        return { kind: 'no-spend', code: 'save_failed', windowsReset: null, error: null, skipped: true, reason };
+      }
+      let outcome: ConsumeOutcome;
+      try {
+        const answer = await this.provider.consumeResetCredit!(account.credential, { redeemRequestId: randomUUID(), creditId: options.creditId, timeoutMs: this.resetCredits.timeoutMs });
+        outcome = classifyConsume(answer.status, answer.body);
+      } catch (error) {
+        const timedOut = (error as Error).name === 'TimeoutError' || (error as Error).name === 'AbortError';
+        outcome = { kind: 'indeterminate', code: timedOut ? 'timeout' : 'network', windowsReset: null, error: (error as Error).message.slice(0, 200) };
+      }
+      this.applyRedeem(account, outcome);
+      await this.saveSafely();
+      this.logRedeem(account, reason, outcome);
+      // Read the authoritative usage back shortly after: it confirms a reset
+      // and settles what an indeterminate answer actually did.
+      if (options.recheck !== false) setTimeout(() => void this.recheckUsage(account), RECHECK_DELAY_MS).unref();
+      return { ...outcome, skipped: false, reason };
+    })();
+    const shared = run.finally(() => { account.resetCreditPromise = null; });
+    account.resetCreditPromise = shared;
+    return shared;
+  }
+
+  private applyRedeem(account: RuntimeAccount, outcome: ConsumeOutcome): void {
+    const now = Date.now();
+    account.resetCreditLastOutcome = outcome.kind === 'reset' ? 'reset' : outcome.kind === 'spent-no-reset' ? 'reset_no_windows' : outcome.code;
+    if (outcome.code === 'no_credit') account.resetCredits = 0;
+    if (outcome.kind === 'reset' || outcome.kind === 'spent-no-reset') {
+      if (typeof account.resetCredits === 'number') account.resetCredits = Math.max(0, account.resetCredits - 1);
+      account.resetCreditsConsumed = (account.resetCreditsConsumed ?? 0) + 1;
+    }
+    // A reset that reset nothing leaves usage and benches as they were.
+    if (outcome.kind !== 'reset') return;
+    account.usage = 0; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; account.resetCreditResetAt = now;
+    for (const name of ['primary', 'secondary']) { const window = account.windows[name]; if (window) account.windows[name] = { ...window, usage: 0, resetsAt: null }; }
+  }
+
+  private logRedeem(account: RuntimeAccount, reason: string, outcome: ConsumeOutcome): void {
+    const label = this.provider.label; const left = account.resetCredits ?? '?'; const detail = `${outcome.code}${outcome.error ? ` — ${outcome.error}` : ''}`;
+    if (outcome.kind === 'reset') this.log(`${label} reset credit redeemed on "${account.label}" (${reason}): windows_reset=${outcome.windowsReset ?? '?'}, credits left=${left}`);
+    else if (outcome.kind === 'spent-no-reset') this.log(`${label} reset credit SPENT on "${account.label}" (${reason}) but no window was reset (windows_reset=0); credits left=${left}`);
+    else if (outcome.kind === 'indeterminate') this.log(`${label} reset credit on "${account.label}" (${reason}) indeterminate: ${detail}; re-reading usage, no other account tried this pass`);
+    else this.log(`${label} reset credit NOT applied on "${account.label}" (${reason}): ${detail}`);
+  }
+
+  // One authoritative usage read for a single account, outside the timer.
+  async recheckUsage(account: RuntimeAccount): Promise<void> {
+    if (!this.provider.fetchUsage) return;
+    try { await this.refresh(account); const quota = await this.provider.fetchUsage(account.credential); if (quota) this.applyQuota(account, quota, 'usage'); await this.saveSafely(); } catch { /* the timer reads it later */ }
+  }
+
+  // The quota dead end: no account can take the request. Spend at most one
+  // ticket, trying eligible accounts in order and stopping at the first
+  // answer that is not a clean "nothing spent" — trying the next account after
+  // an unclear answer is exactly how two tickets get spent.
+  async redeemForFleet(excluded: Set<string>, wantsFable = false, among: (account: RuntimeAccount) => boolean = () => true): Promise<{ attempted: boolean; reset: RuntimeAccount | null; yielded: boolean }> {
+    const now = Date.now();
+    const pool = this.accounts.filter(among);
+    const reasons = pool.map((account) => ({ account, why: eligibility(account, this.resetCredits, this.provider.id, now) }));
+    const candidates = candidateOrder(reasons.filter((r) => r.why === 'ok' || r.why === 'in-flight').map((r) => r.account));
+    if (!candidates.length) {
+      if (now - this.deadEndLoggedAt >= 60_000) { this.deadEndLoggedAt = now; this.log(`${this.provider.label} reset credit: no eligible account at the quota dead end (${reasons.map((r) => `${r.account.label}:${r.why}`).join(', ')})`); }
+      return { attempted: false, reset: null, yielded: false };
+    }
+    let attempted = false;
+    for (const account of candidates) {
+      const result = await this.redeemResetCredit(account, 'fleet-exhausted', { enforce: true });
+      if (result.skipped) continue;
+      attempted = true;
+      if (result.kind === 'reset') return { attempted, reset: account, yielded: false };
+      if (result.kind !== 'no-spend') return { attempted, reset: null, yielded: false };
+      // Someone else (another request, the operator, a window rolling over)
+      // may have opened an account meanwhile; take that instead of a ticket.
+      if (this.accounts.some((a) => among(a) && this.available(a, excluded, wantsFable, true))) return { attempted, reset: null, yielded: true };
+    }
+    return { attempted, reset: null, yielded: false };
+  }
+
+  // The spendable tickets on one account, for the manual picker. Served from
+  // cache while fresh; a failed fetch keeps the last good list and is logged
+  // once per run of failures, and retries are spaced so failures cannot spin.
+  async listResetCredits(account: RuntimeAccount, force = false): Promise<ResetCredit[]> {
+    if (!this.provider.fetchResetCredits) throw new Error(`${this.provider.label} has no reset credits`);
+    const now = Date.now(); const cached = account.resetCreditList; const every = this.resetCredits.listRefreshMs;
+    if (!force && cached && (every === 0 || now - cached.at < every)) return cached.credits;
+    if (!force && cached && account.resetCreditListTriedAt && now - account.resetCreditListTriedAt < 30_000) return cached.credits;
+    account.resetCreditListTriedAt = now;
+    try {
+      await this.refresh(account);
+      const credits = await this.provider.fetchResetCredits(account.credential);
+      account.resetCreditList = { credits, at: now }; account.resetCreditListFailing = false;
+      return credits;
+    } catch (error) {
+      if (!account.resetCreditListFailing) { account.resetCreditListFailing = true; this.log(`${this.provider.label} reset credit list for "${account.label}" failed: ${(error as Error).message.slice(0, 120)}`); }
+      if (cached) return cached.credits;
+      throw error;
+    }
+  }
+
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error };
+    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
   }
 }
