@@ -142,7 +142,7 @@ before speculating; a port conflict is the common cause.
 | `src/proxy.ts` | Request relaying and retry-on-another-account |
 | `src/providers.ts` | Claude/Codex specifics: headers, quota parsing, refresh |
 | `src/frame.ts` | The dashboard as text: display order, gauges, the frame builder both the TUI and capture draw through |
-| `src/columns.ts` | Terminal cell widths (wide/zero-width characters) and `fit`, used by the frame and the PNG |
+| `src/columns.ts` | Terminal cell widths (wide/zero-width characters), `fit`, and the usage grid every dashboard panel shares (identity, three gauges, tail) |
 | `src/tui.ts` | Interactive loop and key handling |
 | `src/capture.ts` | `teamai capture` / the `p` key: redact, build the frame, write `.txt` + `.png` |
 | `src/redact.ts` | Account-address masking (partial / full / none), applied to data before drawing |

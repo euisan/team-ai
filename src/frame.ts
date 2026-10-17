@@ -2,7 +2,7 @@
 // screen would show. The interactive loop in tui.ts and the file capture in
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
-import { cellWidth, fit } from './columns.js';
+import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, type GridRow } from './columns.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
@@ -192,20 +192,26 @@ const EXTERNAL_TITLES: Record<ExternalProvider, string> = { antigravity: 'Antigr
 // One provider's box: a row per usage group, its windows as the same gauges
 // the accounts use (same colour steps, so the screen reads one way), or a
 // grey line saying why there is nothing to show. A failed refresh keeps the
-// last good gauges for a while, labelled as cached.
-function externalBox(usage: ExternalUsage, width: number, barWidth: number): string[] {
+// last good gauges for a while, labelled as cached. The gauges sit in the
+// account rows' columns: a 5h window under the session gauge, a weekly one
+// under the weekly gauge (Grok's only window included), a 30-day one under
+// the extra gauge, and a window of unknown length there too.
+function externalBox(usage: ExternalUsage, width: number, gauge: number): Array<string | GridRow> {
   const title = ` ${EXTERNAL_TITLES[usage.provider]} `;
-  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
-  const labels = [...new Set(usage.groups.flatMap((group) => group.windows.map((w) => w.label)))];
+  const out: Array<string | GridRow> = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
+  const placed = new Map(usage.groups.map((group) => [group, placeInSlots(group.windows, (w) => w.minutes, () => SLOTS - 1)]));
+  // Each gauge is titled with the provider's own name for the first window
+  // drawn in it; a gauge no group uses has no title.
+  const titles = Array.from({ length: SLOTS }, (_, slot) => usage.groups.map((group) => placed.get(group)![slot]?.label).find(Boolean));
   const name = (group: string): string => !usage.identity || usage.provider === 'antigravity' ? group : usage.provider === 'opencodeGo' ? `${group} (${usage.identity})` : `${group} ${usage.identity}`;
   const problem = usage.status === 'ok' ? null
     : usage.status === 'signed-out' ? (usage.note ?? 'not signed in') : usage.status === 'expired' ? (usage.note ?? 'sign-in expired')
     : usage.status === 'unavailable' ? (usage.note ?? 'usage unavailable') : `${usage.note ?? 'error'}`;
-  if (labels.length) {
-    out.push(color(90, fit(`  ${fit('group', 34)}${labels.map((label) => ` ${fit(label, barWidth)}`).join('')}`, width)));
+  if (titles.some(Boolean)) {
+    out.push({ identity: '  group', cells: titles, dim: true });
     for (const group of usage.groups) {
-      const gauges = labels.map((label) => { const w = group.windows.find((x) => x.label === label); return w ? bar(w.usedPercent === null ? null : w.usedPercent / 100, w.resetsAt, barWidth) : ' '.repeat(barWidth); }).join(' ');
-      out.push(`  ${fit(name(group.name), 34)} ${gauges} ${age(usage.lastOkAt)}`);
+      const gauges = placed.get(group)!.map((w) => w && bar(w.usedPercent === null ? null : w.usedPercent / 100, w.resetsAt, gauge));
+      out.push({ identity: `  ${name(group.name)}`, cells: gauges, tail: age(usage.lastOkAt) });
     }
     if (problem) out.push(color(90, `  refresh failed — showing cached data (${problem})`));
   } else out.push(color(90, `  ${problem ?? (usage.measuredAt ? 'no usage data' : 'not measured yet')}`));
@@ -259,7 +265,13 @@ export interface FrameView {
 export function buildFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
   const { width, height, selectedId, mode, message, sortByHeadroom } = view;
   const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, orderOptions(config));
-  const barWidth = width >= 120 ? 18 : 12; const lines: string[] = [];
+  const lines: Array<string | GridRow> = [];
+  // One column layout for every panel below (see columns.ts): the account
+  // boxes and the other agents' boxes are collected as grid rows and laid out
+  // together. The route markers widen the identity column by the larger
+  // provider's route count, so both account boxes keep their gauges in line.
+  const markWidth = Math.max(0, ...(['claude', 'codex'] as const).map((provider) => (state.routes || []).filter((route) => route.provider === provider).length));
+  const barWidth = gaugeWidth(width);
   const claudeCount = accounts.filter((account) => account.provider === 'claude').length; const codexCount = accounts.filter((account) => account.provider === 'codex').length;
   const headerLeft = color(1, ' TeamAI'); const headerRight = `${color(32, '● running')}  Claude ${claudeCount}  Codex ${codexCount}  ${config.proxy.host}:${config.proxy.claudePort}/${config.proxy.codexPort} `;
   lines.push(`${headerLeft}${' '.repeat(Math.max(1, width - visible(headerLeft) - visible(headerRight)))}${headerRight}`); lines.push('━'.repeat(width));
@@ -270,26 +282,24 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     // Column titles: the rows are dense and every field below is an
     // abbreviation, so name them once per section rather than expecting the
     // reader to infer what "auto" or a bare percentage refers to.
-    const slot = (title: string): string => ` ${fit(title, barWidth)}`;
+    // Codex windows go to the gauge their length says — a 5h limit to the
+    // session gauge, a 1w limit to the weekly one, whichever ChatGPT sends it
+    // as — and a window of unknown length keeps its primary/secondary place.
+    const codexSlots = (account: StoredAccount) => {
+      const saved = state.accounts[account.credentialId];
+      return placeInSlots([saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow), (window) => window!.minutes, (index) => index);
+    };
     // Codex titles follow whatever windows are actually in play for this
     // section, so the header never advertises a gauge that no row renders.
-    const codexWindowCount = Math.max(...group.map((account) => {
-      const saved = state.accounts[account.credentialId];
-      return [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow).length;
-    }), 0);
-    // Codex window lengths vary by account, so the title carries the span the
-    // rows no longer repeat; fall back to a neutral name when they disagree.
-    const codexSpans = group.map((account) => {
-      const saved = state.accounts[account.credentialId];
-      return [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow).map((window) => windowLabel(window!.minutes, ''));
-    });
-    const spanAt = (index: number): string => {
-      const seen = new Set(codexSpans.map((spans) => spans[index]).filter(Boolean));
-      return seen.size === 1 ? `${[...seen][0]} limit` : index === 0 ? 'usage limit' : 'second limit';
+    // Window lengths vary by account, so the title carries the span the rows
+    // no longer repeat; fall back to a neutral name when they disagree.
+    const spanAt = (slot: number): string => {
+      const windows = group.map((account) => codexSlots(account)[slot]).filter(Boolean);
+      if (!windows.length) return '';
+      const seen = new Set(windows.map((window) => windowLabel(window!.minutes, '')).filter(Boolean));
+      return seen.size === 1 ? `${[...seen][0]} limit` : ['usage limit', 'second limit', 'third limit'][slot]!;
     };
-    const usageTitles = provider === 'claude'
-      ? `${slot('5h session')}${slot('7d overall')}${slot('7d Fable')}`
-      : Array.from({ length: codexWindowCount }, (_, index) => slot(spanAt(index))).join('');
+    const usageTitles = provider === 'claude' ? ['5h session', '7d overall', '7d Fable'] : Array.from({ length: SLOTS }, (_, slot) => spanAt(slot));
     // One marker column per model route, left of the cursor: the route's
     // colour on its accounts, grey where that account cannot serve now. No
     // routes, no columns — the rows are then exactly as before.
@@ -298,31 +308,33 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     // after the cursor, a magenta one before the Fable gauge, and a bold
     // route marker for each route's own target.
     const next = state.next?.[provider];
-    const marks = (account: StoredAccount): string => routes.map((route) => {
+    const marks = (account: StoredAccount): string => ' '.repeat(markWidth - routes.length) + routes.map((route) => {
       const member = route.members.find((m) => m.credentialId === account.credentialId);
       if (!member) return ' ';
       const target = next?.routes?.[route.name] === account.credentialId;
       return `${ESC}${target ? '1;' : ''}${member.usable ? routeColor(route.color) : 90}m▸${RESET}`;
     }).join('');
     const arrow = (account: StoredAccount): string => next?.general === account.credentialId ? color(32, '►') : ' ';
-    lines.push(color(90, fit(`${' '.repeat(routes.length)}   ${fit('account', 24)} ${fit('plan', 10)} ${fit('state', 10)} ${'order'.padEnd(4)}${usageTitles}`, width)));
+    lines.push({ identity: { lead: '', account: 'account', plan: 'plan', state: 'state', order: 'order' }, cells: usageTitles, dim: true });
     for (const account of group) {
       const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
       const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
-      const head = `${marks(account)}${cursor}${arrow(account)} ${fit(account.label, 24)} ${fit(plan, 10)} ${fit(enabled, 10)} ${rank.padEnd(4)}`;
+      const head = { lead: `${marks(account)}${cursor}${arrow(account)}`, account: account.label, plan, state: enabled, order: rank };
       // Weekly progress against the straight line: -30%p is behind (goes
       // first), +12%p ahead. Blank without a weekly window that resets later.
       const pace = formatDeviation(pacingDeviation(saved?.windows || {}, false, Date.now()));
       const paceText = pace ? ` ${color(90, pace)}` : '';
       if (provider === 'claude') {
         const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
-        lines.push(`${head} ${bar(session?.usage, session?.resetsAt, barWidth)} ${bar(weekly?.usage, weekly?.resetsAt, barWidth)}${next?.fable === account.credentialId ? color(35, '►') : ' '}${bar(fable?.usage, fable?.resetsAt, barWidth)} ~${renewColored} ${age(saved?.measuredAt)}${paceText}`);
+        const gauges = [bar(session?.usage, session?.resetsAt, barWidth), bar(weekly?.usage, weekly?.resetsAt, barWidth), bar(fable?.usage, fable?.resetsAt, barWidth)];
+        lines.push({ identity: head, cells: gauges, tail: `~${renewColored} ${age(saved?.measuredAt)}${paceText}`, gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
       } else {
-        const shown = [saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow);
-        const gauges = shown.map((window) => bar(window!.usage, window!.resetsAt, barWidth)).join(' ');
+        const shown = codexSlots(account);
         // Reset credits on hand, when the usage endpoint has counted some.
         const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? ` ${color(36, `RC${saved.resetCredits}`)}` : '';
-        lines.push(`${head} ${gauges ? `${gauges} ${age(saved?.measuredAt)}${paceText}` : color(90, 'no quota data yet')}${credits}`);
+        lines.push(shown.some(Boolean)
+          ? { identity: head, cells: shown.map((window) => window && bar(window.usage, window.resetsAt, barWidth)), tail: `${age(saved?.measuredAt)}${paceText}${credits}` }
+          : { identity: head, cells: color(90, 'no quota data yet'), tail: credits.trimStart() });
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
@@ -355,5 +367,6 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   // a failure — so when both do not fit it is the key hints that give way.
   const status = message ? `   ${message}` : '';
   lines.push(status && visible(footer) + visible(status) > width ? `${fit(footer, Math.max(0, width - visible(status)))}${status}` : fit(`${footer}${status}`, width));
-  return (height === undefined ? lines : lines.slice(0, height)).map((line) => fit(line, width));
+  const drawn = layoutRows(width, markWidth, lines);
+  return (height === undefined ? drawn : drawn.slice(0, height)).map((line) => fit(line, width));
 }
