@@ -98,7 +98,7 @@ test('column titles sit over their gauges in every panel', () => {
     const lines = frame(width); const slots = gauges(row(lines, 'alice@')).map(([start]) => start);
     const titles: Array<[string, string, number]> = [
       ['Claude accounts', '5h session', 0], ['Claude accounts', '7d', 1], ['Claude accounts', '7d Fable', 2],
-      ['Codex accounts', '5h limit', 0], ['Codex accounts', '7d limit', 1],
+      ['Codex accounts', '5h', 0], ['Codex accounts', '7d', 1],
       ['Antigravity (agy)', '5h', 0], ['Antigravity (agy)', '7d', 1],
       ['OpenCode Go', '5h', 0], ['OpenCode Go', '7d', 1], ['OpenCode Go', '30d', 2],
     ];

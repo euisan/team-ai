@@ -336,13 +336,14 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     const codexSlots = (account: StoredAccount) => codexWindows(state, account);
     // Codex titles follow whatever windows are actually in play for this
     // section, so the header never advertises a gauge that no row renders.
-    // Window lengths vary by account, so the title carries the span the rows
-    // no longer repeat; fall back to a neutral name when they disagree.
+    // Window lengths vary by account, so the title is the span the rows no
+    // longer repeat ("5h", "7d", as on Claude's side); fall back to a neutral
+    // name when they disagree.
     const spanAt = (slot: number): string => {
       const windows = group.map((account) => codexSlots(account)[slot]).filter(Boolean);
       if (!windows.length) return '';
       const seen = new Set(windows.map((window) => windowLabel(window!.minutes, '')).filter(Boolean));
-      return seen.size === 1 ? `${[...seen][0]} limit` : ['usage limit', 'second limit', 'third limit'][slot]!;
+      return seen.size === 1 ? [...seen][0]! : ['usage limit', 'second limit', 'third limit'][slot]!;
     };
     const usageTitles = provider === 'claude' ? ['5h session', '7d', '7d Fable'] : Array.from({ length: SLOTS }, (_, slot) => spanAt(slot));
     // One marker column per model route, left of the cursor: the route's

@@ -51,7 +51,7 @@ test('the shorter titles keep the wide columns and the narrow figures aligned', 
   for (const width of [80, 120]) {
     const lines = frame(state, width);
     // Claude's and Codex's 7d titles start in the same column, as do their 5h ones.
-    const titles = lines.filter((line) => line.includes('5h session') || line.includes('5h limit'));
+    const titles = ['Claude accounts', 'Codex accounts'].map((box) => lines[lines.findIndex((line) => line.includes(box)) + 1]!);
     assert.equal(titles.length, 2, `width ${width}: one title row per account box`);
     const at = (line: string, needle: string): number => cellWidth(line.slice(0, line.indexOf(needle)));
     assert.equal(at(titles[0]!, ' 7d'), at(titles[1]!, ' 7d'), `width ${width}: 7d titles line up`);
