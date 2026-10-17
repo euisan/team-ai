@@ -7,7 +7,9 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
+import { stripAnsi } from './columns.js';
 import { linkShadowEntries, relayedCodexConfig } from './codex-config.js';
+import { hostText, measureHost } from './host-metrics.js';
 import { isRedactLevel } from './redact.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { addRoute, describeReload, removeRoute } from './route-config.js';
@@ -72,7 +74,7 @@ async function accounts(filter?: ProviderId): Promise<void> {
 async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
 async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }
 
-async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); await accounts(); await resetCreditStatus(); await routeStatus(); }
+async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); const host = await measureHost(); console.log(`Host: ${stripAnsi(hostText(host, true))} (${host.cpu.cores} cores)`); await accounts(); await resetCreditStatus(); await routeStatus(); }
 
 // Configured model routes, as the server will apply them.
 async function routeStatus(): Promise<void> {
