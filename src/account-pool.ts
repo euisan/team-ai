@@ -2,7 +2,25 @@ import { randomUUID } from 'node:crypto';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, QuotaSnapshot, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+
+// A quota response that says "0 used, reset exactly one full window from the
+// reading" is the upstream shape for a window that has never started. A few
+// minutes of slack covers clock skew and the time between the usage request and
+// its response, while staying well below the five-minute warm-up cadence.
+export const START_WINDOW_TOLERANCE_MS = 5 * 60_000;
+const START_WINDOW_MINUTES: Record<ProviderId, Record<string, number>> = {
+  codex: { primary: 300, secondary: 10_080 },
+  claude: { '5h': 300, '7d': 10_080 },
+};
+
+/** True when a provider's quota snapshot still represents an unopened window. */
+export function isWindowNotStarted(provider: ProviderId, name: string, window: QuotaWindow | undefined, measuredAt: number | null | undefined, now = Date.now()): boolean {
+  const minutes = START_WINDOW_MINUTES[provider][name];
+  if (!minutes || !window || window.usage !== 0 || window.resetsAt === null || window.resetsAt === undefined || measuredAt === null || measuredAt === undefined) return false;
+  if (window.resetsAt <= now) return false;
+  return Math.abs(window.resetsAt - (measuredAt + minutes * 60_000)) <= START_WINDOW_TOLERANCE_MS;
+}
 
 // What the static rankings read of an account: enough to rank saved state too.
 export type Ranked = Pick<RuntimeAccount, 'usage' | 'resetsAt' | 'windows' | 'inflight'>;
@@ -59,7 +77,7 @@ export class AccountPool {
       // (model-quota → Fable only, real quota → whole account).
       // The reset-credit ledger is restored, unlike the cooldown: a ticket
       // redeemed (or possibly redeemed) before a restart stays counted.
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0, ...AccountPool.ledger(saved) };
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, warmupStartWindows: saved?.warmupStartWindows ?? {}, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0, ...AccountPool.ledger(saved) };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -569,7 +587,7 @@ export class AccountPool {
     for (const account of this.accounts) {
       let changed = false;
       for (const [name, window] of Object.entries(account.windows)) {
-        if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; changed = true; }
+        if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; delete account.warmupStartWindows?.[name]; changed = true; }
       }
       if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; changed = true; }
       if (changed) { this.warmupTries.delete(account.credentialId); swept++; }
@@ -629,7 +647,7 @@ export class AccountPool {
   // that ordinary traffic cannot fill. Unlike probeAll (the TUI's R) this never
   // re-probes an account that already has numbers, so an idle proxy costs one
   // request per account per reset period rather than one per tick.
-  async warmup(): Promise<number> {
+  async warmup(startWindows = true): Promise<number> {
     if (!this.probeTemplate && this.provider.defaultProbe) this.probeTemplate = this.provider.defaultProbe();
     if (!this.hasProbe() || this.probing) return 0;
     this.probing = true;
@@ -645,6 +663,36 @@ export class AccountPool {
           return ok;
         }));
         measured = results.filter(Boolean).length;
+      }
+      // A zero-used window whose reset is one full span after measuredAt has
+      // not started upstream. Send one tiny request per account, sequentially,
+      // so opening a fleet does not create a burst. The reset timestamp is
+      // persisted only after a quota-bearing success; failures consume the
+      // same three-attempt budget as ordinary warm-up probes.
+      if (startWindows) {
+        const starts = this.accounts.flatMap((account) => Object.entries(account.windows)
+          .filter(([name, window]) => isWindowNotStarted(this.provider.id, name, window, account.measuredAt, this.now()))
+          .filter(([name, window]) => {
+            const recorded = account.warmupStartWindows?.[name];
+            return recorded === undefined || Math.abs(recorded - (window.resetsAt ?? 0)) > START_WINDOW_TOLERANCE_MS;
+          })
+          .map(([name, window]) => ({ account, name, resetAt: window.resetsAt! })));
+        const byAccount = new Map<string, Array<{ name: string; resetAt: number }>>();
+        for (const start of starts) { const list = byAccount.get(start.account.id) ?? []; list.push({ name: start.name, resetAt: start.resetAt }); byAccount.set(start.account.id, list); }
+        for (const account of this.accounts) {
+          const windows = byAccount.get(account.id);
+          if (!windows || account.inflight !== 0 || account.error) continue;
+          await this.refresh(account).catch(() => { /* surfaced via error */ });
+          if (account.error || account.inflight !== 0) continue;
+          const key = `start:${account.credentialId}`;
+          if ((this.warmupTries.get(key) ?? 0) >= this.maxWarmupTries) continue;
+          const ok = await this.probeOne(account, this.provider.startWindowModel);
+          if (ok) {
+            account.warmupStartWindows ??= {};
+            for (const window of windows) account.warmupStartWindows[window.name] = window.resetAt;
+            this.warmupTries.delete(key);
+          } else this.warmupTries.set(key, (this.warmupTries.get(key) ?? 0) + 1);
+        }
       }
       const fableModel = this.provider.fableModel;
       if (fableModel) {
@@ -684,7 +732,7 @@ export class AccountPool {
         next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority }));
       } else {
         added++;
-        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0, ...AccountPool.ledger(undefined) });
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, warmupStartWindows: {}, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0, ...AccountPool.ledger(undefined) });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
@@ -959,7 +1007,7 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
+    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, warmupStartWindows: a.warmupStartWindows, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
     // What the dashboard needs to mark route accounts, worked out here since
     // the dashboard cannot judge availability itself. Judged without side

@@ -141,6 +141,7 @@ export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsa
 
 export const claudeProvider: Provider = {
   id: 'claude', label: 'Claude', upstreamBase: 'https://api.anthropic.com', fableModel: 'claude-fable-5-1',
+  startWindowModel: 'claude-haiku-5-1',
   normalizePath(path) { return path.startsWith('/v1/') || path.startsWith('/api/') ? path : null; },
   buildHeaders(incoming, account) {
     const headers = outboundHeaders(incoming);
@@ -296,6 +297,7 @@ export const claudeProvider: Provider = {
 
 export const codexProvider: Provider = {
   id: 'codex', label: 'Codex', upstreamBase: 'https://chatgpt.com/backend-api',
+  startWindowModel: 'gpt-6-luna',
   normalizePath(path) {
     const pathname = new URL(path, 'http://localhost').pathname;
     if (['/responses', '/v1/responses', '/codex/responses', '/v1/codex/responses'].includes(pathname)) return '/codex/responses';
