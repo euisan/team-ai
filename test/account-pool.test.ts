@@ -540,8 +540,8 @@ test('a 200 probe that leaves the window unopened is not recorded, and its SSE b
     return new Response(body, { status: 200 });
   }) as typeof fetch;
   try {
-    await pool.warmup();
-    assert.equal(calls, 1);
+    await pool.warmup(); await pool.warmup(); await pool.warmup(); await pool.warmup();
+    assert.equal(calls, 3, 'an unopened 200 response consumes the three-attempt start budget');
     assert.equal(completed, true, 'warm-up must read through the terminal SSE event');
     assert.equal(cancelled, false, 'warm-up must not cancel the upstream stream early');
     assert.deepEqual(pool.accounts[0]!.warmupStartWindows, {});

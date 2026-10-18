@@ -694,8 +694,7 @@ export class AccountPool {
             // window is still retried after the session window succeeds.
             const started = windows.filter((window) => !isWindowNotStarted(this.provider.id, window.name, account.windows[window.name], account.measuredAt, this.now()));
             for (const window of started) account.warmupStartWindows[window.name] = window.resetAt;
-            if (started.length) this.warmupTries.delete(key);
-            else this.warmupTries.set(key, (this.warmupTries.get(key) ?? 0) + 1);
+            this.warmupTries.delete(key);
           } else this.warmupTries.set(key, (this.warmupTries.get(key) ?? 0) + 1);
         }
       }
