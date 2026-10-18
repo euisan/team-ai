@@ -521,6 +521,33 @@ test('warmup starts unopened windows once per account, sequentially, and honors 
   } finally { globalThis.fetch = realFetch; }
 });
 
+test('a 200 probe that leaves the window unopened is not recorded, and its SSE body is drained', async () => {
+  const now = Date.now(); const reset = now + 300 * 60_000; let calls = 0; let completed = false; let cancelled = false;
+  const startProvider: Provider = {
+    ...provider,
+    startWindowModel: 'cheap',
+    defaultProbe: () => ({ path: '/probe', model: 'normal', version: '', beta: null, system: null, userAgent: null, query: '', elicitsModelWeekly: false }),
+    probeRequest: () => ({ url: 'https://example.test/probe', headers: {}, body: '{}' }),
+    readQuota: () => ({ routingUsage: 0, routingResetsAt: reset, windows: { primary: { usage: 0, resetsAt: reset, minutes: 300 } } }),
+    fetchUsage: async () => ({ routingUsage: 0, routingResetsAt: reset, windows: { primary: { usage: 0, resetsAt: reset, minutes: 300 } } }),
+  };
+  const saved = { usage: 0, resetsAt: reset, measuredAt: now, windows: { primary: { usage: 0, resetsAt: reset, minutes: 300 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null };
+  const pool = new AccountPool(startProvider, [account('idle')], { 'codex:idle': credential('idle') }, { version: 1, accounts: { 'codex:idle': saved } });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed"}\\n\\n')); setTimeout(() => { completed = true; controller.close(); }, 5); }, cancel() { cancelled = true; } });
+    return new Response(body, { status: 200 });
+  }) as typeof fetch;
+  try {
+    await pool.warmup();
+    assert.equal(calls, 1);
+    assert.equal(completed, true, 'warm-up must read through the terminal SSE event');
+    assert.equal(cancelled, false, 'warm-up must not cancel the upstream stream early');
+    assert.deepEqual(pool.accounts[0]!.warmupStartWindows, {});
+  } finally { globalThis.fetch = realFetch; }
+});
+
 test('a failed window-start probe consumes the ordinary three-attempt budget', async () => {
   const now = 7_000_000; let calls = 0;
   const failing: Provider = {

@@ -686,11 +686,16 @@ export class AccountPool {
           if (account.error || account.inflight !== 0) continue;
           const key = `start:${account.credentialId}`;
           if ((this.warmupTries.get(key) ?? 0) >= this.maxWarmupTries) continue;
-          const ok = await this.probeOne(account, this.provider.startWindowModel);
+          const ok = await this.probeOne(account, this.provider.startWindowModel, windows.map((window) => window.name));
           if (ok) {
             account.warmupStartWindows ??= {};
-            for (const window of windows) account.warmupStartWindows[window.name] = window.resetAt;
-            this.warmupTries.delete(key);
+            // One request may open only one of several reported buckets. Keep
+            // a marker for each bucket independently so an unopened weekly
+            // window is still retried after the session window succeeds.
+            const started = windows.filter((window) => !isWindowNotStarted(this.provider.id, window.name, account.windows[window.name], account.measuredAt, this.now()));
+            for (const window of started) account.warmupStartWindows[window.name] = window.resetAt;
+            if (started.length) this.warmupTries.delete(key);
+            else this.warmupTries.set(key, (this.warmupTries.get(key) ?? 0) + 1);
           } else this.warmupTries.set(key, (this.warmupTries.get(key) ?? 0) + 1);
         }
       }
@@ -809,20 +814,34 @@ export class AccountPool {
     } finally { this.probing = false; }
   }
 
-  private async probeOne(account: RuntimeAccount, modelOverride?: string): Promise<boolean> {
+  private async probeOne(account: RuntimeAccount, modelOverride?: string, startWindows: string[] = []): Promise<boolean> {
     const template = this.probeTemplate;
     if (!template || !this.provider.probeRequest) return false;
     try {
       const shape = this.provider.probeRequest(modelOverride ? { ...template, model: modelOverride } : template, account.credential);
       const response = await fetch(shape.url, { method: 'POST', headers: shape.headers, body: shape.body, signal: AbortSignal.timeout(30_000) });
-      const text = response.status >= 400 ? await response.text() : '';
-      await response.body?.cancel().catch(() => { /* already consumed */ });
+      // Codex sends an SSE body without a content-type. Reading only the
+      // response headers and cancelling here can stop generation before the
+      // upstream commits quota for the request. Drain every response, and let
+      // the abort signal cap a stream that never reaches its terminal event.
+      const text = await response.text();
       // "Measured" means this probe actually carried quota headers — not merely
       // that the account already had a number from before. Ask the provider what
       // it read, so a header-less response (a 400/404, an upstream hiccup) is
       // reported as unmeasured instead of inflating the M/N the TUI shows.
       const quota = this.provider.readQuota(response.headers, text);
+      let observedQuota = quota !== null;
       if (quota) this.applyQuota(account, quota);
+      // A successful HTTP response is not proof that a window started. The
+      // usage endpoint is the authoritative post-request reading; when it is
+      // available, read it after the stream has ended and require one of the
+      // target windows to no longer have the exact unopened shape.
+      if (startWindows.length && this.provider.fetchUsage) {
+        try {
+          const measured = await this.provider.fetchUsage(account.credential);
+          if (measured) { this.applyQuota(account, measured, 'usage'); observedQuota = true; }
+        } catch { /* retain the response-header reading as a fallback */ }
+      }
       if (response.ok) { account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownReason = null; }
       // A rejection that only names the model-weekly window says the account is
       // spent for the top model, not unusable: an ordinary probe (the default
@@ -833,7 +852,11 @@ export class AccountPool {
       else if (!modelOverride && this.provider.classifyFailure(response.status, response.headers, text).kind === 'model-quota') {
         account.error = null; account.cooldownUntil = null; account.cooldownReason = null;
       }
-      return quota !== null;
+      if (startWindows.length) {
+        const opened = startWindows.some((name) => !isWindowNotStarted(this.provider.id, name, account.windows[name], account.measuredAt, this.now()));
+        return opened && observedQuota;
+      }
+      return observedQuota;
     } catch { return false; }
   }
 
