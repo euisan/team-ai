@@ -49,6 +49,7 @@ export class AccountPool {
   resetCredits: ResetCreditSettings = RESET_CREDIT_DEFAULTS;
   saveNow: () => Promise<void> = async () => {};
   log: (message: string) => void = () => {};
+  private changeListener: ((account: RuntimeAccount) => void) | null = null;
   private deadEndLoggedAt = 0;
   // How accounts in the same tier and priority are ordered: 'pacing' by weekly
   // progress (src/pacing.ts), 'level' by how full they are. The clock is only
@@ -490,10 +491,15 @@ export class AccountPool {
       }));
       const usage = account.usage === null || quota.routingUsage === null ? quota.routingUsage : Math.min(account.usage, quota.routingUsage);
       account.usage = usage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...windows }; account.measuredAt = now;
+      this.changeListener?.(account);
       return;
     }
     account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = now;
+    this.changeListener?.(account);
   }
+
+  /** Listen for usage/window changes so the event-driven warmer can re-plan. */
+  setChangeListener(listener: ((account: RuntimeAccount) => void) | null): void { this.changeListener = listener; }
 
   // Only the usage endpoint reports a count; a header reading leaves it be.
   private applyCreditCount(account: RuntimeAccount, quota: QuotaSnapshot, now: number): void {
@@ -621,6 +627,7 @@ export class AccountPool {
         try {
           await this.refresh(account);
           const started = Date.now();
+          account.usageRequestedAt = started;
           const quota = await this.provider.fetchUsage!(account.credential);
           // A proxied response may have landed while this read was in flight;
           // its headers are newer than this snapshot, so they are kept.
@@ -632,6 +639,18 @@ export class AccountPool {
     this.usageRead = read;
     try { await read; } finally { this.usageRead = null; }
     return measured;
+  }
+
+  /** Refresh one account immediately; used by the warmer at reset+10s. */
+  async refreshUsageAccount(account: RuntimeAccount): Promise<boolean> {
+    if (!this.provider.fetchUsage || !this.accounts.includes(account) || account.error) return false;
+    await this.refresh(account);
+    const requestedAt = Date.now();
+    account.usageRequestedAt = requestedAt;
+    const quota = await this.provider.fetchUsage(account.credential);
+    if (!quota) return false;
+    this.applyQuota(account, quota, 'usage');
+    return true;
   }
 
   // Accounts worth a background probe: idle, not errored, and still without a

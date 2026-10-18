@@ -207,7 +207,9 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
     let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {}, setEnd: () => {} };
     try {
       if (!authorized(req, clientToken)) return json(res, 401, { error: 'Unauthorized local client' });
-      const path = pool.provider.normalizePath(req.url || '/');
+      const rawPath = req.url || '/';
+      const pinnedAccount = pool.provider.pinnedAccount?.(rawPath) || null;
+      const path = pool.provider.normalizePath(rawPath);
       if (!path) return json(res, 404, { error: 'Unsupported proxy path' });
       const id = String(++requestCounter);
       const begin = (): void => safely(() => activity.start({ id, provider: pool.provider.id, providerLabel: pool.provider.label, method: req.method || 'GET', path, account: null, startedAt: Date.now() }));
@@ -259,7 +261,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
         const model = (parsed as { model?: unknown } | null)?.model;
         const route = pool.routeFor(typeof model === 'string' ? model : null);
         if (route) safely(() => activity.update(id, { route: route.name }));
-        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track, route);
+        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track, route, pinnedAccount);
       } finally { pool.inFlightProxied--; budget?.give(held); }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
     finally {
@@ -273,7 +275,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
   return server;
 }
 
-async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack, route: Route | null = null): Promise<void> {
+async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack, route: Route | null = null, pinnedAccount: string | null = null): Promise<void> {
   const excluded = new Set<string>(); let authRetried = false;
   // Decided once from the request body: the retry loop must not re-read a body
   // it has already forwarded, and the answer cannot change between failovers.
@@ -298,7 +300,10 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   let retryOn: RuntimeAccount | null = null;
   while (!res.destroyed) {
     const forced: RuntimeAccount | null = retryOn; retryOn = null;
-    const account: RuntimeAccount | null = forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable, route);
+    const pinned = pinnedAccount ? pool.accounts.find((candidate) => candidate.id === pinnedAccount) || null : null;
+    const account: RuntimeAccount | null = pinned
+      ? (excluded.has(pinned.id) ? null : (pool.claim(pinned, excluded, wantsFable) ? pinned : null))
+      : (forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable, route));
     if (!account) {
       // Exhausting this request's candidates does not mean exhausting quota.
       // Only retry explicit pre-stream transient HTTP failures; never replay a
