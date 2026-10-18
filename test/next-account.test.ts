@@ -10,7 +10,7 @@ function pool(n: number, provider: 'claude' | 'codex' = 'claude', maxConcurrent 
   const ids = Array.from({ length: n }, (_, i) => `a${i}`);
   const stored = ids.map((id): StoredAccount => ({ id, provider, label: `${id}@example.com`, enabled: true, priority: null, credentialId: `cred-${id}`, createdAt: '' }));
   const credentials: Record<string, OAuthCredential> = Object.fromEntries(ids.map((id) => [`cred-${id}`, { accessToken: 's', refreshToken: null, expiresAt: null, accountId: id }]));
-  return new AccountPool(p, stored, credentials, { version: 1, accounts: {} }, 0.98, maxConcurrent, 0.8);
+  return new AccountPool(p, stored, credentials, { version: 1, accounts: {} }, 0.98, maxConcurrent);
 }
 
 // A small deterministic generator, so a failure names a reproducible seed.

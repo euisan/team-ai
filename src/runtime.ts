@@ -56,7 +56,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const bodyLimit = maxBodyBytes(config.proxy.maxBodyMb);
   // One budget for every proxy in this process: the memory is shared.
   const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)), timeoutMs: bodyTimeoutMs(config.proxy.bodyTimeoutMs) };
-  const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount, config.fableReserveThreshold ?? 0.8));
+  const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   const balance = parseBalance(config.routing?.balance);
   for (const pool of pools) pool.balance = balance;

@@ -96,12 +96,12 @@ function codexWindows(state: PersistedState, account: StoredAccount) {
   return placeInSlots([saved?.windows?.primary || saved?.windows?.requests, saved?.windows?.secondary].filter(activeWindow), (window) => window!.minutes, (index) => index);
 }
 
-// What the account order depends on in config: routing.balance and the Fable
-// reserve line, read the same way the server reads them.
-export interface OrderOptions { balance: Balance; fableReserve: number; now?: number }
-export function orderOptions(config: Pick<TeamAIConfig, 'routing' | 'fableReserveThreshold'>): OrderOptions {
+// What the account order depends on in config: routing.balance, read the same
+// way the server reads it.
+export interface OrderOptions { balance: Balance; now?: number }
+export function orderOptions(config: Pick<TeamAIConfig, 'routing'>): OrderOptions {
   let balance: Balance; try { balance = parseBalance(config.routing?.balance); } catch { balance = 'pacing'; }
-  return { balance, fableReserve: config.fableReserveThreshold ?? 0.8 };
+  return { balance };
 }
 
 // The accounts in the order the screen draws them: grouped by provider, and
@@ -109,32 +109,26 @@ export function orderOptions(config: Pick<TeamAIConfig, 'routing' | 'fableReserv
 // to configured order. Everything that walks rows — rendering, ↑↓ movement, the
 // initial cursor — goes through this one function, so the cursor always lands
 // on the adjacent visible row rather than the adjacent entry in config.json.
-export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean, options: OrderOptions = { balance: 'pacing', fableReserve: 0.8 }): StoredAccount[] {
-  // The same order the pool gives a new non-Fable request: the Fable tier,
-  // then priority, then the balance's own comparison — comparePacing, or with
-  // 'level' the pool's levelOrder over the saved windows and the requests in
-  // flight — so the top row is where the green arrow points unless something
+export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean, options: OrderOptions = { balance: 'pacing' }): StoredAccount[] {
+  // The same order the pool gives a new non-Fable request: priority, then the
+  // balance's own comparison — comparePacing, or with 'level' the pool's
+  // levelOrder over the saved windows and the requests in flight — so the top row is where the green arrow points unless something
   // is unavailable.
   const now = options.now ?? Date.now();
   const windows = (account: StoredAccount) => state.accounts[account.credentialId]?.windows || {};
-  const fableSpent = (account: StoredAccount): boolean => {
-    const usage = Object.entries(windows(account)).find(([name]) => /^7d_[a-z0-9]+$/i.test(name))?.[1]?.usage;
-    return options.fableReserve < 1 && usage !== null && usage !== undefined && usage >= options.fableReserve;
-  };
   const ranked = (account: StoredAccount): RankedAccount => {
     const saved = state.accounts[account.credentialId];
     const inflight = (state.active ?? []).filter((entry) => entry.provider === account.provider && entry.account === account.label).length;
     return { usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: windows(account), inflight };
   };
   const balanced = options.balance === 'level'
-    ? ((level) => (a: StoredAccount, b: StoredAccount) => level(ranked(a), ranked(b)))(AccountPool.levelOrder(false, options.fableReserve))
+    ? ((level) => (a: StoredAccount, b: StoredAccount) => level(ranked(a), ranked(b)))(AccountPool.levelOrder(false))
     : (a: StoredAccount, b: StoredAccount) => comparePacing({ id: a.id, windows: windows(a) }, { id: b.id, windows: windows(b) }, false, now);
   const ordered: StoredAccount[] = [];
   for (const provider of ['claude', 'codex'] as const) {
     const group = accounts.filter((account) => account.provider === provider);
     if (byHeadroom) {
       group.sort((a, b) => {
-        const tier = (fableSpent(a) ? 0 : 1) - (fableSpent(b) ? 0 : 1); if (tier) return tier;
         if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
         return balanced(a, b);
       });

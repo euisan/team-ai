@@ -213,17 +213,18 @@ export const claudeProvider: Provider = {
     return { ...credential, accessToken: String(data.access_token), refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : credential.refreshToken, expiresAt: expiry(data) };
   },
   // Only the top model draws on the model-weekly window, so only those requests
-  // should be ranked by it. Anything else — Opus, Sonnet, Haiku — is routed to
-  // accounts whose Fable budget is already gone, leaving the remaining Fable
-  // headroom for the requests that cannot be served any other way.
+  // are ranked by it, and only those skip an account that cannot serve Fable
+  // (spent, or a plan without it).
   //
-  // An unreadable or model-less body counts as Fable: the conservative reading
-  // keeps an unknown request on the existing behaviour rather than silently
-  // spending an account that was being reserved.
+  // Anything but a generation (/v1/models, count_tokens, …) spends no model
+  // budget, so it is not Fable and any account may answer it. A generation
+  // whose body is unreadable or names no model counts as Fable: it may well be
+  // one, and an account that cannot serve Fable would only answer it with a 429.
   usesFableBudget(path, body) {
     // Claude Code calls /v1/messages?beta=true; the query must not turn every
     // request into a Fable one, or the model split never applies to real traffic.
-    if (!new URL(path, 'http://localhost').pathname.endsWith('/messages') || body.length === 0) return true;
+    if (!new URL(path, 'http://localhost').pathname.endsWith('/messages')) return false;
+    if (body.length === 0) return true;
     try {
       const parsed = JSON.parse(body.toString('utf8')) as { model?: unknown };
       if (typeof parsed.model !== 'string') return true;

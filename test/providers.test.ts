@@ -91,12 +91,13 @@ test('claude routes only Fable models to the Fable budget', () => {
   assert.equal(uses('claude-opus-5'), false);
   assert.equal(uses('claude-sonnet-5'), false);
   assert.equal(uses('claude-haiku-4-5-20251001'), false);
-  // Unknown shapes stay on the conservative path rather than spending a
-  // reserved account by accident.
+  // A generation of unknown shape may be Fable, so it is not sent where Fable
+  // could only 429; a request that is no generation spends no model budget.
   assert.equal(uses(undefined), true);
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.from('not json')), true);
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages', Buffer.alloc(0)), true);
-  assert.equal(claudeProvider.usesFableBudget!('/v1/models', body('claude-opus-5')), true);
+  assert.equal(claudeProvider.usesFableBudget!('/v1/models', body('claude-opus-5')), false);
+  assert.equal(claudeProvider.usesFableBudget!('/v1/messages/count_tokens', body('claude-fable-5-1')), false);
   // The path arrives as Claude Code sends it, query string included.
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages?beta=true', body('claude-opus-5')), false);
   assert.equal(claudeProvider.usesFableBudget!('/v1/messages?beta=true', body('claude-fable-5-1')), true);

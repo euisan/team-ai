@@ -128,8 +128,7 @@ test('an unmeasured account sorts last, not first', () => {
 });
 
 // The pool ranks Fable requests on the Fable window and everything else on the
-// general one. Without the split, an Opus turn lands on whichever account has
-// the most Fable left — the one account that still needs protecting.
+// general one, the budget each actually spends.
 const fableFleet = () => {
   const ids = ['spare', 'reserved'];
   const stored = ids.map((id) => account(id));
@@ -142,66 +141,23 @@ const fableFleet = () => {
   // 'reserved' looks best on the Fable window and worst on the general one.
   return new AccountPool(provider, stored, credentials, {
     version: 1, accounts: { 'codex:spare': win(0.55, 1), 'codex:reserved': win(0.05, 0.04) },
-  }, 0.98, 3, 0.8);
+  }, 0.98, 3);
 };
-
-test('non-Fable traffic prefers an account whose Fable budget is spent', () => {
-  assert.equal(fableFleet().acquire('s', new Set(), false)?.id, 'spare');
-});
 
 test('Fable traffic still goes to the account with Fable left', () => {
   assert.equal(fableFleet().acquire('s', new Set(), true)?.id, 'reserved');
 });
 
-test('session affinity does not drag non-Fable turns onto a reserved account', () => {
-  const pool = fableFleet();
-  const first = pool.acquire('shared', new Set(), true); assert.equal(first?.id, 'reserved'); pool.release(first!);
-  // Same session, different model: the pin must not win here.
-  assert.equal(pool.acquire('shared', new Set(), false)?.id, 'spare');
-});
-
-test('non-Fable falls back to a reserved account when spent ones are unavailable', () => {
-  const pool = fableFleet();
-  pool.accounts.find((a) => a.id === 'spare')!.cooldownUntil = Date.now() + 60_000;
-  assert.equal(pool.acquire('s', new Set(), false)?.id, 'reserved');
-});
-
-test('a threshold of 1 disables the split', () => {
-  const ids = ['spare', 'reserved'];
-  const stored = ids.map((id) => account(id));
-  const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
-  const win = (general: number, fable: number) => ({
-    usage: general, resetsAt: null,
-    windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } },
-    profile: null, cooldownUntil: null, lastUsed: null, error: null,
-  });
-  const pool = new AccountPool(provider, stored, credentials, {
-    version: 1, accounts: { 'codex:spare': win(0.55, 1), 'codex:reserved': win(0.05, 0.04) },
-  }, 0.98, 3, 1);
-  // With the reserve off, a spent Fable window is no longer a tier, so ranking
-  // falls back to least-spent on the general window.
-  assert.equal(pool.acquire('s', new Set(), false)?.id, 'reserved');
-});
-
-test('an unmeasured Fable window is not assumed spent', () => {
-  const ids = ['unmeasured', 'spent'];
-  const stored = ids.map((id) => account(id));
-  const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
-  const pool = new AccountPool(provider, stored, credentials, {
-    version: 1, accounts: {
-      'codex:unmeasured': { usage: 0.1, resetsAt: null, windows: { '7d': { usage: 0.1, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
-      'codex:spent': { usage: 0.6, resetsAt: null, windows: { '7d': { usage: 0.6, resetsAt: null }, '7d_oi': { usage: 1, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
-    },
-  }, 0.98, 3, 0.8);
-  // 'unmeasured' is cheaper on the general window, but its Fable budget is
-  // unknown — a known-spent account is the safer home for non-Fable traffic.
-  assert.equal(pool.acquire('s', new Set(), false)?.id, 'spent');
+test('non-Fable traffic ranks on the general window, not on how much Fable is left', () => {
+  // 'spare' has spent its Fable and used to be where Opus turns went first.
+  // Nothing is held back for Fable now: the emptier general window wins.
+  assert.equal(fableFleet().acquire('s', new Set(), false)?.id, 'reserved');
 });
 
 test('markFableSpent records the window without benching the account', () => {
   const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, {
     version: 1, accounts: { 'codex:a': { usage: 0.2, resetsAt: null, windows: { '7d': { usage: 0.2, resetsAt: null }, '7d_oi': { usage: 0.5, resetsAt: 123 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null } },
-  }, 0.98, 3, 0.8);
+  }, 0.98, 3);
   const acct = pool.accounts[0]!;
   pool.markFableSpent(acct, 60_000);
   assert.equal(AccountPool.fableWindow(acct)?.usage, 1);
@@ -356,7 +312,7 @@ test('a home that is genuinely spent is replaced, and the session settles there'
 });
 
 test('the affinity map is bounded, dropping the least recently used session', () => {
-  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state, 0.98, 16, 0.8, 2);
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state, 0.98, 16, 2);
   for (const session of ['s1', 's2', 's3']) { const got = pool.acquire(session); assert.ok(got); pool.release(got); }
   assert.equal(pool.pinnedSessions, 2);
 });
@@ -365,27 +321,28 @@ test('a session that mixes Fable and other models keeps a home for each', () => 
   // Claude Code sends Haiku classifier calls between Fable turns. With one pin
   // per session, the Haiku call moved the pin to the spare and the next Fable
   // turn was ranked afresh — possibly onto a third, cold account.
-  const pool = fableFleet();
+  // 'spare' cannot serve Fable (spent) and is the emptier on the general window.
+  const ids = ['spare', 'reserved'];
+  const win = (general: number, fable: number) => ({ usage: general, resetsAt: null, windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
+  const pool = new AccountPool(provider, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: { 'codex:spare': win(0.05, 1), 'codex:reserved': win(0.55, 0.04) } }, 0.98, 3);
   const fable = pool.acquire('s', new Set(), true); assert.equal(fable?.id, 'reserved'); pool.release(fable!);
   const other = pool.acquire('s', new Set(), false); assert.equal(other?.id, 'spare'); pool.release(other!);
   const again = pool.acquire('s', new Set(), true); assert.equal(again?.id, 'reserved', 'the Fable turn returns to its own home'); pool.release(again!);
   assert.equal(pool.acquire('s', new Set(), false)?.id, 'spare', 'and the other-model turn to its own');
 });
 
-test('non-Fable sessions stay pinned while every account still reserves Fable', () => {
-  // Early in the week no account has spent its Fable budget, so there is no
-  // spare to divert to. Refusing the pin then just scatters the session.
+test('a non-Fable session stays pinned, even once another account has spent its Fable', () => {
+  // The pin is cache locality. A lighter account, or one whose Fable is spent
+  // (which the removed reservation would have diverted to), does not move it.
   const ids = ['x', 'y', 'z'];
   const win = (general: number, fable: number) => ({ usage: general, resetsAt: null, windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
-  const pool = new AccountPool(provider, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: Object.fromEntries(ids.map((id) => [`codex:${id}`, win(0.5, 0.3)])) }, 0.98, 3, 0.8);
+  const pool = new AccountPool(provider, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: Object.fromEntries(ids.map((id) => [`codex:${id}`, win(0.5, 0.3)])) }, 0.98, 3);
   const first = pool.acquire('s', new Set(), false); assert.ok(first); pool.release(first);
   // Make every other account look lighter, so a fresh ranking would leave.
   for (const a of pool.accounts) if (a.id !== first.id) { a.usage = 0.1; a.windows = { ...a.windows, '7d': { usage: 0.1, resetsAt: null } }; }
-  const second = pool.acquire('s', new Set(), false); assert.equal(second?.id, first.id, 'no spare exists, so the pin holds'); pool.release(second!);
-  // A spare appears: the non-Fable session moves there once and settles.
-  const spare = pool.accounts.find((a) => a.id !== first.id)!; spare.windows = { ...spare.windows, '7d_oi': { usage: 1, resetsAt: null } };
-  const moved = pool.acquire('s', new Set(), false); assert.equal(moved?.id, spare.id); pool.release(moved!);
-  assert.equal(pool.acquire('s', new Set(), false)?.id, spare.id);
+  const second = pool.acquire('s', new Set(), false); assert.equal(second?.id, first.id, 'the pin holds'); pool.release(second!);
+  for (const a of pool.accounts) if (a.id !== first.id) a.windows = { ...a.windows, '7d_oi': { usage: 1, resetsAt: null } };
+  assert.equal(pool.acquire('s', new Set(), false)?.id, first.id, 'a spent-Fable account is no reason to leave');
 });
 
 test('a re-login written to disk is adopted over the stale token held in memory', () => {
@@ -434,16 +391,16 @@ test('a network cooldown benches the account for this request but does not evict
   assert.equal(pool.acquire('s')?.id, 'b', 'a quota cooldown re-homes the session for good');
 });
 
-test('an explicit priority orders accounts within a reservation tier, not across it', () => {
+test('an explicit priority decides, whatever Fable budget an account still holds', () => {
   // 'reserved' still holds Fable budget and is priority #1; 'spare' has spent
-  // its Fable. A non-Fable turn must go to the spare regardless of priority,
-  // or the #1 account's Fable budget is burned on turns that cannot use it.
+  // its Fable. Both kinds of turn follow the priority; Fable never could use
+  // 'spare' anyway.
   const ids = ['spare', 'reserved'];
   const stored = [account('spare', 2), account('reserved', 1)];
   const credentials = Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)]));
   const win = (general: number, fable: number) => ({ usage: general, resetsAt: null, windows: { '7d': { usage: general, resetsAt: null }, '7d_oi': { usage: fable, resetsAt: null } }, profile: null, cooldownUntil: null, lastUsed: null, error: null });
-  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:spare': win(0.5, 1), 'codex:reserved': win(0.05, 0.04) } }, 0.98, 3, 0.8);
-  assert.equal(pool.acquire('s1', new Set(), false)?.id, 'spare', 'non-Fable turn skips the reserving #1 account');
+  const pool = new AccountPool(provider, stored, credentials, { version: 1, accounts: { 'codex:spare': win(0.5, 1), 'codex:reserved': win(0.05, 0.04) } }, 0.98, 3);
+  assert.equal(pool.acquire('s1', new Set(), false)?.id, 'reserved', 'non-Fable turn goes to the #1 account');
   assert.equal(pool.acquire('s2', new Set(), true)?.id, 'reserved', 'Fable turn still honours priority');
 });
 
