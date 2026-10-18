@@ -44,6 +44,9 @@ export interface TeamAIConfig {
   };
   switchThreshold: number;
   warmupIntervalMs?: number;
+  // Send one tiny request to accounts whose quota windows have not started yet.
+  // Defaults to true; false keeps the measurement-only warm-up behavior.
+  warmupStartWindows?: boolean;
   maxConcurrentPerAccount: number;
   // At or above this share of the model-weekly (Fable) window, an account counts
   // as spent for that model and becomes the preferred home for traffic that does
@@ -139,6 +142,10 @@ export interface AccountRuntimeState extends ResetCreditLedger {
   // (response headers, the usage endpoint, a probe). The dashboard shows their
   // age so a number nobody has re-read does not pass for a live one.
   measuredAt?: number | null;
+  // Window reset timestamps for which the one-per-window start request has
+  // already succeeded. Keys are provider window names (5h/7d or
+  // primary/secondary), values are the reset timestamps observed then.
+  warmupStartWindows?: Record<string, number>;
 }
 
 // One relayed request while it is in flight. Written to state.json so the
@@ -224,6 +231,7 @@ export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
   measuredAt: number | null;
+  warmupStartWindows?: Record<string, number>;
   inflight: number;
   // Memory only: the redemption running for this account, shared by every
   // caller so a ticket is never spent twice concurrently; and the last list.
@@ -265,6 +273,8 @@ export interface Provider {
   // the request body already parsed (null when it is not JSON).
   displayIdentity?(headers: Headers, body: unknown): RequestIdentity;
   defaultProbe?(): ProbeTemplate | null;
+  // Cheapest supported model used only to open an otherwise idle quota window.
+  startWindowModel?: string;
   captureProbe?(path: string, headers: Headers, body: Buffer, sawModelWeekly: boolean): ProbeTemplate | null;
   probeRequest?(template: ProbeTemplate, credential: OAuthCredential): { url: string; headers: Record<string, string>; body: string };
   fetchProfile?(credential: OAuthCredential): Promise<SubscriptionProfile>;

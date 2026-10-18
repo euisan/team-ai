@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AccountPool } from '../src/account-pool.js';
+import { AccountPool, isWindowNotStarted, START_WINDOW_TOLERANCE_MS } from '../src/account-pool.js';
+import { claudeProvider, codexProvider } from '../src/providers.js';
 import type { OAuthCredential, PersistedState, Provider, StoredAccount } from '../src/types.js';
 
 const provider: Provider = {
@@ -476,6 +477,61 @@ test('R reads usage first and probes only the accounts the endpoint could not re
     assert.equal(result.targets, 2);
     assert.equal(result.measured, 1);
   } finally { globalThis.fetch = realFetch; }
+});
+
+test('window-start detection uses provider spans and a small clock tolerance', () => {
+  const measured = 1_000_000;
+  assert.equal(isWindowNotStarted('codex', 'primary', { usage: 0, resetsAt: measured + 300 * 60_000 }, measured, measured + 1), true);
+  assert.equal(isWindowNotStarted('codex', 'secondary', { usage: 0, resetsAt: measured + 10_080 * 60_000 + START_WINDOW_TOLERANCE_MS }, measured, measured + 1), true);
+  assert.equal(isWindowNotStarted('claude', '7d', { usage: 0, resetsAt: measured + 10_080 * 60_000 + START_WINDOW_TOLERANCE_MS + 1 }, measured, measured + 1), false);
+  assert.equal(isWindowNotStarted('claude', '5h', { usage: 0.01, resetsAt: measured + 300 * 60_000 }, measured, measured + 1), false);
+});
+
+test('provider window-start probes use the supported low-cost model ids', () => {
+  assert.equal(claudeProvider.startWindowModel, 'claude-haiku-4-5-20251001');
+  assert.equal(codexProvider.startWindowModel, 'gpt-6-luna');
+});
+
+test('warmup starts unopened windows once per account, sequentially, and honors the switch', async () => {
+  const calls: string[] = []; let active = 0; let maxActive = 0;
+  const startProvider: Provider = {
+    ...provider,
+    startWindowModel: 'cheap',
+    defaultProbe: () => ({ path: '/probe', model: 'normal', version: '', beta: null, system: null, userAgent: null, query: '', elicitsModelWeekly: false }),
+    probeRequest: (_template, credential) => ({ url: `https://example.test/${credential.accountId}`, headers: { authorization: credential.accountId }, body: '{}' }),
+    readQuota: () => ({ routingUsage: 0.01, routingResetsAt: null, windows: { primary: { usage: 0.01, resetsAt: null, minutes: 300 } } }),
+  };
+  const now = 5_000_000; const stored = [account('a'), account('b')];
+  const saved = Object.fromEntries(stored.map((a) => [a.credentialId, { usage: 0, resetsAt: now + 300 * 60_000, measuredAt: now, windows: { primary: { usage: 0, resetsAt: now + 300 * 60_000, minutes: 300 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null }]));
+  const pool = new AccountPool(startProvider, stored, { 'codex:a': credential('a'), 'codex:b': credential('b') }, { version: 1, accounts: saved });
+  pool.now = () => now;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    calls.push(url); active++; maxActive = Math.max(maxActive, active); await new Promise((resolve) => setTimeout(resolve, 1)); active--; return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  try {
+    await pool.warmup(); await pool.warmup();
+    assert.deepEqual(calls, ['https://example.test/a', 'https://example.test/b']);
+    assert.equal(maxActive, 1, 'window starts are sent one at a time');
+    assert.equal(pool.accounts[0]!.warmupStartWindows?.primary, now + 300 * 60_000);
+    const disabled = new AccountPool(startProvider, [account('c')], { 'codex:c': credential('c') }, { version: 1, accounts: { 'codex:c': saved['codex:a']! } });
+    disabled.now = () => now;
+    await disabled.warmup(false);
+    assert.equal(calls.length, 2, 'false keeps the measurement-only warmup');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('a failed window-start probe consumes the ordinary three-attempt budget', async () => {
+  const now = 7_000_000; let calls = 0;
+  const failing: Provider = {
+    ...provider,
+    defaultProbe: () => ({ path: '/probe', model: 'normal', version: '', beta: null, system: null, userAgent: null, query: '', elicitsModelWeekly: false }),
+    probeRequest: () => ({ url: 'https://example.test/fail', headers: {}, body: '{}' }),
+  };
+  const saved = { usage: 0, resetsAt: now + 300 * 60_000, measuredAt: now, windows: { primary: { usage: 0, resetsAt: now + 300 * 60_000, minutes: 300 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null };
+  const pool = new AccountPool(failing, [account('fail')], { 'codex:fail': credential('fail') }, { version: 1, accounts: { 'codex:fail': saved } }); pool.now = () => now;
+  const realFetch = globalThis.fetch; globalThis.fetch = (async () => { calls++; return new Response(null, { status: 503 }); }) as typeof fetch;
+  try { await pool.warmup(); await pool.warmup(); await pool.warmup(); await pool.warmup(); assert.equal(calls, 3); } finally { globalThis.fetch = realFetch; }
 });
 
 test('measuredAt survives a restart via exported state', () => {
