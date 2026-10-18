@@ -5,7 +5,7 @@ import { buildFrame, displayOrder, orderOptions, type OrderOptions } from '../sr
 import { parseBalance } from '../src/pacing.js';
 import { providers } from '../src/providers.js';
 
-const LEVEL: OrderOptions = { balance: 'level', fableReserve: 0.8 };
+const LEVEL: OrderOptions = { balance: 'level' };
 import type { PersistedState, StoredAccount, TeamAIConfig } from '../src/types.js';
 
 function account(provider: 'claude' | 'codex', label: string, priority: number | null = null): StoredAccount {
@@ -24,13 +24,13 @@ test('display order groups providers even when config interleaves them', () => {
   assert.deepEqual(ordered.map((a) => a.label), ['c1@example.com', 'c2@example.com', 'x1@example.com', 'x2@example.com']);
 });
 
-test('display order (level): the Fable-spent tier first, pinned priority inside its tier, then least-spent, unmeasured last', () => {
-  // As the pool ranks a non-Fable request: an account past the 0.8 Fable
-  // reserve is where such traffic goes first; a priority orders within a tier.
+test('display order (level): pinned priority first, then least-spent, unmeasured last', () => {
+  // As the pool ranks a non-Fable request: a priority first, whatever Fable
+  // budget is left, then the balance; a spent Fable window is no tier.
   const config = [account('claude', 'spent@example.com'), account('claude', 'unknown@example.com'), account('claude', 'fresh@example.com'), account('claude', 'pinned@example.com', 1)];
   const state = usage({ 'spent@example.com': 1, 'unknown@example.com': null, 'fresh@example.com': 0.2, 'pinned@example.com': 0.9 });
   const ordered = displayOrder(config, state, true, LEVEL);
-  assert.deepEqual(ordered.map((a) => a.label), ['pinned@example.com', 'spent@example.com', 'fresh@example.com', 'unknown@example.com']);
+  assert.deepEqual(ordered.map((a) => a.label), ['pinned@example.com', 'fresh@example.com', 'spent@example.com', 'unknown@example.com']);
 });
 
 // The regression: ↑↓ used to step through config.json while the screen drew a
@@ -38,7 +38,7 @@ test('display order (level): the Fable-spent tier first, pinned priority inside 
 // displayOrder by index must visit rows in exactly the order they are drawn.
 test('stepping by index through display order visits adjacent drawn rows', () => {
   const config = [account('claude', 'b@example.com'), account('codex', 'z@example.com'), account('claude', 'a@example.com')];
-  // Both under the 0.8 Fable reserve, so the order is by usage alone.
+  // No priorities, so the order is by usage alone.
   const state = usage({ 'b@example.com': 0.7, 'a@example.com': 0.1, 'z@example.com': 0.5 });
   const ordered = displayOrder(config, state, true, LEVEL);
   const walk: string[] = []; let index = 0;
@@ -97,18 +97,18 @@ test('with routing.balance "level" the dashboard order is the pool\'s own select
     'a@example.com': { fable: 0.1, week: 0.6, session: 0.1 },
     'b@example.com': { fable: 0.5, week: 0.2, session: 0.3 },
     'c@example.com': { fable: 0.3, week: 0.25, session: 0.7 },
-    // Fable spent past the reserve: the preferred home for non-Fable traffic.
+    // Fable nearly spent: no longer a tier of its own, it ranks on 7d/5h.
     'd@example.com': { fable: 0.9, week: 0.7, session: 0 },
-    // A pinned priority ranks inside its reservation tier, not across it.
+    // A pinned priority ranks first, whatever Fable budget it still holds.
     'e@example.com': { fable: 0.2, week: 0.9, session: 0.5 },
   };
   const stored = Object.keys(windows).map((label) => account('claude', label, label === 'e@example.com' ? 1 : null));
   const state: PersistedState = { version: 1, accounts: {} };
   for (const [label, w] of Object.entries(windows)) state.accounts[`cred-${label}`] = { usage: Math.max(w.week, w.session), resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows: { '7d_oi': { usage: w.fable, resetsAt: null }, '7d': { usage: w.week, resetsAt: null }, '5h': { usage: w.session, resetsAt: null } } };
   const credentials = Object.fromEntries(stored.map((a) => [a.credentialId, { accessToken: 'synthetic', refreshToken: null, expiresAt: null, accountId: a.id }]));
-  const pool = new AccountPool(providers.claude, stored, credentials, state, 0.98, 16, 0.8); pool.balance = 'level';
+  const pool = new AccountPool(providers.claude, stored, credentials, state, 0.98, 16); pool.balance = 'level';
   const expected = selectionOrder(pool);
-  assert.deepEqual(expected, ['d@example.com', 'e@example.com', 'b@example.com', 'a@example.com', 'c@example.com']);
+  assert.deepEqual(expected, ['e@example.com', 'b@example.com', 'a@example.com', 'c@example.com', 'd@example.com']);
   assert.deepEqual(displayOrder(stored, state, true, LEVEL).map((a) => a.label), expected);
 });
 
@@ -124,7 +124,7 @@ test('routing.balance is read by one parser: the server refuses what the dashboa
   assert.equal(parseBalance('pacing'), 'pacing');
   assert.equal(parseBalance('level'), 'level');
   for (const bad of ['Level', 'fastest', '', 1, null]) assert.throws(() => parseBalance(bad), /routing\.balance must be "pacing" or "level", not /, String(bad));
-  const base = { fableReserveThreshold: 0.8 };
+  const base = {};
   assert.equal(orderOptions({ ...base, routing: { balance: 'level' } }).balance, 'level');
   assert.equal(orderOptions(base).balance, 'pacing');
   // The server will not start on it; the dashboard still draws, in the default order.

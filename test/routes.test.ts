@@ -36,14 +36,14 @@ test('a malformed route is refused with a message naming it', () => {
   assert.deepEqual(parseRoutes(undefined, 'codex'), []);
 });
 
-function pool(ids: string[], options: { provider?: Partial<Provider>; fableReserve?: number } = {}) {
+function pool(ids: string[], options: { provider?: Partial<Provider> } = {}) {
   const provider: Provider = {
     id: 'codex', label: 'Codex', upstreamBase: 'http://127.0.0.1:1', normalizePath: () => '/x', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
     buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }), ...options.provider,
   };
   const stored = ids.map((id): StoredAccount => ({ id, provider: provider.id, label: `${id}@example.com`, enabled: true, priority: null, credentialId: `cred-${id}`, createdAt: '' }));
   const credentials: Record<string, OAuthCredential> = Object.fromEntries(ids.map((id) => [`cred-${id}`, { accessToken: `secret-${id}`, refreshToken: null, expiresAt: null, accountId: id }]));
-  const p = new AccountPool(provider, stored, credentials, { version: 1, accounts: {} }, 0.98, 16, options.fableReserve ?? 0.8);
+  const p = new AccountPool(provider, stored, credentials, { version: 1, accounts: {} }, 0.98, 16);
   const log: string[] = []; p.log = (m) => log.push(m);
   return { p, log, get: (id: string) => p.accounts.find((a) => a.id === id)! };
 }
@@ -88,13 +88,13 @@ test('a session pinned outside a prefer route moves into it; exclusive never use
   assert.equal(take(p, exclusive!, 'other'), 'b');
 });
 
-test('a route outranks the automatic Fable reservation', () => {
+test('steering non-Fable traffic off a Fable-rich account is a route\'s job, not the pool\'s', () => {
   const { p, get } = pool(['x', 'y'], { provider: { id: 'claude', label: 'Claude' } });
   get('x').windows = { '7d_oi': { usage: 0.2, resetsAt: null }, '7d': { usage: 0.3, resetsAt: null } };
   get('y').windows = { '7d_oi': { usage: 0.95, resetsAt: null }, '7d': { usage: 0.3, resetsAt: null } };
-  assert.equal(take(p, null), 'y', 'without a route a non-Fable request leaves x to Fable');
-  const [route] = parseRoutes([{ name: 'opus', match: ['claude-opus-*'], accounts: ['x'] }], 'claude'); p.setRoutes([route!]);
-  assert.equal(take(p, route!, 'other'), 'x');
+  assert.equal(take(p, null), 'x', 'without a route nothing is held back for Fable');
+  const [route] = parseRoutes([{ name: 'opus', match: ['claude-opus-*'], accounts: ['y'] }], 'claude'); p.setRoutes([route!]);
+  assert.equal(take(p, route!, 'other'), 'y');
 });
 
 test('unknown account references are reported and skipped', () => {

@@ -171,8 +171,8 @@ accounts do not swap places on every request; a tie goes to the account the
 session is already on, then to the most weekly budget left per remaining week,
 then to the earliest weekly reset, then to the earliest and least-used 5-hour
 window. An account with no weekly window that resets in the future (unmeasured,
-or its reset already passed) sorts after those that have one. The Fable
-reservation, an explicit priority, the switch threshold — which also sets aside
+or its reset already passed) sorts after those that have one. An explicit
+priority, the switch threshold — which also sets aside
 an account whose 5-hour window is at it, however far behind its week is — the
 session pin and the concurrency cap all apply first, as before. Each row shows
 its deviation as `+12%p` / `-30%p`. `routing.balance: "level"` restores the
@@ -180,20 +180,22 @@ older order (the fuller of the 5-hour and weekly windows, in 10% steps, fewest
 requests in flight first; the dashboard draws that order too), and `c`
 toggles back to configured order.
 
-A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — tiers, priority, pacing, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
+A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — routes, priority, pacing, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
 
-**Model-aware routing.** Only the top model (Claude's Fable tier) draws on the
-model-weekly window, so a request that does not need it — Opus, Sonnet, Haiku —
-is routed away from accounts that still have Fable budget and onto accounts
-whose Fable window is already spent (at or above `fableReserveThreshold`),
-ranked within that group by their overall weekly window. This keeps each
-account's scarce Fable budget for the requests that actually need it, and puts
-otherwise-idle weekly headroom to use. When no spent account is free the request
-falls back to a reserved one rather than failing. A Fable request keeps the
-plain least-spent order; set `fableReserveThreshold` to `1` to turn the split
-off.
+**Fable and other models.** Only the top model (Claude's Fable tier) draws on
+the model-weekly window. The pool holds nothing back for it: within a route,
+every request — Fable or not — goes by priority (explicit ranks first, lowest
+first), then by the balance above, which for a non-Fable request reads the
+shared weekly window and for a Fable request the Fable one. What a Fable
+request does skip is an account that cannot serve it: one whose Fable window is
+fully spent (100%), and a measured account that reports no Fable window at all
+(a plan without Fable, such as Pro); an account not measured yet is still tried.
+Such an account keeps serving every other model. To keep Opus or Sonnet traffic
+off the accounts you want to save for Fable, write a model route (below). The
+old `fableReserveThreshold` key is no longer read; a `config.json` that still
+has it starts as before.
 
-**Model routes.** `routes.claude` and `routes.codex` send requests for chosen models to chosen accounts. Each route is `{ "name", "match", "accounts", "mode", "color" }`: `match` is a list of patterns tested against the request's `model` (`*` matches anything, everything else is literal, case is ignored, the whole name must match — `claude-opus-*`, `*fable*`, `gpt-6-astra`), `accounts` lists account labels, ids or 0-based positions among that provider's accounts, and the first route that matches applies. In the default `"mode": "prefer"` the route's accounts are tried first and, when none of them can take the request, it goes to any other account at once; the switch and the return are each logged once. With `"mode": "exclusive"` only the route's accounts may serve the model — failover stays inside the route, and when they are all spent the request gets a 429 that names the route. A route outranks the automatic Fable reservation (a route is a rule you wrote), a routed request keeps a session pin of its own, and a request with no `model` matches no route. A malformed route written into `config.json` by hand stops the relay from starting (`server-start.log` says which) — the dashboard editor and `teamai route` below check a route with that same parser before saving, so they cannot cause this; an account reference that matches nothing is logged and skipped. The dashboard adds one marker column per route left of the cursor — `▸` in the route's colour on its accounts, grey where that account cannot serve right now — request lines carry `[route:name]` (`→fallback` when a prefer route had to leave), and `teamai status` lists the routes.
+**Model routes.** `routes.claude` and `routes.codex` send requests for chosen models to chosen accounts. Each route is `{ "name", "match", "accounts", "mode", "color" }`: `match` is a list of patterns tested against the request's `model` (`*` matches anything, everything else is literal, case is ignored, the whole name must match — `claude-opus-*`, `*fable*`, `gpt-6-astra`), `accounts` lists account labels, ids or 0-based positions among that provider's accounts, and the first route that matches applies. In the default `"mode": "prefer"` the route's accounts are tried first and, when none of them can take the request, it goes to any other account at once; the switch and the return are each logged once. With `"mode": "exclusive"` only the route's accounts may serve the model — failover stays inside the route, and when they are all spent the request gets a 429 that names the route. A route outranks priority and the balance (a route is a rule you wrote), a routed request keeps a session pin of its own, and a request with no `model` matches no route. A malformed route written into `config.json` by hand stops the relay from starting (`server-start.log` says which) — the dashboard editor and `teamai route` below check a route with that same parser before saving, so they cannot cause this; an account reference that matches nothing is logged and skipped. The dashboard adds one marker column per route left of the cursor — `▸` in the route's colour on its accounts, grey where that account cannot serve right now — request lines carry `[route:name]` (`→fallback` when a prefer route had to leave), and `teamai status` lists the routes.
 
 ```json
 "routes": {
@@ -260,7 +262,6 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 | `switchThreshold` | `0.98` | Usage ratio above which an account stops being selected. |
 | `warmup.enabled` | `true` | Event-driven Codex keep-warm; `false` disables it. |
 | `maxConcurrentPerAccount` | `16` | In-flight requests allowed per account. `0` means unlimited. |
-| `fableReserveThreshold` | `0.8` | Fable-window usage at or above which an account is preferred for non-Fable requests. `1` turns model-aware routing off. |
 | `routing.balance` | `"pacing"` | How accounts of equal priority are ordered: `pacing` (weekly progress, see above) or `level` (least-full windows in 10% steps). Anything else stops startup with the reason; the dashboard then draws the `pacing` order. |
 | `codexResetCredits` | `false` | Spend Codex reset credits automatically (see above). |
 | `codexResetCreditsPolicy` | `"fleet"` | `fleet`: only when no Codex account has budget. `account`: also on an account's own exhaustion 429. |

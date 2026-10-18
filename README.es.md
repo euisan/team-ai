@@ -179,8 +179,8 @@ cada solicitud; un empate lo gana la cuenta en la que ya está la sesión, luego
 la que más presupuesto semanal tiene por semana restante, luego el reinicio
 semanal más temprano y luego la ventana de 5 horas que se reinicia antes y está
 menos usada. Una cuenta sin ventana semanal que se reinicie en el futuro (sin
-medir, o con el reinicio ya pasado) va detrás de las que la tienen. La reserva
-de Fable, la prioridad explícita, el umbral de cambio (que también aparta una
+medir, o con el reinicio ya pasado) va detrás de las que la tienen. La
+prioridad explícita, el umbral de cambio (que también aparta una
 cuenta cuya ventana de 5 horas lo alcanza, por atrasada que vaya su semana), el
 anclaje de sesión y el límite de concurrencia se aplican antes, como siempre.
 Cada fila muestra su desviación como `+12%p` / `-30%p`. `routing.balance:
@@ -188,17 +188,19 @@ Cada fila muestra su desviación como `+12%p` / `-30%p`. `routing.balance:
 semanal, en pasos del 10 %, con menos solicitudes en curso primero), y `c`
 vuelve al orden configurado.
 
-**Enrutamiento según el modelo.** Solo el modelo superior (el nivel Fable de
-Claude) consume la ventana semanal por modelo, así que una solicitud que no lo
-necesita —Opus, Sonnet, Haiku— se desvía de las cuentas que todavía tienen
-presupuesto Fable hacia las cuentas cuya ventana Fable ya está agotada (en
-`fableReserveThreshold` o por encima), ordenadas dentro de ese grupo por su
-ventana semanal general. Así se reserva el escaso presupuesto Fable de cada
-cuenta para las solicitudes que de verdad lo necesitan y se aprovecha el margen
-semanal que de otro modo quedaría ocioso. Cuando no hay ninguna cuenta agotada
-disponible, la solicitud recae en una reservada en lugar de fallar. Una
-solicitud Fable conserva el orden normal de menor consumo; pon
-`fableReserveThreshold` en `1` para desactivar la separación.
+**Fable y los demás modelos.** Solo el modelo superior (el nivel Fable de
+Claude) consume la ventana semanal por modelo. El pool no aparta cuentas para
+él: dentro de una ruta, toda solicitud —Fable o no— sigue la prioridad (primero
+los valores explícitos, el número menor primero) y luego el equilibrio descrito
+arriba, que para una solicitud no Fable lee la ventana semanal compartida y para
+una Fable la ventana Fable. Lo único que una solicitud Fable salta es una cuenta
+que no puede atenderla: la que tiene la ventana Fable agotada (100 %) y la cuenta
+medida que no informa ninguna ventana Fable (un plan sin Fable, como Pro); una
+cuenta aún sin medir se intenta. Esas cuentas siguen atendiendo los demás
+modelos. Para apartar el tráfico de Opus o Sonnet de las cuentas que quieres
+guardar para Fable, usa una ruta de modelo. La antigua clave
+`fableReserveThreshold` ya no se lee; un `config.json` que aún la tenga arranca
+igual.
 
 Un 429 de nivel Fable (`7d_oi` rechazada mientras las ventanas compartidas
 `5h`/`7d` siguen permitidas) solo limita la ventana Fable de esa cuenta, no la
@@ -251,7 +253,6 @@ a `127.0.0.1` y exigen un token de cliente local generado.
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |
 | `warmup.enabled` | `true` | Keep-warm de Codex impulsado por eventos; `false` lo desactiva. |
 | `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
-| `fableReserveThreshold` | `0.8` | Uso de la ventana Fable a partir del cual la cuenta se prefiere para solicitudes que no son Fable. `1` desactiva el enrutamiento según el modelo. |
 | `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). |
 | `routes` | — | Opcional. Rutas por modelo y proveedor, `{ "claude": [...], "codex": [...] }`; se editan con `g` en el panel o con `teamai route`. |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |

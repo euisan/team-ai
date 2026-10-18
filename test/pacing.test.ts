@@ -15,7 +15,7 @@ function makePool(provider: 'claude' | 'codex', ids: string[]): AccountPool {
   const p: Provider = { id: provider, label: provider === 'claude' ? 'Claude' : 'Codex', upstreamBase: 'http://127.0.0.1:1', normalizePath: () => '/x', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c, buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }), ...(provider === 'claude' ? { fableModel: 'claude-fable-5-1' } : {}) };
   const stored = ids.map((id): StoredAccount => ({ id, provider, label: id, enabled: true, priority: null, credentialId: `cred-${id}`, createdAt: '' }));
   const credentials: Record<string, OAuthCredential> = Object.fromEntries(ids.map((id) => [`cred-${id}`, { accessToken: 's', refreshToken: null, expiresAt: null, accountId: id }]));
-  const pool = new AccountPool(p, stored, credentials, { version: 1, accounts: {} }, 0.98, 16, 0.8);
+  const pool = new AccountPool(p, stored, credentials, { version: 1, accounts: {} }, 0.98, 16);
   pool.now = () => T;
   return pool;
 }
@@ -96,7 +96,7 @@ test('an account with no valid weekly window sorts after one that has it, even f
   set(pool, 'ahead', { '7d': { usage: 0.9, resetsAt: T + 6 * DAY } });
   assert.equal(pool.preview(false)?.id, 'ahead');
   // Among themselves the 5-hour keys decide: the earlier reset first.
-  const order = displayOrder(pool.accounts, { version: 1, accounts: Object.fromEntries(pool.accounts.map((a) => [a.credentialId, { usage: a.usage, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows: a.windows }])) }, true, { balance: 'pacing', fableReserve: 0.8, now: T });
+  const order = displayOrder(pool.accounts, { version: 1, accounts: Object.fromEntries(pool.accounts.map((a) => [a.credentialId, { usage: a.usage, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows: a.windows }])) }, true, { balance: 'pacing', now: T });
   assert.deepEqual(order.map((a) => a.id), ['ahead', 'none', 'stale']);
 });
 
@@ -109,15 +109,16 @@ test('a Fable request paces on the Fable weekly window, anything else on 7d', ()
   assert.equal(pool.acquire('opus', new Set(), false)?.id, 'B');
 });
 
-test('the Fable reservation tier and an explicit priority still come before pacing', () => {
+test('an explicit priority comes before pacing; a spent-ish Fable window is no tier', () => {
   const pool = makePool('claude', ['behind', 'spentFable', 'ranked']);
   set(pool, 'behind', { '7d': { usage: 0.05, resetsAt: T + DAY }, '7d_oi': { usage: 0.1, resetsAt: T + DAY } });
   set(pool, 'spentFable', { '7d': { usage: 0.6, resetsAt: T + 6 * DAY }, '7d_oi': { usage: 0.9, resetsAt: T + 6 * DAY } });
   set(pool, 'ranked', { '7d': { usage: 0.5, resetsAt: T + 6 * DAY }, '7d_oi': { usage: 0.5, resetsAt: T + 6 * DAY } });
-  assert.equal(pool.preview(false)?.id, 'spentFable', 'non-Fable goes to the spent-Fable tier first');
+  assert.equal(pool.preview(false)?.id, 'behind', 'non-Fable follows pacing, not the Fable window');
   assert.equal(pool.preview(true)?.id, 'behind');
   pool.accounts.find((a) => a.id === 'ranked')!.priority = 1;
   assert.equal(pool.preview(true)?.id, 'ranked', 'priority outranks pacing');
+  assert.equal(pool.preview(false)?.id, 'ranked', 'for non-Fable too');
 });
 
 test('an account behind on the week is skipped while its 5-hour window is at the switch threshold', () => {

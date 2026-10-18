@@ -51,20 +51,13 @@ export class AccountPool {
   log: (message: string) => void = () => {};
   private changeListener: ((account: RuntimeAccount) => void) | null = null;
   private deadEndLoggedAt = 0;
-  // How accounts in the same tier and priority are ordered: 'pacing' by weekly
+  // How accounts of the same priority are ordered: 'pacing' by weekly
   // progress (src/pacing.ts), 'level' by how full they are. The clock is only
   // read for that ordering, so a test can fix it.
   balance: Balance = 'pacing';
   now: () => number = Date.now;
 
-  // Accounts still holding Fable budget are kept for Fable. An account measured
-  // below this line reserves its remainder; at or above it, it is the preferred
-  // home for everything else. 1 disables the split.
-  private reservesFable(account: RuntimeAccount): boolean {
-    return this.fableReserve < 1 && !AccountPool.fableSpent(account, this.fableReserve) && AccountPool.fableWindow(account)?.usage != null;
-  }
-
-  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 16, readonly fableReserve = 0.8, readonly maxSessions = 4096) {
+  constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 16, readonly maxSessions = 4096) {
     this.accounts = stored.filter((a) => a.provider === provider.id && credentials[a.credentialId]).map((account) => {
       const saved = state.accounts[account.credentialId];
       // Restore the long-lived quota state (usage/windows/reset/profile) so the
@@ -135,36 +128,38 @@ export class AccountPool {
     return (a.usage ?? 1) - (b.usage ?? 1);
   }
 
-  // Ranking for traffic that does not need the top model. Accounts whose Fable
-  // budget is already spent come first, so an Opus or Sonnet request lands on a
-  // week that has nothing left to protect instead of eating the one account that
-  // can still serve Fable. Within a tier it is least-spent on the general window,
-  // which is the budget such a request actually consumes.
-  //
-  // Without this split, byHeadroom ranks every request on the Fable window, and
-  // the account with the most Fable left is exactly the one Opus and Sonnet get
-  // routed to first — the opposite of what the pool should do.
-  static byNonFableHeadroom(reserve: number): (a: Ranked, b: Ranked) => number {
-    return (a, b) => {
-      // A reserve of 1 holds nothing back, so there is no tier to sort by — rank
-      // purely on the budget the request spends.
-      const ta = reserve < 1 && AccountPool.fableSpent(a, reserve);
-      const tb = reserve < 1 && AccountPool.fableSpent(b, reserve);
-      if (ta !== tb) return ta ? -1 : 1;
-      const ua = AccountPool.generalUsage(a); const ub = AccountPool.generalUsage(b);
-      if (ua === null || ub === null) return (ua === null ? 1 : 0) - (ub === null ? 1 : 0);
-      if (ua !== ub) return ua - ub;
-      return AccountPool.byHeadroom(a, b);
-    };
+  // Ranking for traffic that does not need the top model: least-spent on the
+  // general window, the budget such a request actually consumes. The Fable
+  // window says nothing about whether an Opus or Sonnet turn fits, so it only
+  // breaks ties (through byHeadroom). Which account to spend first is the
+  // priority's call, or a model route's — not a reservation of the pool's own.
+  static byGeneralHeadroom(a: Ranked, b: Ranked): number {
+    const ua = AccountPool.generalUsage(a); const ub = AccountPool.generalUsage(b);
+    if (ua === null || ub === null) return (ua === null ? 1 : 0) - (ub === null ? 1 : 0);
+    if (ua !== ub) return ua - ub;
+    return AccountPool.byHeadroom(a, b);
   }
 
-  // Spent for Fable purposes: at or past the reserve line, so nothing is held
-  // back by sending other models here. An unmeasured Fable window is not treated
-  // as spent — a null is unknown, and assuming empty would spend a budget we
-  // have not looked at.
-  static fableSpent(account: Ranked, reserve: number): boolean {
+  // The Fable window is fully spent (100%): a Fable request can only get a 429
+  // there. An unmeasured Fable window is not treated as spent — a null is
+  // unknown, and the account may well still serve it.
+  static fableSpent(account: Ranked): boolean {
     const usage = AccountPool.fableWindow(account)?.usage;
-    return usage !== null && usage !== undefined && usage >= reserve;
+    return usage !== null && usage !== undefined && usage >= 1;
+  }
+
+  // The account has been measured on the shared weekly window and reports no
+  // model-weekly (Fable) window at all: a plan without Fable (Claude Pro), so a
+  // Fable request has nowhere to go there. An account not measured yet is not
+  // judged — the absence of a window it was never asked about means nothing.
+  static lacksFable(account: Ranked): boolean {
+    return account.windows['7d'] !== undefined && AccountPool.fableWindow(account) === undefined;
+  }
+
+  // Whether a Fable request can be served here at all. This is availability,
+  // not a reservation: it never moves a non-Fable request anywhere.
+  private servesFable(account: Ranked): boolean {
+    return !AccountPool.fableSpent(account) && !(this.provider.fableModel && AccountPool.lacksFable(account));
   }
 
   static generalUsage(account: Ranked): number | null {
@@ -190,10 +185,10 @@ export class AccountPool {
   // has budget left" (quota) without duplicating the eligibility rules.
   //
   // A Fable request also skips an account whose Fable window is fully spent
-  // (100%): it can only answer with a 429 there, so trying it just burns a real
-  // upstream call and a failover hop before moving on. A non-Fable request still
-  // considers it — that budget is exactly what the account has left. Note this
-  // is fully spent, not `fableReserve`: at 80% there is still Fable to spend.
+  // (100%), or that has no Fable window on a measured account: it can only
+  // answer with a 429 there, so trying it just burns a real upstream call and
+  // a failover hop before moving on. A non-Fable request still considers it —
+  // that budget is exactly what the account has left.
   //
   // The switch threshold (98%) is the point at which the pool prefers another
   // account, not a promise to leave the remainder unused. When nothing else can
@@ -215,7 +210,7 @@ export class AccountPool {
     const usage = rolled ? null : account.usage; const cooldownUntil = rolled ? null : account.cooldownUntil;
     const limit = lastResort ? 1 : this.threshold;
     if (!(account.enabled && !account.error && !excluded.has(account.id) && (!cooldownUntil || cooldownUntil <= now) && (usage === null || usage < limit))) return false;
-    if (wantsFable && AccountPool.fableSpent(account, 1)) return false;
+    if (wantsFable && !this.servesFable(account)) return false;
     return true;
   }
 
@@ -267,23 +262,25 @@ export class AccountPool {
     const now = Date.now();
     const live = this.accounts.filter((a) => a.enabled && !a.error && !excluded.has(a.id));
     const resets: Array<{ at: number; label: string }> = [];
-    let fableSpent = 0; let overLimit = 0; let coolingDown = 0;
+    let fableSpent = 0; let noFable = 0; let overLimit = 0; let coolingDown = 0;
     for (const account of live) {
       const fable = AccountPool.fableWindow(account);
-      if (wantsFable && AccountPool.fableSpent(account, 1)) { fableSpent++; if (fable?.resetsAt) resets.push({ at: fable.resetsAt, label: `${account.label} Fable weekly` }); continue; }
+      if (wantsFable && this.provider.fableModel && AccountPool.lacksFable(account)) { noFable++; continue; }
+      if (wantsFable && AccountPool.fableSpent(account)) { fableSpent++; if (fable?.resetsAt) resets.push({ at: fable.resetsAt, label: `${account.label} Fable weekly` }); continue; }
       if (account.usage !== null && account.usage >= 1) { overLimit++; if (account.resetsAt) resets.push({ at: account.resetsAt, label: `${account.label} session` }); continue; }
       if (account.cooldownUntil && account.cooldownUntil > now) { coolingDown++; resets.push({ at: account.cooldownUntil, label: `${account.label} cooldown` }); }
     }
     const next = resets.filter((r) => r.at > now).sort((a, b) => a.at - b.at)[0];
     const parts: string[] = [];
     if (fableSpent) parts.push(`${fableSpent} spent the Fable weekly budget`);
+    if (noFable) parts.push(`${noFable} without a Fable budget`);
     if (overLimit) parts.push(`${overLimit} used up the session window`);
     if (coolingDown) parts.push(`${coolingDown} cooling down after an upstream rejection`);
     const what = route?.mode === 'exclusive' ? `No ${label} account in route "${route.name}" can serve right now`
       : wantsFable ? `No ${label} account can serve Fable right now` : `No ${label} account has budget left`;
     const detail = parts.length ? ` (${live.length} accounts: ${parts.join(', ')})` : ` (${live.length} accounts)`;
     const when = next ? ` Earliest reset in ${AccountPool.formatDuration(next.at - now)}: ${next.label}.` : '';
-    const hint = wantsFable && fableSpent ? ' Other models are still served: switch model or wait.' : '';
+    const hint = wantsFable && (fableSpent || noFable) ? ' Other models are still served: switch model or wait.' : '';
     return { reason: 'quota_exhausted', retryAfterMs: next ? next.at - now : null, message: `${what}${detail}.${when}${hint}` };
   }
 
@@ -319,12 +316,9 @@ export class AccountPool {
     const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a);
     const memberOpen = route?.mode === 'prefer' && this.accounts.some((a) => !outside(a) && this.available(a, excluded, wantsFable));
     // Session affinity is a cache-locality preference, not a claim on the
-    // account. Honour it while the account can take the request and while the
-    // request should be spending here: an Opus turn leaves an account still
-    // holding Fable budget only when a spare exists to take it — early in the
-    // week every account reserves, and refusing the pin then just scatters
-    // the session over the fleet for nothing.
-    if (pinned && this.available(pinned, excluded, wantsFable) && !this.divertsOff(pinned, wantsFable, excluded) && !(outside(pinned) && memberOpen)) { pinned.inflight++; this.remember(key, pinned.id); this.noteRoute(route, pinned); return pinned; }
+    // account. Honour it while the account can take the request (and a prefer
+    // route has no account of its own open).
+    if (pinned && this.available(pinned, excluded, wantsFable) && !(outside(pinned) && memberOpen)) { pinned.inflight++; this.remember(key, pinned.id); this.noteRoute(route, pinned); return pinned; }
     const selected = this.pick(excluded, wantsFable, route, this.availableNow, pinned?.id);
     // A pinned account that is only excluded for this request (a transient
     // failover) or at its concurrency cap is still the session's home: this
@@ -341,15 +335,11 @@ export class AccountPool {
   private pick(excluded: Set<string>, wantsFable: boolean, route: Route | null, judge: Judge, pinned?: string): RuntimeAccount | null {
     const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a) ? 1 : 0;
     const rank = this.balance === 'level' ? this.spread(wantsFable) : this.paced(wantsFable, pinned);
-    // An explicit priority orders accounts within the same reservation tier,
-    // never across it: a #1 account still holding Fable budget used to take
-    // every Opus and Haiku turn ahead of a spare whose Fable was already
-    // spent, burning the one budget only Fable turns can use.
-    const diverts = (a: RuntimeAccount) => this.divertsOff(a, wantsFable, excluded, judge) ? 1 : 0;
-    // A route the user wrote outranks the automatic Fable reservation.
+    // Inside a route: an explicit priority first (lower first, set before
+    // unset), then the balance. A Fable request has already left out accounts
+    // that cannot serve it; nothing here holds an account back for Fable.
     const ranked = (lastResort: boolean) => this.accounts.filter((a) => judge(a, excluded, wantsFable, lastResort)).sort((a, b) => {
       const routed = outside(a) - outside(b); if (routed) return routed;
-      const tier = diverts(a) - diverts(b); if (tier) return tier;
       if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
       return rank(a, b);
     });
@@ -398,12 +388,6 @@ export class AccountPool {
     while (this.affinity.size > this.maxSessions) { const oldest = this.affinity.keys().next().value; if (oldest === undefined) break; this.affinity.delete(oldest); }
   }
 
-  // Whether a non-Fable request should leave this account for one that does
-  // not reserve Fable — only when such an account can actually take it.
-  private divertsOff(account: RuntimeAccount, wantsFable: boolean, excluded: Set<string>, judge: Judge = this.availableNow): boolean {
-    return !wantsFable && this.reservesFable(account) && this.accounts.some((a) => a !== account && !this.reservesFable(a) && judge(a, excluded, false, false));
-  }
-
   // Whether an account is still a valid home for a session, judged without
   // this request's exclusions or the concurrency cap: both are momentary. So
   // is a network cooldown — one connection attempt failed, and the account is
@@ -413,10 +397,9 @@ export class AccountPool {
   // the next turn for nothing. Only a quota or forbidden cooldown evicts.
   private isHome(account: RuntimeAccount, wantsFable: boolean): boolean {
     if (account.cooldownReason === 'network') {
-      const still = account.enabled && !account.error && (account.usage === null || account.usage < this.threshold) && !(wantsFable && AccountPool.fableSpent(account, 1));
-      return still && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
+      return account.enabled && !account.error && (account.usage === null || account.usage < this.threshold) && !(wantsFable && !this.servesFable(account));
     }
-    return this.availableIgnoringConcurrency(account, NO_EXCLUSIONS, wantsFable) && !this.divertsOff(account, wantsFable, NO_EXCLUSIONS);
+    return this.availableIgnoringConcurrency(account, NO_EXCLUSIONS, wantsFable);
   }
 
   get pinnedSessions(): number { return this.affinity.size; }
@@ -430,34 +413,29 @@ export class AccountPool {
   // window, which the weekly figure never sees, so one account fills its
   // session window alone while seven sit at 0%.
   //
-  // So: keep the tier (non-Fable traffic still prefers a week with no Fable
-  // left to protect), compare load on the fuller of the weekly and session
-  // windows in 10% steps, and inside a step prefer the account with fewer
-  // requests in flight. Only then fall back to the exact ranking, so both the
+  // So: compare load on the fuller of the weekly and session windows in 10%
+  // steps, and inside a step prefer the account with fewer requests in flight. Only then fall back to the exact ranking, so both the
   // dashboard's order and the fleet-wide preference still hold.
-  private spread(wantsFable: boolean): (a: RuntimeAccount, b: RuntimeAccount) => number { return AccountPool.levelOrder(wantsFable, this.fableReserve); }
+  private spread(wantsFable: boolean): (a: RuntimeAccount, b: RuntimeAccount) => number { return AccountPool.levelOrder(wantsFable); }
 
   // spread() on its own, for anything that ranks without a pool: the
   // dashboard's 'level' order compares saved state through this same function.
-  static levelOrder(wantsFable: boolean, reserve: number): (a: Ranked, b: Ranked) => number {
-    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(reserve);
-    const tier = (a: Ranked) => (!wantsFable && reserve < 1 && AccountPool.fableSpent(a, reserve) ? 0 : 1);
+  static levelOrder(wantsFable: boolean): (a: Ranked, b: Ranked) => number {
+    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byGeneralHeadroom;
     const bucket = (a: Ranked) => { const load = AccountPool.loadUsage(a, wantsFable); return load === null ? Number.MAX_SAFE_INTEGER : Math.floor(load * 10); };
-    return (a, b) => tier(a) - tier(b) || bucket(a) - bucket(b) || a.inflight - b.inflight || exact(a, b);
+    return (a, b) => bucket(a) - bucket(b) || a.inflight - b.inflight || exact(a, b);
   }
 
-  // The 'pacing' order: the Fable tier as in spread(), then weekly progress
-  // (comparePacing). An account whose 5-hour window is at the switch
-  // threshold never gets here — routingUsage is the fuller of the two windows,
+  // The 'pacing' order: weekly progress (comparePacing). An account whose
+  // 5-hour window is at the switch threshold never gets here — routingUsage is the fuller of the two windows,
   // so eligible() has already set it aside — and being behind on the week
   // cannot pull a request onto an account about to refuse it.
   private paced(wantsFable: boolean, pinned?: string): (a: RuntimeAccount, b: RuntimeAccount) => number {
     const now = this.now();
-    const tier = (a: RuntimeAccount) => (!wantsFable && this.fableReserve < 1 && AccountPool.fableSpent(a, this.fableReserve) ? 0 : 1);
     // Accounts that tie on every pacing key (nothing measured, or windows with
     // no reset) fall back to the static ranking rather than config order.
-    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byNonFableHeadroom(this.fableReserve);
-    return (a, b) => tier(a) - tier(b) || comparePacing(a, b, wantsFable, now, pinned) || exact(a, b);
+    const exact = wantsFable ? AccountPool.byHeadroom : AccountPool.byGeneralHeadroom;
+    return (a, b) => comparePacing(a, b, wantsFable, now, pinned) || exact(a, b);
   }
 
   // How full the account is on whichever window will gate its next request:

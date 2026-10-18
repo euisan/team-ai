@@ -48,12 +48,6 @@ export interface TeamAIConfig {
   // cannot drift apart.
   warmup?: { enabled?: boolean };
   maxConcurrentPerAccount: number;
-  // At or above this share of the model-weekly (Fable) window, an account counts
-  // as spent for that model and becomes the preferred home for traffic that does
-  // not need it. Below it, the account is held back so its remaining Fable budget
-  // is not consumed by Opus/Sonnet requests that any account could serve.
-  // 1 disables the split and restores plain least-spent routing.
-  fableReserveThreshold?: number;
   // How accounts of equal priority are ordered: 'pacing' (default) puts the
   // account furthest behind a straight weekly line first; 'level' the one with
   // the emptiest windows, in 10% steps. See src/pacing.ts.

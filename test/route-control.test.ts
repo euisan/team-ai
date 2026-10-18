@@ -22,7 +22,7 @@ function pool(ids: string[], provider: Partial<Provider> = {}) {
   const full: Provider = { id: 'codex', label: 'Codex', upstreamBase: 'http://127.0.0.1:1', normalizePath: () => '/x', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c, buildHeaders: (h) => h, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }), ...provider };
   const stored = ids.map((id): StoredAccount => ({ id, provider: 'codex', label: `${id}@example.com`, enabled: true, priority: null, credentialId: `cred-${id}`, createdAt: '' }));
   const credentials: Record<string, OAuthCredential> = Object.fromEntries(ids.map((id) => [`cred-${id}`, { accessToken: `secret-${id}`, refreshToken: null, expiresAt: null, accountId: id }]));
-  const p = new AccountPool(full, stored, credentials, { version: 1, accounts: {} }, 0.98, 16, 0.8); p.log = () => {};
+  const p = new AccountPool(full, stored, credentials, { version: 1, accounts: {} }, 0.98, 16); p.log = () => {};
   return { p, get: (id: string) => p.accounts.find((a) => a.id === id)! };
 }
 
