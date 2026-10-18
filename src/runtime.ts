@@ -187,7 +187,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const runWarmup = async (): Promise<void> => {
       const swept = pools.reduce((total, pool) => total + pool.sweepExpired(), 0);
       const refreshed = (await Promise.all(pools.map((pool) => pool.refreshUsage(warmupIntervalMs / 2)))).reduce((a, b) => a + b.size, 0);
-      const measured = (await Promise.all(pools.map((pool) => pool.warmup(config.warmupStartWindows !== false).catch(() => 0)))).reduce((a, b) => a + b, 0);
+      // Window-start probes are real upstream requests. Run provider pools in
+      // sequence too, so Claude and Codex cannot open multiple accounts at
+      // once when the same warm-up tick sees both fleets.
+      let measured = 0;
+      for (const pool of pools) measured += await pool.warmup(config.warmupStartWindows !== false).catch(() => 0);
       if (measured) persist(`Warm-up measured ${measured} account(s)${swept ? ` after ${swept} window reset(s)` : ''}`);
       else if (swept) persist(`${swept} quota window(s) reset`);
       else if (refreshed) persist();

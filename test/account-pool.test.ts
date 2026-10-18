@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AccountPool, isWindowNotStarted, START_WINDOW_TOLERANCE_MS } from '../src/account-pool.js';
+import { claudeProvider, codexProvider } from '../src/providers.js';
 import type { OAuthCredential, PersistedState, Provider, StoredAccount } from '../src/types.js';
 
 const provider: Provider = {
@@ -484,6 +485,11 @@ test('window-start detection uses provider spans and a small clock tolerance', (
   assert.equal(isWindowNotStarted('codex', 'secondary', { usage: 0, resetsAt: measured + 10_080 * 60_000 + START_WINDOW_TOLERANCE_MS }, measured, measured + 1), true);
   assert.equal(isWindowNotStarted('claude', '7d', { usage: 0, resetsAt: measured + 10_080 * 60_000 + START_WINDOW_TOLERANCE_MS + 1 }, measured, measured + 1), false);
   assert.equal(isWindowNotStarted('claude', '5h', { usage: 0.01, resetsAt: measured + 300 * 60_000 }, measured, measured + 1), false);
+});
+
+test('provider window-start probes use the supported low-cost model ids', () => {
+  assert.equal(claudeProvider.startWindowModel, 'claude-haiku-4-5-20251001');
+  assert.equal(codexProvider.startWindowModel, 'gpt-6-luna');
 });
 
 test('warmup starts unopened windows once per account, sequentially, and honors the switch', async () => {

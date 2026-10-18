@@ -141,7 +141,7 @@ export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsa
 
 export const claudeProvider: Provider = {
   id: 'claude', label: 'Claude', upstreamBase: 'https://api.anthropic.com', fableModel: 'claude-fable-5-1',
-  startWindowModel: 'claude-haiku-5-1',
+  startWindowModel: 'claude-haiku-4-5-20251001',
   normalizePath(path) { return path.startsWith('/v1/') || path.startsWith('/api/') ? path : null; },
   buildHeaders(incoming, account) {
     const headers = outboundHeaders(incoming);
