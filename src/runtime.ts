@@ -182,7 +182,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // There is no fleet polling timer. The old periodic measurement remains
   // available only through `R`/the control endpoint.
   const codexPool = pools.find((pool) => pool.provider.id === 'codex');
-  const warmer = background && codexPool && config.warmup?.enabled !== false && config.warmupIntervalMs !== 0
+  const warmer = background && codexPool && config.warmup?.enabled !== false
     ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message) })
     : null;
   if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }

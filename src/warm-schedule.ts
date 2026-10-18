@@ -5,6 +5,12 @@ export const WARM_DELAY_AFTER_RESET_MS = 10_000;
 export const WARM_RETRY_MS = 10 * 60_000;
 export const MAX_TIMER_MS = 2 ** 31 - 1;
 const DEFAULT_SWITCH_THRESHOLD = 0.98;
+const CODEX_SESSION_WINDOW_MS = 300 * 60_000;
+// Usage responses arrive after the request was sent and the provider clocks
+// are not perfectly aligned. Match the same five-minute slack used by the
+// account-pool unopened-window detector when deciding whether a zero reading
+// is a genuinely new window or a running one rounded down to 0.00%.
+const WINDOW_START_TOLERANCE_MS = 5 * 60_000;
 
 type WarmAccount = {
   enabled?: boolean;
@@ -37,7 +43,18 @@ function quotaOf(account: WarmAccount): Record<string, unknown> {
 }
 
 function windowRunning(quota: Record<string, unknown>, now: number): boolean {
-  return typeof quota.unified5h === 'number' && quota.unified5h > 0 && typeof quota.unified5hReset === 'number' && quota.unified5hReset > now;
+  if (typeof quota.unified5hReset !== 'number' || quota.unified5hReset <= now) return false;
+  if (typeof quota.unified5h !== 'number') return false;
+  if (quota.unified5h > 0) return true;
+  if (quota.unified5h !== 0) return false;
+  // A provider can round a small amount of usage to 0.00% while retaining the
+  // reset time of the already-open window. The request timestamp lets us
+  // recognize the exact unopened shape (reset = request + five hours); when
+  // it is absent, a reset materially short of five hours is enough evidence
+  // that the window is already running.
+  const usageAt = typeof quota.codexUsageRequestedAt === 'number' ? quota.codexUsageRequestedAt : typeof quota.codexUsageAt === 'number' ? quota.codexUsageAt : null;
+  if (usageAt !== null) return Math.abs(quota.unified5hReset - usageAt - CODEX_SESSION_WINDOW_MS) > WINDOW_START_TOLERANCE_MS;
+  return quota.unified5hReset - now < CODEX_SESSION_WINDOW_MS - WINDOW_START_TOLERANCE_MS;
 }
 function weeklyExhausted(quota: Record<string, unknown>, now: number, threshold: number): boolean {
   return typeof quota.unified7d === 'number' && quota.unified7d >= threshold && !(typeof quota.unified7dReset === 'number' && quota.unified7dReset <= now);

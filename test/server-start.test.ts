@@ -28,7 +28,7 @@ async function home(edit: (config: TeamAIConfig) => void = () => {}) {
   const previous = process.env.TEAMAI_HOME; process.env.TEAMAI_HOME = root;
   const config = defaultConfig();
   config.proxy = { ...config.proxy, claudePort: await freePort(), codexPort: await freePort(), controlPort: await freePort(), clientToken: TOKEN };
-  config.warmupIntervalMs = 0; config.externalUsage = { enabled: false };
+  config.warmup = { enabled: false }; config.externalUsage = { enabled: false };
   config.accounts = [{ id: 'x', provider: 'codex', label: 'x@example.com', enabled: true, priority: null, credentialId: 'codex:x', createdAt: '' }];
   edit(config);
   await writeFile(join(root, 'config.json'), JSON.stringify(config));

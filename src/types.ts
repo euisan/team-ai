@@ -47,11 +47,6 @@ export interface TeamAIConfig {
   // timers and requests. Kept as one setting so measurement and window starts
   // cannot drift apart.
   warmup?: { enabled?: boolean };
-  /** @deprecated accepted while older config files are migrated */
-  warmupIntervalMs?: number;
-  // Send one tiny request to accounts whose quota windows have not started yet.
-  // Defaults to true; false keeps the measurement-only warm-up behavior.
-  warmupStartWindows?: boolean;
   maxConcurrentPerAccount: number;
   // At or above this share of the model-weekly (Fable) window, an account counts
   // as spent for that model and becomes the preferred home for traffic that does
