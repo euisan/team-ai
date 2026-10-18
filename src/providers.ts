@@ -300,9 +300,16 @@ export const codexProvider: Provider = {
   startWindowModel: 'gpt-6-luna',
   normalizePath(path) {
     const pathname = new URL(path, 'http://localhost').pathname;
+    if (/^\/tc-acct\/[^/]+\/codex(?:\/responses)?$/.test(pathname)) return '/codex/responses';
     if (['/responses', '/v1/responses', '/codex/responses', '/v1/codex/responses'].includes(pathname)) return '/codex/responses';
     if (['/models', '/v1/models'].includes(pathname)) return '/models';
     return null;
+  },
+  pinnedAccount(path) {
+    const pathname = new URL(path, 'http://localhost').pathname;
+    const match = /^\/tc-acct\/([^/]+)\/codex(?:\/responses)?$/.exec(pathname);
+    if (!match) return null;
+    try { return decodeURIComponent(match[1]!); } catch { return null; }
   },
   buildHeaders(incoming, account) {
     const headers = outboundHeaders(incoming);

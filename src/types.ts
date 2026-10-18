@@ -43,6 +43,11 @@ export interface TeamAIConfig {
     bodyTimeoutMs?: number;
   };
   switchThreshold: number;
+  // Codex keep-warm. The warmer is event-driven; disabling it stops all
+  // timers and requests. Kept as one setting so measurement and window starts
+  // cannot drift apart.
+  warmup?: { enabled?: boolean };
+  /** @deprecated accepted while older config files are migrated */
   warmupIntervalMs?: number;
   // Send one tiny request to accounts whose quota windows have not started yet.
   // Defaults to true; false keeps the measurement-only warm-up behavior.
@@ -231,8 +236,18 @@ export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   windows: Record<string, QuotaWindow>;
   profile: SubscriptionProfile | null;
   measuredAt: number | null;
+  // When the usage request was sent. A response that lands late must not be
+  // mistaken for a fresh post-warm reading.
+  usageRequestedAt?: number | null;
   warmupStartWindows?: Record<string, number>;
   inflight: number;
+  // Keep-warm state is deliberately process-local; restored quota is never
+  // enough to trigger a warm until this process has measured it.
+  warmFailures?: number;
+  warmRetryAt?: number | null;
+  warmGaveUp?: boolean;
+  warmedAt?: number;
+  warmSignature?: string;
   // Memory only: the redemption running for this account, shared by every
   // caller so a ticket is never spent twice concurrently; and the last list.
   resetCreditPromise?: Promise<import('./reset-credits.js').RedeemResult> | null;
@@ -254,6 +269,8 @@ export interface Provider {
   label: string;
   upstreamBase: string;
   normalizePath(path: string): string | null;
+  // Optional fixed-account path used only by the local warmer.
+  pinnedAccount?(path: string): string | null;
   buildHeaders(incoming: Headers, account: RuntimeAccount): Headers;
   rewriteBody(body: Buffer, account: RuntimeAccount): Buffer;
   readQuota(headers: Headers, body?: string): QuotaSnapshot | null;

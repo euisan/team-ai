@@ -14,6 +14,7 @@ import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
+import { Warmer } from './warmer.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
 const DRAIN_MS = 5_000;
@@ -176,28 +177,15 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   }
 
   const timers: NodeJS.Timeout[] = [];
-  // Periodic warm-up. First every account whose figures are older than half a
-  // tick is re-read from the usage endpoint, which spends no quota — so usage
-  // run up outside this proxy shows without pressing R, and no reading is ever
-  // much older than one tick. Accounts live traffic keeps fresh are skipped.
-  // Then anything still unmeasured (the endpoint failed, or the provider has
-  // none) is probed, which does spend quota and so is kept to that remainder.
-  const warmupIntervalMs = config.warmupIntervalMs ?? 5 * 60_000;
-  if (background && warmupIntervalMs > 0) {
-    const runWarmup = async (): Promise<void> => {
-      const swept = pools.reduce((total, pool) => total + pool.sweepExpired(), 0);
-      const refreshed = (await Promise.all(pools.map((pool) => pool.refreshUsage(warmupIntervalMs / 2)))).reduce((a, b) => a + b.size, 0);
-      // Window-start probes are real upstream requests. Run provider pools in
-      // sequence too, so Claude and Codex cannot open multiple accounts at
-      // once when the same warm-up tick sees both fleets.
-      let measured = 0;
-      for (const pool of pools) measured += await pool.warmup(config.warmupStartWindows !== false).catch(() => 0);
-      if (measured) persist(`Warm-up measured ${measured} account(s)${swept ? ` after ${swept} window reset(s)` : ''}`);
-      else if (swept) persist(`${swept} quota window(s) reset`);
-      else if (refreshed) persist();
-    };
-    timers.push(setInterval(() => void runWarmup(), warmupIntervalMs), setTimeout(() => void runWarmup(), 5_000));
-  }
+  // Codex keep-warm is event-driven: a reset arms one check at reset+10s,
+  // which refreshes usage and then sends one real `codex exec` to that account.
+  // There is no fleet polling timer. The old periodic measurement remains
+  // available only through `R`/the control endpoint.
+  const codexPool = pools.find((pool) => pool.provider.id === 'codex');
+  const warmer = background && codexPool && config.warmup?.enabled !== false && config.warmupIntervalMs !== 0
+    ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message) })
+    : null;
+  if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
 
   // The next-account arrows change quietly — a cooldown runs out, a window
   // rolls over — with no event to trigger a save. Re-derive them every 15s
@@ -231,6 +219,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // moment, then cut what is left: the cut client retries, the rest reconnect
   // to the new process seconds later.
   const stop = async (): Promise<void> => {
+    warmer?.stop();
     for (const timer of timers) clearTimeout(timer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
