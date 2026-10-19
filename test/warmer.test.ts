@@ -133,3 +133,21 @@ test('a warm that fails is traced with its reason', async () => {
   assert.ok(lines.includes('codex #1: warm failed: exit 1'), lines.join('\n'));
   warmer.stop();
 });
+
+test('a backoff from a window that opened but reads 0% is lifted when that window resets', async () => {
+  // Each warm opens the window but exits non-zero. If an open 0% window signed
+  // as 'idle', the reset would change nothing: the first failure's count would
+  // carry over, the second warm would give up, and no window would be warmed again.
+  const start = Date.now(); const clock = fakeClock(start); const codex = fakeCodex(clock); const a = account('opened-zero', start - 60_000); let warms = 0;
+  const warmer: Warmer = new Warmer({ accounts: [a] }, { port: 3457, nowFn: clock.now, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout, refreshUsage: async (x) => { codex.read(x as typeof a); warmer.onAccountChanged(x); }, spawnFn: async () => { warms++; codex.warm(); return 1; } });
+  warmer.start(); await wait();
+  assert.equal(warms, 1); assert.equal(a.warmFailures, 1, 'the warm counted as a failure');
+  await clock.advance(30 * 60_000);
+  assert.equal(a.warmFailures, 0, 'reading the opened window (0%) changes the signature and clears the failure');
+  await clock.advance(5 * 60 * 60_000);
+  assert.equal(warms, 2, 'the empty window after the reset is warmed');
+  await clock.advance(5 * 60 * 60_000);
+  assert.equal(warms, 3, 'and the next one too: the failures never add up to a give-up');
+  assert.equal(a.warmGaveUp, false);
+  warmer.stop();
+});
