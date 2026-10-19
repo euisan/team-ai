@@ -10,7 +10,7 @@ const CODEX_SESSION_WINDOW_MS = 300 * 60_000;
 // are not perfectly aligned. Match the same five-minute slack used by the
 // account-pool unopened-window detector when deciding whether a zero reading
 // is a genuinely new window or a running one rounded down to 0.00%.
-const WINDOW_START_TOLERANCE_MS = 5 * 60_000;
+export const WINDOW_START_TOLERANCE_MS = 5 * 60_000;
 
 type WarmAccount = {
   enabled?: boolean;
@@ -41,6 +41,9 @@ function quotaOf(account: WarmAccount): Record<string, unknown> {
     codexUsageRequestedAt: account.usageRequestedAt,
   };
 }
+
+/** Whether the 5-hour window is open, including one still reading 0%. */
+export function windowOpen(account: WarmAccount, now: number): boolean { return windowRunning(quotaOf(account), now); }
 
 function windowRunning(quota: Record<string, unknown>, now: number): boolean {
   if (typeof quota.unified5hReset !== 'number' || quota.unified5hReset <= now) return false;

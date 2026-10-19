@@ -421,3 +421,24 @@ test('a 403 from every account refuses the request without benching the fleet; a
     assert.equal(cooled('a'), true); assert.equal(cooled('b'), false);
   } finally { proxy.close(); upstream.close(); }
 });
+
+test('a pinned account path that names no account is refused, not served by another account', async () => {
+  let reached = 0;
+  const upstream = createServer((req, res) => { reached++; req.resume(); res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"type":"response.completed"}\n\n'); });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = { ...codexProvider, upstreamBase: `http://127.0.0.1:${up.port}`, readQuota: () => null, refresh: async (c) => c };
+  const stored = (id: string): StoredAccount => ({ id, provider: 'codex', label: id, enabled: true, priority: null, credentialId: id, createdAt: '' });
+  const credential = (id: string): OAuthCredential => ({ accessToken: `secret-${id}`, refreshToken: null, expiresAt: null, accountId: id });
+  const pool = new AccountPool(provider, [stored('ws:user-a'), stored('ws:user-b')], { 'ws:user-a': credential('ws:user-a'), 'ws:user-b': credential('ws:user-b') }, { version: 1, accounts: {} });
+  const events: string[] = [];
+  const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); }); await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const address = proxy.address(); assert(address && typeof address !== 'string');
+  try {
+    const post = (id: string) => fetch(`http://127.0.0.1:${address.port}/tc-acct/${encodeURIComponent(id)}/codex/responses`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{"model":"gpt-6-luna"}' });
+    const unknown = await post('ws'); await unknown.text();
+    assert.equal(unknown.status, 404);
+    assert.equal(reached, 0, 'the request never reached upstream on another account');
+    const known = await post('ws:user-b'); await known.text();
+    assert.equal(known.status, 200);
+    assert.equal(reached, 1);
+  } finally { proxy.close(); upstream.close(); }
+});
