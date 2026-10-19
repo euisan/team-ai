@@ -75,3 +75,61 @@ test('warm command pins only the requested account and carries no credential', (
   assert.equal(args.includes('Bearer'), false);
 });
 
+
+// A fake Codex upstream for one account: a warm opens the 5-hour window at
+// that moment, and a usage read reports the open window's fixed reset, or the
+// unopened shape (reset = read + five hours) when none is running.
+function fakeCodex(clock: { now(): number }, opens = true) {
+  const SPAN = 5 * 60 * 60_000; let openedAt: number | null = null;
+  const open = (): boolean => openedAt !== null && clock.now() < openedAt + SPAN;
+  return {
+    warm(): void { if (opens && !open()) openedAt = clock.now(); },
+    read(a: ReturnType<typeof account>): void { const now = clock.now(); a.usageRequestedAt = now; a.measuredAt = now; a.windows!.primary = { usage: 0, resetsAt: open() ? openedAt! + SPAN : now + SPAN }; },
+  };
+}
+
+test('a warmed-only account is warmed again after its window resets, never while it is open', async () => {
+  const start = Date.now(); const clock = fakeClock(start); const codex = fakeCodex(clock); const a = account('cycle', start - 60_000); let warms = 0;
+  const warmer: Warmer = new Warmer({ accounts: [a] }, { port: 3457, nowFn: clock.now, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout, refreshUsage: async (x) => { codex.read(x as typeof a); warmer.onAccountChanged(x); }, spawnFn: async () => { warms++; codex.warm(); return 0; } });
+  warmer.start(); await wait();
+  assert.equal(warms, 1, 'the empty window measured at start is warmed');
+  await clock.advance(5 * 60 * 60_000 - 60_000);
+  assert.equal(warms, 1, 'an open window, even one still reading 0%, is not warmed again');
+  await clock.advance(2 * 60_000);
+  assert.equal(warms, 2, 'the empty window after the reset is warmed');
+  await clock.advance(5 * 60 * 60_000);
+  assert.equal(warms, 3, 'and so is every window after that');
+  warmer.stop();
+});
+
+test('a warm that does not open the window is retried once, then the warmer stops polling', async () => {
+  const start = Date.now(); const clock = fakeClock(start); const codex = fakeCodex(clock, false); const a = account('dud', start - 60_000); let warms = 0; let reads = 0;
+  const warmer: Warmer = new Warmer({ accounts: [a] }, { port: 3457, nowFn: clock.now, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout, refreshUsage: async (x) => { reads++; codex.read(x as typeof a); warmer.onAccountChanged(x); }, spawnFn: async () => { warms++; return 0; } });
+  warmer.start(); await wait();
+  await clock.advance(24 * 60 * 60_000);
+  assert.equal(warms, 2);
+  assert.equal(clock.pending(), 0, 'no timer is left re-reading usage forever');
+  assert.ok(reads <= 4, `usage was read ${reads} times`);
+  warmer.stop();
+});
+
+test('keep-warm decisions are traced once per change, without account labels', async () => {
+  const start = Date.now(); const clock = fakeClock(start); const codex = fakeCodex(clock); const a = account('traced', start - 60_000); const lines: string[] = [];
+  const warmer: Warmer = new Warmer({ accounts: [a] }, { port: 3457, nowFn: clock.now, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout, trace: (line) => lines.push(line), refreshUsage: async (x) => { codex.read(x as typeof a); warmer.onAccountChanged(x); }, spawnFn: async () => { codex.warm(); return 0; } });
+  warmer.start(); await wait(); await clock.advance(30 * 60_000);
+  warmer.onAccountChanged(a); warmer.onAccountChanged(a);
+  assert.ok(lines.some((line) => /^codex #1: awaiting-usage/.test(line)), lines.join('\n'));
+  assert.ok(lines.some((line) => /^codex #1: warm sent$/.test(line)), lines.join('\n'));
+  assert.ok(lines.some((line) => /^codex #1: warm ok$/.test(line)), lines.join('\n'));
+  assert.equal(lines.filter((line) => /window-running/.test(line)).length, 1, lines.join('\n'));
+  assert.ok(lines.every((line) => !line.includes('account-traced') && !line.includes('traced')), 'no label or id is traced');
+  warmer.stop();
+});
+
+test('a warm that fails is traced with its reason', async () => {
+  const a = account('broken', Date.now() + 100); const lines: string[] = [];
+  const warmer = new Warmer({ accounts: [a] }, { port: 3457, trace: (line) => lines.push(line), spawnFn: async () => 1 });
+  warmer.start(); await wait();
+  assert.ok(lines.includes('codex #1: warm failed: exit 1'), lines.join('\n'));
+  warmer.stop();
+});

@@ -211,6 +211,11 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       const pinnedAccount = pool.provider.pinnedAccount?.(rawPath) || null;
       const path = pool.provider.normalizePath(rawPath);
       if (!path) return json(res, 404, { error: 'Unsupported proxy path' });
+      // A pinned path names one account and means only that one. An id that
+      // matches none (a workspace id without its `:user-…` part, an account
+      // since removed) used to fall through to ordinary selection, so a warm
+      // meant for one account was spent on whichever one ranked first.
+      if (pinnedAccount && !pool.accounts.some((candidate) => candidate.id === pinnedAccount)) return json(res, 404, { error: 'Unknown pinned account' });
       const id = String(++requestCounter);
       const begin = (): void => safely(() => activity.start({ id, provider: pool.provider.id, providerLabel: pool.provider.label, method: req.method || 'GET', path, account: null, startedAt: Date.now() }));
       // Admission control: reject before buffering a body. localhost is trusted,
@@ -301,8 +306,8 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   while (!res.destroyed) {
     const forced: RuntimeAccount | null = retryOn; retryOn = null;
     const pinned = pinnedAccount ? pool.accounts.find((candidate) => candidate.id === pinnedAccount) || null : null;
-    const account: RuntimeAccount | null = pinned
-      ? (excluded.has(pinned.id) ? null : (pool.claim(pinned, excluded, wantsFable) ? pinned : null))
+    const account: RuntimeAccount | null = pinnedAccount
+      ? (!pinned || excluded.has(pinned.id) ? null : (pool.claim(pinned, excluded, wantsFable) ? pinned : null))
       : (forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable, route));
     if (!account) {
       // Exhausting this request's candidates does not mean exhausting quota.

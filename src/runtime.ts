@@ -180,10 +180,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // Codex keep-warm is event-driven: a reset arms one check at reset+10s,
   // which refreshes usage and then sends one real `codex exec` to that account.
   // There is no fleet polling timer. The old periodic measurement remains
-  // available only through `R`/the control endpoint.
+  // available only through `R`/the control endpoint. Every decision change and
+  // warm outcome also goes to stdout, which an on-demand start writes to
+  // server-start.log: the dashboard's event list rolls over in hours, and a
+  // warmer that silently stopped warming left no trace anywhere (2026-10-19).
   const codexPool = pools.find((pool) => pool.provider.id === 'codex');
   const warmer = background && codexPool && config.warmup?.enabled !== false
-    ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message) })
+    ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
     : null;
   if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
 
