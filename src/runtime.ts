@@ -17,6 +17,7 @@ import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
+import { UsageRefresher, type UsageRefreshOptions } from './usage-refresh.js';
 import { Warmer } from './warmer.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
@@ -39,7 +40,7 @@ export function legacyPorts(config: TeamAIConfig, id: ProviderId): number[] {
 export interface RunningServer { stop(): Promise<void> }
 // background: false leaves out the timers that reach upstream (warm-up, usage,
 // profile and token refreshes, other agents' usage) — for tests.
-export interface StartOptions { background?: boolean }
+export interface StartOptions { background?: boolean; usageRefresh?: boolean | UsageRefreshOptions }
 
 export async function runServer(): Promise<void> {
   const server = await startServer();
@@ -149,6 +150,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // Account changes saved by the dashboard or the account commands, applied in
   // place (config-reload.ts); assigned once the warmer exists, below.
   let reloaded: (result: ReloadResult) => void = () => {};
+  let usageRefresher: UsageRefresher | null = null;
   const reload = configReloadHandler(pools, config, { listen: bindPool, applied: (result) => reloaded(result) });
   try {
     for (const pool of pools) if (pool.accounts.length) await bindPool(pool);
@@ -177,6 +179,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       // seconds and must not hold up the account re-measure.
       void readExternal(true);
       const results = await Promise.all(pools.filter((p) => p.accounts.length).map((p) => p.probeAll()));
+      usageRefresher?.reconcile();
       const total = results.reduce((acc, r) => ({ targets: acc.targets + r.targets, measured: acc.measured + r.measured }), { targets: 0, measured: 0 });
       const ready = total.measured > 0 || pools.some((p) => p.hasProbe());
       if (total.targets) persist(`Quota re-measure: ${total.measured}/${total.targets} account(s)`);
@@ -193,10 +196,17 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   }
 
   const timers: NodeJS.Timeout[] = [];
+  // Periodic zero-cost usage refresh for all enabled Claude and Codex accounts:
+  // idle or lower-priority accounts that receive no proxied traffic still keep
+  // their 5h/7d windows and reset timestamps fresh on the dashboard.
+  const usageRefreshOpts = typeof options.usageRefresh === 'object' ? options.usageRefresh : {};
+  const enableUsageRefresh = options.usageRefresh !== undefined ? Boolean(options.usageRefresh) : background;
+  usageRefresher = enableUsageRefresh
+    ? new UsageRefresher(pools, { ...usageRefreshOpts, onUpdated: (account, pool) => { usageRefreshOpts.onUpdated?.(account, pool); persist(); } })
+    : null;
   // Codex keep-warm is event-driven: a reset arms one check at reset+10s,
   // which refreshes usage and then sends one real `codex exec` to that account.
-  // There is no fleet polling timer. The old periodic measurement remains
-  // available only through `R`/the control endpoint. Every decision change and
+  // Every decision change and
   // warm outcome also goes to stdout, which an on-demand start writes to
   // server-start.log: the dashboard's event list rolls over in hours, and a
   // warmer that silently stopped warming left no trace anywhere (2026-10-19).
@@ -205,6 +215,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
     : null;
   if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
+  usageRefresher?.start();
   reloaded = (result) => {
     const line = (['claude', 'codex'] as const).map((id) => { const c = result.accounts[id]; return c ? `${id} +${c.added} -${c.removed}${c.retired ? ` (${c.retired} finishing)` : ''}` : ''; }).filter(Boolean).join(', ');
     persist(`Config reloaded: ${line}; routes claude ${result.routes.claude ?? 0}, codex ${result.routes.codex ?? 0}`);
@@ -212,6 +223,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     for (const warning of result.warnings) persist(warning);
     // Keep-warm re-judges every Codex account: one switched on or off, or new.
     if (warmer && codexPool) for (const account of codexPool.accounts) warmer.onAccountChanged(account);
+    usageRefresher?.reconcile();
     // A new account has no profile yet; fill it so its plan shows right away.
     if (background && Object.values(result.accounts).some((c) => c.added)) void Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0))).then((n) => { if (n.some(Boolean)) persist(); });
   };
@@ -248,6 +260,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // moment, then cut what is left: the cut client retries, the rest reconnect
   // to the new process seconds later.
   const stop = async (): Promise<void> => {
+    usageRefresher?.stop();
     warmer?.stop();
     for (const timer of timers) clearTimeout(timer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));

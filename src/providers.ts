@@ -281,16 +281,16 @@ export const claudeProvider: Provider = {
     headers['user-agent'] = tooOld ? agent.replace(/claude-cli\/[\d.]+/, 'claude-cli/2.1.260') : agent;
     const payload: Record<string, unknown> = { model: template.model, max_tokens: 1, messages: [{ role: 'user', content: 'x' }] };
     if (template.system) payload.system = template.system;
-    return { url: `https://api.anthropic.com${template.path}${template.query}`, headers, body: JSON.stringify(payload) };
+    return { url: `${this.upstreamBase}${template.path}${template.query}`, headers, body: JSON.stringify(payload) };
   },
   async fetchProfile(credential) {
-    const response = await fetch('https://api.anthropic.com/api/oauth/profile', { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(`${this.upstreamBase}/api/oauth/profile`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Claude profile failed (${response.status})`);
     const data = await response.json() as { account?: { has_claude_max?: boolean; has_claude_pro?: boolean }; organization?: { subscription_status?: string; subscription_created_at?: string; rate_limit_tier?: string; organization_type?: string } };
     return { status: data.organization?.subscription_status ?? null, createdAt: data.organization?.subscription_created_at ?? null, rateLimitTier: data.organization?.rate_limit_tier ?? null, orgType: data.organization?.organization_type ?? null, hasClaudeMax: data.account?.has_claude_max ?? null, hasClaudePro: data.account?.has_claude_pro ?? null, fetchedAt: Date.now() };
   },
   async fetchUsage(credential) {
-    const response = await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15_000) });
+    const response = await fetch(`${this.upstreamBase}/api/oauth/usage`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
     return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
   },
