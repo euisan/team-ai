@@ -40,6 +40,7 @@ export class AccountPool {
   private warmupTries = new Map<string, number>();
   readonly maxWarmupTries = 3;
   private refreshes = new Map<string, Promise<void>>();
+  private usageRefreshes = new Map<string, Promise<boolean>>();
   private sweepInFlight = false;
   private usageRead: Promise<unknown> | null = null;
   // Codex reset credits. The server fills these in: the settings from config,
@@ -463,7 +464,7 @@ export class AccountPool {
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
   }
   private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot, source: 'headers' | 'usage' = 'headers'): void {
-    const now = Date.now();
+    const now = this.now();
     this.applyCreditCount(account, quota, now);
     // Shortly after a reset, a usage read may still describe the windows as
     // they were before it: let it lower usage, never raise it.
@@ -520,7 +521,7 @@ export class AccountPool {
   fail(account: RuntimeAccount, message: string): void { account.error = message; }
 
   async refresh(account: RuntimeAccount, force = false): Promise<void> {
-    if (!force && account.credential.expiresAt && account.credential.expiresAt > Date.now() + 5 * 60_000) return;
+    if (!force && account.credential.expiresAt && account.credential.expiresAt > this.now() + 5 * 60_000) return;
     const existing = this.refreshes.get(account.id);
     if (existing) return existing;
     const promise = this.provider.refresh(account.credential).then((next) => { account.credential = next; account.error = null; }).finally(() => this.refreshes.delete(account.id));
@@ -571,7 +572,7 @@ export class AccountPool {
   // already reset, which is what makes an idle proxy re-measure after a reset
   // instead of showing last week's figures forever.
   sweepExpired(): number {
-    const now = Date.now();
+    const now = this.now();
     let swept = 0;
     for (const account of this.accounts) {
       let changed = false;
@@ -600,22 +601,22 @@ export class AccountPool {
     if (!this.provider.fetchUsage) return measured;
     while (this.usageRead) await this.usageRead;
     const read = (async () => {
-      const cutoff = Date.now() - maxAgeMs;
+      const cutoff = this.now() - maxAgeMs;
       // With reset credits on, an account whose ticket count has gone stale is
       // read too: busy accounts stay fresh through headers, which never carry
       // the count, and would otherwise never have one.
       const countsDue = (a: RuntimeAccount) => this.resetCredits.enabled && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff;
-      const due = this.accounts.filter((a) => !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a)));
+      const due = this.accounts.filter((a) => a.enabled && !a.retired && !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a)));
       await Promise.all(due.map(async (account) => {
         try {
           await this.refresh(account);
-          const started = Date.now();
+          const started = this.now();
           account.usageRequestedAt = started;
           const quota = await this.provider.fetchUsage!(account.credential);
           // A proxied response may have landed while this read was in flight;
           // its headers are newer than this snapshot, so they are kept.
           if (quota && (account.measuredAt ?? 0) < started) { this.applyQuota(account, quota, 'usage'); measured.add(account.id); }
-          else if (quota) { this.applyCreditCount(account, quota, Date.now()); measured.add(account.id); }
+          else if (quota) { this.applyCreditCount(account, quota, this.now()); measured.add(account.id); }
         } catch { /* a failed read leaves the account to the probe fallback */ }
       }));
     })();
@@ -624,16 +625,25 @@ export class AccountPool {
     return measured;
   }
 
-  /** Refresh one account immediately; used by the warmer at reset+10s. */
+  /** Refresh one account immediately; used by the warmer at reset+10s and by the periodic usage refresher. */
   async refreshUsageAccount(account: RuntimeAccount): Promise<boolean> {
-    if (!this.provider.fetchUsage || !this.accounts.includes(account) || account.error) return false;
-    await this.refresh(account);
-    const requestedAt = Date.now();
-    account.usageRequestedAt = requestedAt;
-    const quota = await this.provider.fetchUsage(account.credential);
-    if (!quota) return false;
-    this.applyQuota(account, quota, 'usage');
-    return true;
+    if (!this.provider.fetchUsage || !this.accounts.includes(account) || !account.enabled || account.retired) return false;
+    if (account.error && !account.credential.refreshToken) return false;
+    const existing = this.usageRefreshes.get(account.credentialId);
+    if (existing) return existing;
+    const run = (async () => {
+      await this.refresh(account, account.error !== null);
+      if (account.error || !account.enabled || account.retired || !this.accounts.includes(account)) return false;
+      const requestedAt = this.now();
+      account.usageRequestedAt = requestedAt;
+      const quota = await this.provider.fetchUsage!(account.credential);
+      if (!quota || !account.enabled || account.retired || !this.accounts.includes(account)) return false;
+      if ((account.measuredAt ?? 0) <= requestedAt) this.applyQuota(account, quota, 'usage');
+      else this.applyCreditCount(account, quota, this.now());
+      return true;
+    })().finally(() => this.usageRefreshes.delete(account.credentialId));
+    this.usageRefreshes.set(account.credentialId, run);
+    return run;
   }
 
   // Accounts worth a background probe: idle, not errored, and still without a

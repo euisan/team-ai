@@ -240,6 +240,7 @@ export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   warmRetryAt?: number | null;
   warmGaveUp?: boolean;
   warmedAt?: number;
+  warmConfirmAt?: number | null;
   warmSignature?: string;
   // Memory only: the redemption running for this account, shared by every
   // caller so a ticket is never spent twice concurrently; and the last list.
