@@ -1,5 +1,7 @@
-import { writeFile, readFile, rm, mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { spawn } from 'node:child_process';
+import { writeFile, readFile, rm, mkdir, open } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog } from './activity.js';
@@ -7,12 +9,13 @@ import { BodyBudget, bodyTimeoutMs, createProxy, maxBodyBytes, maxInflightBodyBy
 import { handleResetCreditControl } from './reset-credit-control.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { handleRouteControl } from './route-control.js';
+import { configReloadHandler, type ReloadResult } from './config-reload.js';
 import { parseBalance } from './pacing.js';
 import { parseRoutes } from './routes.js';
 import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
-import { defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
+import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 import { Warmer } from './warmer.js';
 
@@ -80,8 +83,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const snapshot = (): PersistedState => { const next: PersistedState = { version: 1, accounts: {}, events, active: closing ? [] : activity.snapshot(), serverPid: process.pid, external: external.snapshot() }; pools.forEach((p) => p.exportState(next)); return next; };
   // Every save first adopts any credential the TUI wrote since (a re-login),
   // then writes memory back — so a fresh token is picked up within a save
-  // interval instead of being overwritten by the stale one it replaced.
-  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
+  // interval instead of being overwritten by the stale one it replaced. Only
+  // tokens still on disk are written back: one the dashboard deleted along
+  // with its account (and a retired account's) is not brought back.
+  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) if (!a.retired && updated[a.credentialId]) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
   // A request starting or picking an account changes only what the dashboard
   // shows, so it rewrites state.json alone; credentials wait for a real save.
   const persistStateOnly = async (): Promise<void> => { await saveState(snapshot()); };
@@ -100,50 +105,60 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const servers: Server[] = [];
   const readExternal = async (force = false): Promise<void> => { try { if (await external.tick(force)) persistActivity(); } catch { /* display only */ } };
   const listen = (server: Server, port: number): Promise<void> => new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
-  try {
-    for (const pool of pools) {
-      if (!pool.accounts.length) continue;
-      const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
-      const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body); servers.push(server);
-      await listen(server, port);
-      // Past startup, a socket-level error must never end the process: the relay
-      // is the only route its clients have, and killing it over one bad socket
-      // strands every open session with connection refused.
-      server.on('error', (error) => console.log(`[TeamAI] ${pool.provider.label} proxy error: ${error.message}`));
-      console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${port}`);
+  // Proxy ports per provider: bound at startup for a provider with accounts,
+  // or by a reload that gives a provider its first one.
+  const bound = new Set<ProviderId>();
+  const bindPool = async (pool: AccountPool): Promise<void> => {
+    if (bound.has(pool.provider.id)) return;
+    const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
+    const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
+    try { await listen(server, port); } catch (error) { server.close(); server.removeAllListeners(); throw error; }
+    servers.push(server); bound.add(pool.provider.id);
+    // Past startup, a socket-level error must never end the process: the relay
+    // is the only route its clients have, and killing it over one bad socket
+    // strands every open session with connection refused.
+    server.on('error', (error) => console.log(`[TeamAI] ${pool.provider.label} proxy error: ${error.message}`));
+    console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${port}`);
 
-      // Also answer on ports this provider used before. A client is handed its
-      // base URL through the environment when it starts (cli.ts), and a running
-      // process cannot be told about a new one — so changing a port in config
-      // strands every session already open, permanently, with connection refused.
-      // Keeping the old port alive is what makes a port change survivable.
-      // Failures here are not fatal: a port taken by something else just means
-      // that one legacy address is unavailable, not that the proxy cannot serve.
-      for (const legacy of legacyPorts(config, pool.provider.id)) {
-        const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
-        try {
-          await listen(alias, legacy);
-          servers.push(alias);
-          console.log(`[TeamAI] ${pool.provider.label} proxy (legacy): http://${config.proxy.host}:${legacy}`);
-        } catch (error) {
-          // The port is taken (often by an older instance of this very proxy).
-          // Close the half-built server rather than leaving it attached: an
-          // abandoned one keeps an 'error' listener on a live handle, and the
-          // next error it emits is unhandled — which takes down the process that
-          // is still serving the main port, and looks to clients exactly like the
-          // connection refused this feature exists to prevent.
-          alias.close();
-          alias.removeAllListeners();
-          console.log(`[TeamAI] ${pool.provider.label} legacy port ${legacy} unavailable: ${(error as Error).message}`);
-        }
+    // Also answer on ports this provider used before. A client is handed its
+    // base URL through the environment when it starts (cli.ts), and a running
+    // process cannot be told about a new one — so changing a port in config
+    // strands every session already open, permanently, with connection refused.
+    // Keeping the old port alive is what makes a port change survivable.
+    // Failures here are not fatal: a port taken by something else just means
+    // that one legacy address is unavailable, not that the proxy cannot serve.
+    for (const legacy of legacyPorts(config, pool.provider.id)) {
+      const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
+      try {
+        await listen(alias, legacy);
+        servers.push(alias);
+        console.log(`[TeamAI] ${pool.provider.label} proxy (legacy): http://${config.proxy.host}:${legacy}`);
+      } catch (error) {
+        // The port is taken (often by an older instance of this very proxy).
+        // Close the half-built server rather than leaving it attached: an
+        // abandoned one keeps an 'error' listener on a live handle, and the
+        // next error it emits is unhandled — which takes down the process that
+        // is still serving the main port, and looks to clients exactly like the
+        // connection refused this feature exists to prevent.
+        alias.close();
+        alias.removeAllListeners();
+        console.log(`[TeamAI] ${pool.provider.label} legacy port ${legacy} unavailable: ${(error as Error).message}`);
       }
     }
+  };
+  // Account changes saved by the dashboard or the account commands, applied in
+  // place (config-reload.ts); assigned once the warmer exists, below.
+  let reloaded: (result: ReloadResult) => void = () => {};
+  const reload = configReloadHandler(pools, config, { listen: bindPool, applied: (result) => reloaded(result) });
+  try {
+    for (const pool of pools) if (pool.accounts.length) await bindPool(pool);
     // Local control channel: the TUI runs in a separate process, so a fleet-wide
     // quota re-measure (R) has to reach the pools living here. Bound to the proxy
     // host and gated by the same client token as the proxies.
     const control = createServer(async (req, res) => {
       const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
       if (await handleResetCreditControl(req, res, pools.find((p) => p.provider.id === 'codex'), config.proxy.clientToken)) return;
+      if (await reload(req, res)) return;
       // Routes edited in the dashboard or with `teamai route`, applied in place.
       if (await handleRouteControl(req, res, pools, config.proxy.clientToken, (warnings, counts) => { persist(`Routes reloaded: claude ${counts.claude ?? 0}, codex ${counts.codex ?? 0}`); for (const warning of warnings) persist(warning); })) return;
       if (!secureEqual(token, config.proxy.clientToken)) { res.writeHead(401).end('{}'); return; }
@@ -190,6 +205,16 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
     : null;
   if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
+  reloaded = (result) => {
+    const line = (['claude', 'codex'] as const).map((id) => { const c = result.accounts[id]; return c ? `${id} +${c.added} -${c.removed}${c.retired ? ` (${c.retired} finishing)` : ''}` : ''; }).filter(Boolean).join(', ');
+    persist(`Config reloaded: ${line}; routes claude ${result.routes.claude ?? 0}, codex ${result.routes.codex ?? 0}`);
+    if (result.adopted) persist(`Adopted ${result.adopted} re-logged credential(s)`);
+    for (const warning of result.warnings) persist(warning);
+    // Keep-warm re-judges every Codex account: one switched on or off, or new.
+    if (warmer && codexPool) for (const account of codexPool.accounts) warmer.onAccountChanged(account);
+    // A new account has no profile yet; fill it so its plan shows right away.
+    if (background && Object.values(result.accounts).some((c) => c.added)) void Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0))).then((n) => { if (n.some(Boolean)) persist(); });
+  };
 
   // The next-account arrows change quietly — a cooldown runs out, a window
   // rolls over — with no event to trigger a save. Re-derive them every 15s
@@ -252,3 +277,24 @@ export async function liveState(state: PersistedState): Promise<PersistedState> 
   return pid !== null && pid === state.serverPid ? state : { ...state, active: [], next: undefined };
 }
 export async function runningPid(): Promise<number | null> { try { const value = JSON.parse(await readFile(paths().server, 'utf8')) as { pid?: number }; if (!value.pid) return null; process.kill(value.pid, 0); return value.pid; } catch { return null; } }
+
+// Start the relay on demand. This is what makes the launchers work whether or
+// not a LaunchAgent (or any other supervisor) is managing the server: if
+// nothing is listening, the client starts one itself.
+export async function ensureServer(): Promise<void> {
+  if (await runningPid()) return;
+  // Capture the child's output instead of discarding it: when startup fails,
+  // its stderr is the only thing that says why (a port already taken, a bad
+  // credential file), and "did not start" on its own sends the user hunting.
+  const log = join(dataDir(), 'server-start.log');
+  await mkdir(dirname(log), { recursive: true, mode: 0o700 });
+  const handle = await open(log, 'w', 0o600);
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const child = spawn(process.execPath, [cli, 'server'], { detached: true, stdio: ['ignore', handle.fd, handle.fd], env: process.env });
+  child.unref();
+  await handle.close();
+  for (let i = 0; i < 50; i++) { if (await runningPid()) return; await new Promise((r) => setTimeout(r, 100)); }
+  let detail = '';
+  try { detail = (await readFile(log, 'utf8')).trim(); } catch { /* nothing was written */ }
+  throw new Error(detail ? `TeamAI server did not start: ${detail}` : `TeamAI server did not start (see ${log})`);
+}

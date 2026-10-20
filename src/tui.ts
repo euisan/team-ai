@@ -1,13 +1,14 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
+import { applyConfig, describeApply } from './config-apply.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
 import { buildFrame, displayOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
 import { createHostTracker } from './host-metrics.js';
 import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
-import { liveState, runningPid } from './runtime.js';
+import { liveState } from './runtime.js';
 import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
 import type { ResetCredit, StoredAccount } from './types.js';
 
@@ -33,7 +34,11 @@ export async function runTui(): Promise<void> {
   const render = (): Promise<void> => screen.render();
 
   const move = async (delta: number): Promise<void> => { const accounts = await rows(); const index = Math.max(0, accounts.findIndex((a) => a.credentialId === selectedId)); selectedId = accounts[Math.min(accounts.length - 1, Math.max(0, index + delta))]?.credentialId || null; };
-  const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const config = await loadConfig(); const account = selected(config.accounts); if (!account) return; fn(account, config.accounts); await saveConfig(config); await restartDaemon(); };
+  // Every account change is saved, then applied to the running server in
+  // place — never by restarting it, which cut every response in flight. Only
+  // a stopped server is started. Silent when it simply applied.
+  const apply = async (done = ''): Promise<void> => { let note: string; try { note = describeApply(await applyConfig()); } catch (error) { note = (error as Error).message; } message = [done, note === 'applied' ? '' : note].filter(Boolean).join(' — '); };
+  const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const config = await loadConfig(); const account = selected(config.accounts); if (!account) return; fn(account, config.accounts); await saveConfig(config); await apply(); };
   // Fleet-wide quota re-measure. The server owns the pools (and the committed
   // probe template), so this asks it over the local control channel rather than
   // restarting it — a restart only re-read profiles and left every bar blank.
@@ -114,7 +119,7 @@ export async function runTui(): Promise<void> {
     if (!routeEditor) mode = 'normal';
   };
 
-  const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; message = `Added ${account.label}`; await restartDaemon(); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
+  const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; await apply(`Added ${account.label}`); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
   const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
     busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url)); const result = spawnSync(process.execPath, [cli, 'run', provider], { stdio: 'inherit', env: process.env });
@@ -137,10 +142,10 @@ export async function runTui(): Promise<void> {
       }
     }
     else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); }
-    else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; message = `Deleted ${account.label}`; await restartDaemon(); } mode = 'normal'; } }
+    else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; await apply(`Deleted ${account.label}`); } mode = 'normal'; } }
     else if (mode === 'order') {
       const step = await pressOrderKey(selectedId, key);
-      if (step.saved) await restartDaemon(); else if (step.move) await move(step.move); else if (step.done) mode = 'normal';
+      if (step.saved) await apply(); else if (step.move) await move(step.move); else if (step.done) mode = 'normal';
     } else {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
@@ -206,7 +211,7 @@ export async function pressRouteKey(editor: RouteEditor, key: string, onSaving: 
 // account without leaving the mode; Enter leaves it (Esc too, handled before
 // any mode). Each change is saved the moment it is made, and nothing is undone
 // on the way out. A key that would leave the value as it is (← at #1, a on
-// auto) writes nothing, so the relay is not restarted for it.
+// auto) writes nothing, so nothing is sent to the relay for it.
 export function orderKey(priority: number | null, key: string): { priority?: number | null; move?: -1 | 1; done?: true } {
   const next = key === '\x1b[D' || key === 'h' ? Math.max(1, (priority ?? 2) - 1) : key === '\x1b[C' || key === 'l' ? (priority ?? 0) + 1 : key === 'a' || key === 'c' ? null : undefined;
   if (next !== undefined) return next === priority ? {} : { priority: next };
@@ -215,16 +220,10 @@ export function orderKey(priority: number | null, key: string): { priority?: num
 
 // One key in priority mode against config.json: the change orderKey asks for
 // is written for the selected account (the first one when none is), and
-// `saved` says whether anything was, so the caller knows to restart the relay.
+// `saved` says whether anything was, so the caller knows to apply it.
 export async function pressOrderKey(selectedId: string | null, key: string): Promise<{ saved: boolean; move?: -1 | 1; done?: true }> {
   const config = await loadConfig(); const account = config.accounts.find((a) => a.credentialId === selectedId) || config.accounts[0];
   const step = orderKey(account?.priority ?? null, key);
   if (!account || step.priority === undefined) return { saved: false, move: step.move, done: step.done };
   account.priority = step.priority; await saveConfig(config); return { saved: true };
-}
-
-async function restartDaemon(): Promise<void> {
-  const pid = await runningPid(); if (pid) { try { process.kill(pid, 'SIGTERM'); } catch { /* stale */ } for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((resolve) => setTimeout(resolve, 100)); }
-  const cli = fileURLToPath(new URL('./cli.js', import.meta.url)); const child = spawn(process.execPath, [cli, 'server'], { detached: true, stdio: 'ignore', env: process.env }); child.unref();
-  for (let i = 0; i < 30 && !(await runningPid()); i++) await new Promise((resolve) => setTimeout(resolve, 100));
 }
