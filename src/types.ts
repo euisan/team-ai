@@ -230,6 +230,10 @@ export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   usageRequestedAt?: number | null;
   warmupStartWindows?: Record<string, number>;
   inflight: number;
+  // Memory only: the account was removed from config while a request was
+  // still running on it. It finishes that request, takes no new one, and
+  // leaves the pool when its last request ends.
+  retired?: boolean;
   // Keep-warm state is deliberately process-local; restored quota is never
   // enough to trigger a warm until this process has measured it.
   warmFailures?: number;

@@ -448,7 +448,12 @@ export class AccountPool {
     return Math.max(budget ?? 0, session ?? 0);
   }
 
-  release(account: RuntimeAccount): void { account.inflight = Math.max(0, account.inflight - 1); account.lastUsed = Date.now(); }
+  release(account: RuntimeAccount): void {
+    account.inflight = Math.max(0, account.inflight - 1); account.lastUsed = Date.now();
+    // A removed account leaves once the request it was kept for has ended.
+    if (account.retired && account.inflight === 0) { const at = this.accounts.indexOf(account); if (at >= 0) this.accounts.splice(at, 1); this.forget(account.id); }
+  }
+  private forget(id: string): void { for (const [session, held] of this.affinity) if (held === id) this.affinity.delete(session); }
   updateQuota(account: RuntimeAccount, headers: Headers, body?: string): void {
     const quota = this.provider.readQuota(headers, body);
     if (quota) this.applyQuota(account, quota);
@@ -538,7 +543,7 @@ export class AccountPool {
     this.sweepInFlight = true;
     try {
       const now = Date.now();
-      const due = this.accounts.filter((a) => a.credential.refreshToken
+      const due = this.accounts.filter((a) => !a.retired && a.credential.refreshToken
         && (a.error !== null || a.credential.expiresAt === null || a.credential.expiresAt < now + 5 * 60_000));
       let healed = 0; let failed = 0;
       for (const account of due) {
@@ -714,12 +719,13 @@ export class AccountPool {
   }
 
   // Absorb config/credential changes made by another process (the TUI writes
-  // accounts to disk, the server holds the pools) so a re-measure picks up a
-  // newly added account instead of requiring a restart. Live runtime state —
-  // usage, cooldowns, inflight, affinity — is preserved for accounts that stay;
-  // only genuinely new ones are built fresh, and removed ones drop out. An
-  // account with a request in flight is never dropped mid-response.
-  sync(stored: StoredAccount[], credentials: Record<string, OAuthCredential>): { added: number; removed: number } {
+  // accounts to disk, the server holds the pools) without a restart. Live
+  // runtime state — usage, windows, cooldowns, inflight, affinity, the reset
+  // ledger — is preserved for accounts that stay; only genuinely new ones are
+  // built fresh. A removed account with a request in flight is retired rather
+  // than dropped: that response runs to the end on it, no new request picks
+  // it, and release() takes it out of the pool after its last one.
+  sync(stored: StoredAccount[], credentials: Record<string, OAuthCredential>): { added: number; removed: number; retired: number } {
     const wanted = stored.filter((a) => a.provider === this.provider.id && credentials[a.credentialId]);
     const byId = new Map(this.accounts.map((a) => [a.credentialId, a]));
     const keep = new Set(wanted.map((a) => a.credentialId));
@@ -729,19 +735,22 @@ export class AccountPool {
       const live = byId.get(account.credentialId);
       if (live) {
         // Config fields may have been edited (label, enabled, priority); runtime
-        // fields and the possibly-refreshed credential stay as they are.
-        next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority }));
+        // fields and the possibly-refreshed credential stay as they are. An
+        // account removed and added back before its request ended is live again.
+        next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority, retired: false }));
       } else {
         added++;
         next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, warmupStartWindows: {}, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0, ...AccountPool.ledger(undefined) });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
-    for (const account of dropped.filter((a) => a.inflight > 0)) next.push(account);
-    const removed = dropped.length - dropped.filter((a) => a.inflight > 0).length;
+    const busy = dropped.filter((a) => a.inflight > 0);
+    // Disabled as well as retired, so every rule that skips a disabled account
+    // (selection, pins, failover, capacity, the dashboard markers) skips it.
+    for (const account of busy) { account.retired = true; account.enabled = false; next.push(account); }
     this.accounts.length = 0; this.accounts.push(...next);
-    for (const [session, id] of this.affinity) if (!this.accounts.some((a) => a.id === id)) this.affinity.delete(session);
-    return { added, removed };
+    for (const [session, id] of this.affinity) if (!this.accounts.some((a) => a.id === id && !a.retired)) this.affinity.delete(session);
+    return { added, removed: dropped.length - busy.length, retired: busy.length };
   }
 
   // Commit a known-accepted request shape, captured from a real 2xx response.
@@ -1026,7 +1035,7 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, warmupStartWindows: a.warmupStartWindows, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
+    for (const a of this.accounts.filter((x) => !x.retired)) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, warmupStartWindows: a.warmupStartWindows, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
     // What the dashboard needs to mark route accounts, worked out here since
     // the dashboard cannot judge availability itself. Judged without side

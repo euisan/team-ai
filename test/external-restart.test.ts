@@ -10,8 +10,8 @@ import { startServer } from '../src/runtime.js';
 import { defaultConfig, loadState } from '../src/storage.js';
 import type { PersistedState, TeamAIConfig } from '../src/types.js';
 
-// Every account change made in the dashboard (switch, enable, priority, login,
-// delete, a saved route) restarts the server. The new process used to start
+// A server restart (`teamai restart`, or a start after a stop; account changes
+// made in the dashboard no longer restart it). The new process used to start
 // with no other-agent readings and save that, so the Antigravity, OpenCode Go
 // and Grok boxes vanished until its first read came back seconds later. These
 // run the real server in a throwaway TEAMAI_HOME with no background work:

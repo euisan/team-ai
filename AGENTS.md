@@ -92,6 +92,14 @@ changes only `routes.<provider>` in `config.json`, and asks a running server to
 reload over the control port; prefer it to hand-editing `routes`, which a typo
 turns into a server that refuses to start.
 
+`enable`, `disable`, `priority`, `login` and `import` save `config.json` and
+then ask a running server to apply it in place (`POST /reload` on the control
+port) — no restart, nothing in flight cut. The dashboard does the same for
+every account change and starts a server only when none is running. A file the
+server cannot use is refused (the command prints the reason and exits 1) and the
+server keeps its settings. Only an update of TeamAI itself needs
+`teamai restart`.
+
 `<account>` is the account's label (usually the email) or its id, exactly as
 `teamai accounts` prints it.
 
@@ -151,6 +159,8 @@ before speculating; a port conflict is the common cause.
 | `src/routes.ts` | Model-route parsing and matching (`parseRoutes` is the one validator) |
 | `src/route-config.ts` | Saving routes (validate, write only `routes`, reload a running server); `teamai route` |
 | `src/route-control.ts` | Control-port `POST /routes/reload` |
+| `src/config-reload.ts` | Control-port `POST /reload`: validate `config.json` whole, then apply accounts and routes to the running pools in place |
+| `src/config-apply.ts` | What the dashboard and account commands call after a write: reload a running server, start one only when none runs |
 | `src/route-editor.ts` | The dashboard's route editor (`g`): pure key handling and drawing |
 | `src/storage.ts` | Config/state persistence, paths |
 | `src/auth.ts` | Login and credential import |

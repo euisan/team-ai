@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from 'node:child_process';
-import { chmod, mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { fileURLToPath } from 'node:url';
 import { importAuth, loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
+import { describeApply, reloadServerConfig } from './config-apply.js';
 import { stripAnsi } from './columns.js';
 import { linkShadowEntries, relayedCodexConfig } from './codex-config.js';
 import { hostText, measureHost } from './host-metrics.js';
@@ -14,8 +14,8 @@ import { isRedactLevel } from './redact.js';
 import { resetCreditSettings } from './reset-credits.js';
 import { addRoute, describeReload, removeRoute } from './route-config.js';
 import { parseRoutes } from './routes.js';
-import { runServer, runningPid } from './runtime.js';
-import { dataDir, loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
+import { ensureServer, runServer, runningPid } from './runtime.js';
+import { loadConfig, loadState, saveConfig, upsertAccount } from './storage.js';
 import { runTui } from './tui.js';
 import type { ProviderId } from './types.js';
 
@@ -29,8 +29,8 @@ function flag(name: string): string | undefined { const index = args.indexOf(nam
 
 async function main(): Promise<void> {
   switch (command) {
-    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider('Login provider'); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); break; }
-    case 'import': { const id = provider(args[0]); const results = await importAuth(id, flag('--from')); for (const result of results) { const account = await upsertAccount(id, result.label, result.credential); console.log(`Imported ${id} account: ${account.label}`); } break; }
+    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider('Login provider'); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); await reportReload(); break; }
+    case 'import': { const id = provider(args[0]); const results = await importAuth(id, flag('--from')); for (const result of results) { const account = await upsertAccount(id, result.label, result.credential); console.log(`Imported ${id} account: ${account.label}`); } await reportReload(); break; }
     case 'accounts': await accounts(args[0] ? provider(args[0]) : undefined); break;
     case 'enable': await toggle(true); break;
     case 'disable': await toggle(false); break;
@@ -71,8 +71,11 @@ async function accounts(filter?: ProviderId): Promise<void> {
   const config = await loadConfig(); const state = await loadState();
   for (const a of config.accounts.filter((x) => !filter || x.provider === filter)) { const s = state.accounts[a.credentialId]; const usage = s?.usage == null ? 'unknown' : `${Math.round(s.usage * 100)}%`; console.log(`${a.provider.padEnd(7)} ${a.enabled ? 'on ' : 'off'} ${usage.padStart(7)} ${a.priority === null ? 'auto' : `#${a.priority}`} ${a.label}`); }
 }
-async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); }
-async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); }
+async function toggle(enabled: boolean): Promise<void> { const id = provider(args[0]); const name = args.slice(1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); account.enabled = enabled; await saveConfig(config); console.log(`${enabled ? 'Enabled' : 'Disabled'} ${account.label}`); await reportReload(); }
+async function priority(): Promise<void> { const id = provider(args[0]); const rankRaw = args.at(-1); const name = args.slice(1, -1).join(' '); const config = await loadConfig(); const account = config.accounts.find((a) => a.provider === id && (a.id === name || a.label === name)); if (!account) throw new Error('Account not found'); if (!rankRaw || (rankRaw !== 'auto' && (!Number.isInteger(Number(rankRaw)) || Number(rankRaw) < 1))) throw new Error('Priority must be a positive integer or auto'); account.priority = rankRaw === 'auto' ? null : Number(rankRaw); await saveConfig(config); console.log(`Priority ${account.priority ?? 'auto'}: ${account.label}`); await reportReload(); }
+// After an account write: a running server applies it in place; a stopped one
+// reads it when it starts. A refusal or an unreachable server is an error exit.
+async function reportReload(): Promise<void> { const outcome = await reloadServerConfig(); console.log(`Server: ${describeApply(outcome)}`); if (outcome.status === 'refused' || outcome.status === 'failed') process.exitCode = 1; }
 
 async function status(): Promise<void> { const pid = await runningPid(); console.log(pid ? `TeamAI server running (pid ${pid})` : 'TeamAI server is stopped'); const host = await measureHost(); console.log(`Host: ${stripAnsi(hostText(host, true))} (${host.cpu.cores} cores)`); await accounts(); await resetCreditStatus(); await routeStatus(); }
 
@@ -134,27 +137,6 @@ async function resetCreditStatus(): Promise<void> {
 }
 async function stop(quiet = false): Promise<void> { const pid = await runningPid(); if (!pid) { if (!quiet) console.log('TeamAI server is not running'); return; } process.kill(pid, 'SIGTERM'); for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((r) => setTimeout(r, 100)); if (!quiet) console.log(`Stopped TeamAI server ${pid}`); }
 
-// Start the relay on demand. This is what makes the launchers work whether or
-// not a LaunchAgent (or any other supervisor) is managing the server: if
-// nothing is listening, the client starts one itself.
-async function ensureServer(): Promise<void> {
-  if (await runningPid()) return;
-  // Capture the child's output instead of discarding it: when startup fails,
-  // its stderr is the only thing that says why (a port already taken, a bad
-  // credential file), and "did not start" on its own sends the user hunting.
-  const log = join(dataDir(), 'server-start.log');
-  await mkdir(dirname(log), { recursive: true, mode: 0o700 });
-  const handle = await open(log, 'w', 0o600);
-  const cli = fileURLToPath(import.meta.url);
-  const child = spawn(process.execPath, [cli, 'server'], { detached: true, stdio: ['ignore', handle.fd, handle.fd], env: process.env });
-  child.unref();
-  await handle.close();
-  for (let i = 0; i < 50; i++) { if (await runningPid()) return; await new Promise((r) => setTimeout(r, 100)); }
-  let detail = '';
-  try { detail = (await readFile(log, 'utf8')).trim(); } catch { /* nothing was written */ }
-  throw new Error(detail ? `TeamAI server did not start: ${detail}` : `TeamAI server did not start (see ${log})`);
-}
-
 async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
   const config = await loadConfig(); if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer();
   if (id === 'claude') {
@@ -211,6 +193,8 @@ Usage:
   teamai start|restart|status|stop
   teamai enable|disable <provider> <account>
   teamai priority <provider> <account> <rank|auto>
+                                       Saved and applied to a running server
+                                       without a restart (login and import too)
   teamai route list [--provider claude|codex]
   teamai route add <name> [--provider claude|codex] --match a,b --accounts x,y
                    [--mode prefer|exclusive] [--color red|green|yellow|blue|magenta|cyan]
