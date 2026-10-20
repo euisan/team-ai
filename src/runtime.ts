@@ -75,6 +75,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // Other agents' usage, read on its own timer and isolated from the relay:
   // a failure there is a row on the dashboard, never an error here.
   const external = new ExternalUsageMonitor(externalUsageSettings(config));
+  external.restore(state.external);
   const activity = new ActivityLog((event) => persist(event), () => persistActivity());
   const snapshot = (): PersistedState => { const next: PersistedState = { version: 1, accounts: {}, events, active: closing ? [] : activity.snapshot(), serverPid: process.pid, external: external.snapshot() }; pools.forEach((p) => p.exportState(next)); return next; };
   // Every save first adopts any credential the TUI wrote since (a re-login),

@@ -268,6 +268,19 @@ export class ExternalUsageMonitor {
     return changed.some(Boolean);
   }
 
+  // Takes over the readings the previous server process saved, so a restart
+  // (every account switch, enable, priority or login in the dashboard is one)
+  // keeps the boxes on screen instead of saving an empty set until the first
+  // read lands. Only providers still enabled come back: one switched off in
+  // config is gone. They are still read again on the usual schedule.
+  restore(saved: Partial<Record<ExternalProvider, ExternalUsage>> | undefined): void {
+    if (!this.settings.enabled || !saved || typeof saved !== 'object') return;
+    for (const provider of EXTERNAL_PROVIDERS) {
+      const usage = saved[provider];
+      if (this.settings.providers[provider] && usage && typeof usage === 'object' && usage.provider === provider && Array.isArray(usage.groups)) this.usage[provider] = usage;
+    }
+  }
+
   private store(provider: ExternalProvider, reading: ExternalUsage | null, now: number): void {
     if (!reading) { delete this.usage[provider]; this.failures[provider] = 0; this.dueAt[provider] = now + this.settings.refreshMs; return; }
     if (reading.status === 'ok') { this.usage[provider] = reading; this.failures[provider] = 0; this.dueAt[provider] = now + this.settings.refreshMs; return; }
