@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setTimeout as delay, setImmediate as turn } from 'node:timers/promises';
 import { codexCapacitySettings, gateCodexCapacityPreamble, isCapacityOverloadBody, isCapacityOverloadPayload, SSE_MAX_FRAME_BYTES } from '../src/codex-capacity.js';
 
 const sse = (type: string, extra: object = {}) => `event: ${type}\ndata: ${JSON.stringify({ type, ...extra })}\n\n`;
@@ -71,11 +71,21 @@ test('gate passes non-capacity failures, opaque data, DONE and text mentioning c
   const gate = gateCodexCapacityPreamble(source([bytes]).stream, 0);
   assert.equal(await read(gate.stream), bytes); assert.equal(gate.outcome.afterOutput, false); assert.equal(gate.outcome.retry, false);
 });
-test('hold deadline releases preamble promptly and still protects a late capacity failure', async () => {
-  const gate = gateCodexCapacityPreamble(source([CREATED, { wait: 150, data: CAPACITY }]).stream, 20);
-  const reader = gate.stream.getReader(); const at = Date.now();
-  const first = await reader.read(); assert.equal(Buffer.from(first.value!).toString(), CREATED); assert(Date.now() - at < 120);
-  assert((await reader.read()).done); assert(gate.outcome.holdTimedOut); assert(gate.outcome.retry);
+test('hold deadline releases preamble promptly and still protects a late capacity failure', { timeout: 8000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let release: () => void = () => {};
+  const upstream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(Buffer.from(CREATED)); release = () => { c.enqueue(Buffer.from(CAPACITY)); c.close(); }; } });
+  const gate = gateCodexCapacityPreamble(upstream, 20);
+  const reader = gate.stream.getReader(); t.after(() => reader.cancel());
+  let delivered = false;
+  const first = reader.read().then((part) => { delivered = true; return part; });
+  await turn(); t.mock.timers.tick(19); await turn();
+  assert.equal(delivered, false, 'the preamble stays held before the configured deadline');
+  t.mock.timers.tick(1); await turn();
+  assert.equal(delivered, true, 'preamble is released at the configured deadline');
+  assert.equal(Buffer.from((await first).value!).toString(), CREATED);
+  assert(gate.outcome.holdTimedOut, 'the exact configured deadline releases preamble without upstream progress');
+  release(); assert((await reader.read()).done); assert(gate.outcome.retry);
 });
 test('hold deadline is absolute, not renewed by a trickle of preamble events', async () => {
   const gate = gateCodexCapacityPreamble(source([CREATED, ...Array.from({ length: 10 }, () => ({ wait: 20, data: CREATED })), CAPACITY]).stream, 50);

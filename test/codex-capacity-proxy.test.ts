@@ -65,13 +65,14 @@ for (const mime of ['text/event-stream', '', 'gzip']) {
   });
 }
 test('late capacity after the hold deadline and a subsequent 503 are retried into the open response', { timeout: 8000 }, async (t) => {
+  let release: () => void = () => {}; const held = new Promise<void>((resolve) => { release = resolve; });
   const r = await rig(async (n, _req, res) => {
     if (n === 2) { res.writeHead(503); res.end('model is at capacity'); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(CREATED);
-    if (n === 1) { await delay(120); res.end(OVERLOAD); } else res.end(DELTA + COMPLETED);
-  }, { preambleHoldMs: 20 }); t.after(r.close);
+    if (n === 1) { await held; res.end(OVERLOAD); } else res.end(DELTA + COMPLETED);
+  }, { preambleHoldMs: 20 }); t.after(r.close); t.after(release);
   const response = await r.call(); const reader = response.body!.getReader();
-  assert.equal(Buffer.from((await reader.read()).value!).toString(), CREATED); assert.equal(r.hits.length, 1, 'preamble is released before upstream completes');
+  assert.equal(Buffer.from((await reader.read()).value!).toString(), CREATED); assert.equal(r.hits.length, 1, 'preamble is released before upstream completes'); release();
   const parts = []; for (;;) { const part = await reader.read(); if (part.done) break; parts.push(Buffer.from(part.value)); }
   assert.equal(Buffer.concat(parts).toString(), CREATED + DELTA + COMPLETED); assert.equal(r.hits.length, 3); assert(r.hits.every((h) => h.account === r.hits[0]!.account));
 });
@@ -117,15 +118,26 @@ for (const stage of ['503 wait', 'SSE wait', 'splice wait', 'headers', 'held pre
   });
 }
 test('a capacity wait retains its account lease and remains active on wide and narrow dashboards', { timeout: 8000 }, async (t) => {
-  const r = await rig((n, _req, res) => { if (n === 1) { res.writeHead(503); res.end('model is at capacity'); } else { res.writeHead(200); res.end(CREATED + DELTA + COMPLETED); } }, { retryMs: 200 }); t.after(r.close);
-  const pending = r.call(); await until(() => r.log.snapshot()[0]?.capacityRetries === 1);
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const r = await rig(async (n, req, res) => {
+    if (n === 1) { res.writeHead(503); res.end('model is at capacity'); return; }
+    const account = String(req.headers['chatgpt-account-id']);
+    if (account === 'account-0') await held;
+    res.writeHead(200, { 'x-synthetic-account': account }); res.end(CREATED + DELTA + COMPLETED);
+  }, { retryMs: 200 }); t.after(r.close); t.after(release);
+  const pending = r.call(); void pending.catch(() => {});
+  await until(() => r.log.snapshot()[0]?.capacityRetries === 1);
   assert.equal(r.pool.accounts[0]!.inflight, 1); assert.equal(r.pool.inFlightProxied, 1); assert.equal(r.events.length, 0);
   for (const width of [160, 60]) {
     const frame = buildFrame(defaultConfig(), { version: 1, accounts: {}, active: r.log.snapshot(), serverPid: process.pid }, { width, height: 35, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).join('\n');
     assert.match(frame, width === 160 ? /capacity retry x1/ : /retry x1/);
   }
-  const second = await r.call(); await second.text(); assert.equal(r.hits[1]?.account, 'account-1', 'a concurrent request cannot steal the reserved account slot');
-  assert.equal(await (await pending).text(), CREATED + DELTA + COMPLETED); assert.equal(r.hits[2]?.account, 'account-0');
+  const second = await r.call(); await second.text();
+  assert.equal(second.headers.get('x-synthetic-account'), 'account-1', 'a concurrent request cannot steal the reserved account slot');
+  assert.equal(r.pool.accounts[0]!.inflight, 1, 'the original account stays reserved until its response is released');
+  release(); assert.equal(await (await pending).text(), CREATED + DELTA + COMPLETED);
+  assert.equal(r.hits.filter((h) => h.account === 'account-0').length, 2);
 });
 test('account rotation is opt-in, cycles forever and respects exclusive routes', { timeout: 8000 }, async (t) => {
   const r = await rig((n, _req, res) => { if (n <= 5) { res.writeHead(503); res.end('server is overloaded'); } else { res.writeHead(200); res.end(COMPLETED); } }, { rotateAccounts: true, accounts: 3 }); t.after(r.close);
