@@ -38,7 +38,7 @@ export function legacyPorts(config: TeamAIConfig, id: ProviderId): number[] {
 
 // What startServer hands back: stop() drains and closes every port, saves,
 // and gives up server.json; the process itself keeps running.
-export interface RunningServer { stop(): Promise<void> }
+export interface RunningServer { stop(): Promise<void>; ports: Readonly<Record<ProviderId | 'control', number>> }
 // background: false leaves out the timers that reach upstream (warm-up, usage,
 // profile and token refreshes, other agents' usage) — for tests.
 export interface StartOptions { background?: boolean; usageRefresh?: boolean | UsageRefreshOptions }
@@ -106,6 +106,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);
   }
   const servers: Server[] = [];
+  const ports = { claude: 0, codex: 0, control: 0 };
   const readExternal = async (force = false): Promise<void> => { try { if (await external.tick(force)) persistActivity(); } catch { /* display only */ } };
   const listen = (server: Server, port: number): Promise<void> => new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
   // Proxy ports per provider: bound at startup for a provider with accounts,
@@ -116,12 +117,17 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
     const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
     try { await listen(server, port); } catch (error) { server.close(); server.removeAllListeners(); throw error; }
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('proxy has no TCP address');
+    // Port 0 asks for any free port; the running config then names the one
+    // bound, so a reload of a file that lists it sees no proxy change.
+    ports[pool.provider.id] = address.port;
+    if (port === 0) config.proxy[pool.provider.id === 'claude' ? 'claudePort' : 'codexPort'] = address.port;
     servers.push(server); bound.add(pool.provider.id);
     // Past startup, a socket-level error must never end the process: the relay
     // is the only route its clients have, and killing it over one bad socket
     // strands every open session with connection refused.
     server.on('error', (error) => console.log(`[TeamAI] ${pool.provider.label} proxy error: ${error.message}`));
-    console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${port}`);
+    console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${address.port}`);
 
     // Also answer on ports this provider used before. A client is handed its
     // base URL through the environment when it starts (cli.ts), and a running
@@ -130,7 +136,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     // Keeping the old port alive is what makes a port change survivable.
     // Failures here are not fatal: a port taken by something else just means
     // that one legacy address is unavailable, not that the proxy cannot serve.
-    for (const legacy of legacyPorts(config, pool.provider.id)) {
+    // A port picked at random was never handed to a session, so it has none.
+    for (const legacy of port === 0 ? [] : legacyPorts(config, pool.provider.id)) {
       const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
       try {
         await listen(alias, legacy);
@@ -189,6 +196,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       res.end(JSON.stringify({ ...total, ready, ...changes }));
     });
     await listen(control, config.proxy.controlPort ?? config.proxy.claudePort + 100); servers.push(control);
+    const address = control.address(); if (!address || typeof address === 'string') throw new Error('control has no TCP address');
+    ports.control = address.port; if (config.proxy.controlPort === 0) config.proxy.controlPort = address.port;
   } catch (error) {
     // Close what did bind, drop the save a route warning may have scheduled,
     // and let the reason go up (to server-start.log, via cli.ts).
@@ -214,7 +223,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // warmer that silently stopped warming left no trace anywhere (2026-10-19).
   const codexPool = pools.find((pool) => pool.provider.id === 'codex');
   const warmer = background && codexPool && config.warmup?.enabled !== false
-    ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
+    ? new Warmer(codexPool, { enabled: true, port: ports.codex, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
     : null;
   if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
   usageRefresher?.start();
@@ -274,7 +283,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     stopped = true; if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     saving = saving.then(persistNow, persistNow); await saving; await releaseServerFile(serverPath);
   };
-  return { stop };
+  return { stop, ports };
 }
 
 // Remove server.json only while it still names this process. A restart lets the

@@ -227,6 +227,8 @@ npm test
 npm run lint
 ```
 
+`npm test`는 모든 파일 앞에 `test/isolation.ts`를 불러옵니다. 시험마다 임시 `TEAMAI_HOME`과 홈 폴더를 따로 쓰고, 시험 서버는 포트 0으로 열며, 실제 TeamAI·Codex·Claude 폴더나 릴레이 포트(3456/3457/3556, 3466/3467/3566), 이 기계 밖의 호스트에 닿는 시험은 시험 대상 코드가 오류를 삼켜도 실패합니다.
+
 파생 저작물 관련은 [NOTICE](NOTICE), 로컬 보안 모델은 [SECURITY.md](SECURITY.md)를 참고하세요.
 
 > Translation update pending: see the canonical English README for nested Codex relay configuration inheritance.

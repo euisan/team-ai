@@ -338,6 +338,12 @@ npm test
 npm run lint
 ```
 
+`npm test` loads `test/isolation.ts` before every file. Each test gets its own
+temporary `TEAMAI_HOME` and home directory; test servers listen on port 0; and
+a test that touches the real TeamAI, Codex or Claude directories, the relay's
+ports (3456/3457/3556 and 3466/3467/3566) or any host off the machine fails,
+even when the code under test swallows the error.
+
 See [NOTICE](NOTICE) for derived work and [SECURITY.md](SECURITY.md) for the local security model.
 
 `teamai codex` (`tax`) runs Codex with an isolated `CODEX_HOME` (`codex-home` under the TeamAI config directory) and links `skills`, `plugins`, `rules` and the global hook list `hooks.json` into it from your own Codex home, leaving anything already there alone. Codex records that you trusted a hook under the path it read `hooks.json` from, so the relayed home would otherwise see your global hooks as untrusted and skip them. On each launch the trust records for your own `hooks.json` are copied, as they are, to the relayed path; a hook you trust from inside a relayed session is kept across launches too. Nothing is ever marked trusted that you did not trust, and your own `config.toml` is only read. Other files at the top of your Codex home, such as a global `AGENTS.md`, are not linked.

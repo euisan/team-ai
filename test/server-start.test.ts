@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { startServer } from '../src/runtime.js';
+import { anyPorts, startOnAnyPorts } from './server-ports.js';
+import { listeningPorts } from './isolation.js';
 import { defaultConfig } from '../src/storage.js';
 import type { TeamAIConfig } from '../src/types.js';
 
@@ -17,17 +19,12 @@ import type { TeamAIConfig } from '../src/types.js';
 const MB = 1024 * 1024;
 const TOKEN = 'local-test-token';
 
-async function freePort(): Promise<number> {
-  const probe = createServer(); await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
-  const address = probe.address(); assert(address && typeof address !== 'string');
-  await new Promise<void>((r) => probe.close(() => r())); return address.port;
-}
 
 async function home(edit: (config: TeamAIConfig) => void = () => {}) {
   const root = await mkdtemp(join(tmpdir(), 'teamai-start-'));
   const previous = process.env.TEAMAI_HOME; process.env.TEAMAI_HOME = root;
   const config = defaultConfig();
-  config.proxy = { ...config.proxy, claudePort: await freePort(), codexPort: await freePort(), controlPort: await freePort(), clientToken: TOKEN };
+  config.proxy = { ...config.proxy, ...anyPorts, clientToken: TOKEN };
   config.warmup = { enabled: false }; config.externalUsage = { enabled: false };
   config.accounts = [{ id: 'x', provider: 'codex', label: 'x@example.com', enabled: true, priority: null, credentialId: 'codex:x', createdAt: '' }];
   edit(config);
@@ -56,7 +53,7 @@ const listening = (port: number): Promise<boolean> => new Promise((resolve) => {
 test('proxy.maxBodyMb from config.json reaches the running proxy', async () => {
   for (const limitMb of [1, 2]) {
     const h = await home((c) => { c.proxy.maxBodyMb = limitMb; });
-    const server = await startServer({ background: false });
+    const server = await startOnAnyPorts(h.config);
     try {
       const res = await post(h.config.proxy.codexPort, Buffer.alloc(3 * MB, 'a'));
       assert.equal(res.status, 413);
@@ -68,7 +65,7 @@ test('proxy.maxBodyMb from config.json reaches the running proxy', async () => {
 
 test('stop() closes every port the server opened', async () => {
   const h = await home();
-  const server = await startServer({ background: false });
+  const server = await startOnAnyPorts(h.config);
   try {
     assert.equal(await listening(h.config.proxy.codexPort), true);
     assert.equal(await listening(h.config.proxy.controlPort!), true);
@@ -79,29 +76,31 @@ test('stop() closes every port the server opened', async () => {
   } finally { await h.restore(); }
 });
 
-async function occupy(port: number): Promise<Server> {
-  const blocker = createServer((_req, res) => res.end('someone else')); await new Promise<void>((r) => blocker.listen(port, '127.0.0.1', r)); return blocker;
+// A port this process already listens on, for the server to be told to use.
+async function occupy(): Promise<{ blocker: Server; port: number }> {
+  const blocker = createServer((_req, res) => res.end('someone else')); await new Promise<void>((r) => blocker.listen(0, '127.0.0.1', r));
+  const address = blocker.address(); assert(address && typeof address !== 'string'); return { blocker, port: address.port };
 }
+const settled = async (expected: number[]): Promise<void> => { for (let i = 0; i < 50 && listeningPorts().length !== expected.length; i++) await new Promise((r) => setTimeout(r, 10)); assert.deepEqual(listeningPorts(), expected, 'every port the server opened is closed again'); };
 
 test('the server refuses to start when its proxy port is taken, and leaves nothing listening', async () => {
   const h = await home((c) => { c.accounts.push({ id: 'y', provider: 'claude', label: 'y@example.com', enabled: true, priority: null, credentialId: 'claude:y', createdAt: '' }); });
   await writeFile(join(h.root, 'credentials.json'), JSON.stringify({ 'codex:x': { accessToken: 'synthetic', refreshToken: null, expiresAt: null, accountId: 'x' }, 'claude:y': { accessToken: 'synthetic', refreshToken: null, expiresAt: null, accountId: 'y' } }));
   // Claude binds first and succeeds; Codex's port is taken.
-  const blocker = await occupy(h.config.proxy.codexPort);
+  const { blocker, port } = await occupy(); h.config.proxy.codexPort = port; await writeFile(join(h.root, 'config.json'), JSON.stringify(h.config));
   try {
     await assert.rejects(startServer({ background: false }), /EADDRINUSE/);
-    assert.equal(await listening(h.config.proxy.claudePort), false, 'the Claude port opened before the failure is closed again');
-    assert.equal(await listening(h.config.proxy.controlPort!), false);
+    await settled([port]);
     await assert.rejects(readFile(join(h.root, 'server.json')), /ENOENT/, 'no server.json for a server that never ran');
   } finally { blocker.close(); await h.restore(); }
 });
 
 test('the server refuses to start when its control port is taken, and closes the proxy ports', async () => {
   const h = await home();
-  const blocker = await occupy(h.config.proxy.controlPort!);
+  const { blocker, port } = await occupy(); h.config.proxy.controlPort = port; await writeFile(join(h.root, 'config.json'), JSON.stringify(h.config));
   try {
     await assert.rejects(startServer({ background: false }), /EADDRINUSE/);
-    assert.equal(await listening(h.config.proxy.codexPort), false);
+    await settled([port]);
   } finally { blocker.close(); await h.restore(); }
 });
 
@@ -109,7 +108,7 @@ test('the server refuses to start on an invalid routing.balance, naming it', asy
   const h = await home((c) => { (c as unknown as { routing: unknown }).routing = { balance: 'fastest' }; });
   try {
     await assert.rejects(startServer({ background: false }), /routing\.balance must be "pacing" or "level", not "fastest"/);
-    assert.equal(await listening(h.config.proxy.codexPort), false);
+    await settled([]);
   } finally { await h.restore(); }
 });
 
@@ -120,7 +119,7 @@ test('the server refuses to start with no accounts', async () => {
 
 test('proxy.maxInflightBodyMb from config.json reaches the running proxy, shared by its requests', async () => {
   const h = await home((c) => { c.proxy.maxBodyMb = 1; c.proxy.maxInflightBodyMb = 1; });
-  const server = await startServer({ background: false });
+  const server = await startOnAnyPorts(h.config);
   try {
     // One upload holds most of the budget and never finishes; nothing goes upstream.
     const slow = request({ host: '127.0.0.1', port: h.config.proxy.codexPort, path: '/v1/responses', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-length': MB } });
@@ -142,7 +141,7 @@ test('proxy.maxInflightBodyMb from config.json reaches the running proxy, shared
 // long the test looks for one.
 test('nothing is written to TEAMAI_HOME once stop() has returned', async () => {
   const h = await home((c) => { c.proxy.maxBodyMb = 1; c.proxy.maxInflightBodyMb = 1; });
-  const server = await startServer({ background: false });
+  const server = await startOnAnyPorts(h.config);
   let writes: string[] = [];
   try {
     const slow = request({ host: '127.0.0.1', port: h.config.proxy.codexPort, path: '/v1/responses', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-length': MB } });
@@ -160,13 +159,13 @@ test('the server refuses to start when proxy.maxInflightBodyMb is below proxy.ma
   const h = await home((c) => { c.proxy.maxBodyMb = 64; c.proxy.maxInflightBodyMb = 32; });
   try {
     await assert.rejects(startServer({ background: false }), /proxy\.maxInflightBodyMb \(32\) must be at least proxy\.maxBodyMb \(64\)/);
-    assert.equal(await listening(h.config.proxy.codexPort), false);
+    await settled([]);
   } finally { await h.restore(); }
 });
 
 test('proxy.bodyTimeoutMs from config.json reaches the running proxy', async () => {
   const h = await home((c) => { c.proxy.bodyTimeoutMs = 200; });
-  const server = await startServer({ background: false });
+  const server = await startOnAnyPorts(h.config);
   try {
     const status = await new Promise<number>((resolve, reject) => {
       const slow = request({ host: '127.0.0.1', port: h.config.proxy.codexPort, path: '/v1/responses', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-length': MB } }, (res) => { res.resume(); resolve(res.statusCode!); });

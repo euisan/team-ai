@@ -290,6 +290,8 @@ npm test
 npm run lint
 ```
 
+`npm test` carga `test/isolation.ts` antes de cada archivo. Cada prueba usa su propio `TEAMAI_HOME` y directorio personal temporales; los servidores de prueba escuchan en el puerto 0; y una prueba que toque los directorios reales de TeamAI, Codex o Claude, los puertos del relay (3456/3457/3556 y 3466/3467/3566) o cualquier host fuera de la máquina falla, aunque el código bajo prueba se trague el error.
+
 Consulta [NOTICE](NOTICE) para lo relativo a obra derivada y [SECURITY.md](SECURITY.md) para el modelo de seguridad local.
 
 > Translation update pending: see the canonical English README for nested Codex relay configuration inheritance.

@@ -79,10 +79,12 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
   const routes = pools.map((pool) => parseRoutes(config.routes?.[pool.provider.id], pool.provider.id));
   const balance = parseBalance(config.routing?.balance);
   const capacity = codexCapacitySettings(config);
+  // Against the settings as they were before this reload opens any port.
+  const warnings = restartOnly(running, config);
   for (const pool of pools) if (accounts.some((a) => a.provider === pool.provider.id && credentials[a.credentialId])) await hooks.listen?.(pool);
 
   // Nothing below awaits: the swap is one step for every request.
-  const result: ReloadResult = { accounts: {}, routes: {}, adopted: 0, warnings: restartOnly(running, config) };
+  const result: ReloadResult = { accounts: {}, routes: {}, adopted: 0, warnings };
   pools.forEach((pool, index) => {
     result.accounts[pool.provider.id] = pool.sync(accounts, credentials);
     result.adopted += pool.adoptCredentials(credentials);

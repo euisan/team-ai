@@ -216,6 +216,8 @@ npm test
 npm run lint
 ```
 
+`npm test` はすべてのファイルの前に `test/isolation.ts` を読み込みます。テストごとに専用の一時 `TEAMAI_HOME` とホームディレクトリを使い、テストサーバーはポート 0 で待ち受け、実際の TeamAI・Codex・Claude のディレクトリ、リレーのポート（3456/3457/3556 と 3466/3467/3566）、このマシン外のホストに触れるテストは、テスト対象のコードがエラーを握りつぶしても失敗します。
+
 派生物については [NOTICE](NOTICE) を、ローカルのセキュリティモデルについては [SECURITY.md](SECURITY.md) を参照してください。
 
 > Translation update pending: see the canonical English README for nested Codex relay configuration inheritance.

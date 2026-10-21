@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { applyConfig, describeApply } from '../src/config-apply.js';
-import { startServer } from '../src/runtime.js';
+import { anyPorts, startOnAnyPorts } from './server-ports.js';
 import { defaultConfig, loadConfig, saveConfig } from '../src/storage.js';
 
 // What the dashboard does after an account write: reload a running server in
@@ -14,17 +14,12 @@ import { defaultConfig, loadConfig, saveConfig } from '../src/storage.js';
 
 const TOKEN = 'local-test-token';
 
-async function freePort(): Promise<number> {
-  const probe = createServer(); await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
-  const address = probe.address(); assert(address && typeof address !== 'string');
-  await new Promise<void>((r) => probe.close(() => r())); return address.port;
-}
 
 async function home() {
   const root = await mkdtemp(join(tmpdir(), 'teamai-apply-'));
   const previous = process.env.TEAMAI_HOME; process.env.TEAMAI_HOME = root;
   const config = defaultConfig();
-  config.proxy = { ...config.proxy, claudePort: await freePort(), codexPort: await freePort(), controlPort: await freePort(), clientToken: TOKEN };
+  config.proxy = { ...config.proxy, ...anyPorts, clientToken: TOKEN };
   config.warmup = { enabled: false }; config.externalUsage = { enabled: false };
   config.accounts = [{ id: 'x', provider: 'codex', label: 'x@example.com', enabled: true, priority: null, credentialId: 'codex:x', createdAt: '' }];
   await saveConfig(config);
@@ -45,7 +40,7 @@ test('with no server running, applying starts one', async () => {
 
 test('with a server running, applying reloads it in place and never restarts it', async () => {
   const h = await home();
-  const server = await startServer({ background: false });
+  const server = await startOnAnyPorts(h.config);
   try {
     const config = await loadConfig(); config.accounts[0]!.priority = 1; await saveConfig(config);
     const outcome = await applyConfig(never);
@@ -62,7 +57,8 @@ test('with a server running, applying reloads it in place and never restarts it'
 test('a running server too old to reload says to restart it once', async () => {
   const h = await home();
   const old = createServer((_req, res) => { res.writeHead(404).end('{}'); });
-  await new Promise<void>((r) => old.listen(h.config.proxy.controlPort, '127.0.0.1', r));
+  await new Promise<void>((r) => old.listen(0, '127.0.0.1', r)); const address = old.address(); assert(address && typeof address !== 'string');
+  h.config.proxy.controlPort = address.port; await saveConfig(h.config);
   await writeFile(join(h.root, 'server.json'), JSON.stringify({ pid: process.pid }));
   try {
     const outcome = await applyConfig(never);

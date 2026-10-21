@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the capacity and storage-race tests each reject a single regression; always restore source bytes."""
+"""Prove the capacity, test-isolation and storage-race tests each reject a single regression; always restore source bytes."""
 import argparse
 import hashlib
 import json
@@ -34,6 +34,13 @@ cases = [
     ('activity-count', 'src/proxy.ts', 'track.setCapacityRetries(++capacityRetries);', 'capacityRetries++;', 'a capacity wait retains its account lease', 'test/codex-capacity-proxy.test.ts'),
     ('reload-adoption', 'src/config-reload.ts', '    pool.codexCapacity = capacity;', '    // capacity adoption removed', 'Codex capacity settings are validated and adopted atomically', 'test/live-reload.test.ts'),
     ('reload-validation', 'src/config-reload.ts', '  const capacity = codexCapacitySettings(config);', '  const capacity = codexCapacitySettings({});', 'Codex capacity settings are validated and adopted atomically', 'test/live-reload.test.ts'),
+    # Test isolation: each guard switched off on its own. The probes target stand-ins, so a broken guard touches nothing real.
+    ('isolation-files', 'test/isolation.ts', "if (forbiddenRoots.some((root) => inside(root, real) || inside(root, resolve(path)))) violate(`file access to ${path}`);", 'if (false) violate(`file access to ${path}`);', 'the isolation guard blocks', 'test/isolation.test.ts'),
+    ('isolation-home', 'test/isolation.ts', "if (homes.some((home) => inside(home, real)) || !inside(temporary, real) || real === temporary) violate(", "if (false) violate(", 'the isolation guard blocks', 'test/isolation.test.ts'),
+    ('isolation-fixed-port', 'test/isolation.ts', "if (port !== 0 && !held.has(port)) violate(", "if (false) violate(", 'the isolation guard blocks', 'test/isolation.test.ts'),
+    ('isolation-relay-port', 'test/isolation.ts', "if (forbiddenPorts.has(port)) violate(`connection to the relay's port ${port}`);", "if (false) violate(`connection to the relay's port ${port}`);", 'the isolation guard blocks', 'test/isolation.test.ts'),
+    ('isolation-network', 'test/isolation.ts', "if (!loopback(host)) violate(", "if (false) violate(", 'the isolation guard blocks', 'test/isolation.test.ts'),
+    ('isolation-swallowed', 'test/isolation.ts', "const found = takeViolations(); if (found.length) throw new Error(`Test isolation was breached:", "const found = takeViolations(); if (false) throw new Error(`Test isolation was breached:", 'a breach that the code under test swallows', 'test/isolation.test.ts'),
     # Storage races: the fix taken back out, one piece at a time.
     ('storage-shared-temp', 'src/storage.ts', "const temp = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;", "const temp = `${path}.${process.pid}.tmp`;", 'concurrent atomic saves use independent temporary files', 'test/storage-race.test.ts'),
     ('storage-no-file-lock', 'src/storage.ts', 'const locked = (): Promise<T> => withFileLock(path, run);', 'const locked = (): Promise<T> => run();', 'from another process|from different processes', 'test/storage-race.test.ts'),
@@ -50,7 +57,7 @@ for name, filename, before, after, pattern, test_file in cases:
     digest = hashlib.sha256(original).hexdigest()
     try:
         path.write_text(text.replace(before, after, 1))
-        command = ['node', '--test', '--test-reporter=tap', '--import', 'tsx', f'--test-name-pattern={pattern}', test_file]
+        command = ['node', '--test', '--test-reporter=tap', '--import', 'tsx', '--import', './test/isolation.ts', f'--test-name-pattern={pattern}', test_file]
         result = subprocess.run(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, check=False)
         output = result.stdout.decode(errors='replace')
         (args.out_dir / f'{name}.log').write_text(output)

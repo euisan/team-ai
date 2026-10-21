@@ -216,6 +216,8 @@ npm test
 npm run lint
 ```
 
+`npm test` 会在每个文件之前加载 `test/isolation.ts`。每个测试使用各自的临时 `TEAMAI_HOME` 和主目录，测试服务器监听端口 0；触及真实 TeamAI、Codex 或 Claude 目录、中继端口（3456/3457/3556 和 3466/3467/3566）或本机之外任何主机的测试都会失败，即使被测代码吞掉了错误。
+
 衍生作品相关说明见 [NOTICE](NOTICE)，本地安全模型见 [SECURITY.md](SECURITY.md)。
 
 > Translation update pending: see the canonical English README for nested Codex relay configuration inheritance.

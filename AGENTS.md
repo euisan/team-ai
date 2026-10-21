@@ -149,7 +149,11 @@ them. The Activity line stays active with a retry count, and server output
 records each retry. After output, capacity failures become stream disconnects
 without a terminal event so Codex can retry. The preamble/frame buffer is
 bounded at 4 MiB; an oversized unfinished frame also ends without a terminal
-event. Tests must use fake upstreams and an isolated `TEAMAI_HOME`.
+event. Tests must use fake upstreams and an isolated `TEAMAI_HOME`; `npm test`
+enforces the isolation through `test/isolation.ts` (a temporary `TEAMAI_HOME`
+and `HOME` per test, port-0 listeners only, and no access to the real
+TeamAI/Codex/Claude directories, the relay's ports or non-loopback hosts). Start
+the real server in a test with `startOnAnyPorts` from `test/server-ports.ts`.
 
 Changes to `config.json` and `credentials.json` go through `updateConfig` /
 `updateCredentials` in `src/storage.ts`: a read/change/write under
@@ -185,7 +189,7 @@ before speculating; a port conflict is the common cause.
 | `src/route-editor.ts` | The dashboard's route editor (`g`): pure key handling and drawing |
 | `src/storage.ts` | Config/state persistence, paths, the per-file lock that serializes config and credential changes |
 | `src/auth.ts` | Login and credential import |
-| `test/` | `node --test` suites |
+| `test/` | `node --test` suites; `isolation.ts` is the guard every run loads, `server-ports.ts` starts the real server on port 0 |
 
 ## Before you commit
 
