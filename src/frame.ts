@@ -129,7 +129,10 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
     const group = accounts.filter((account) => account.provider === provider);
     if (byHeadroom) {
       group.sort((a, b) => {
-        if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+        if (a.priority !== null || b.priority !== null) {
+          const diff = (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+          if (diff !== 0) return diff;
+        }
         return balanced(a, b);
       });
     }

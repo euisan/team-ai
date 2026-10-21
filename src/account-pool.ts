@@ -341,7 +341,10 @@ export class AccountPool {
     // that cannot serve it; nothing here holds an account back for Fable.
     const ranked = (lastResort: boolean) => this.accounts.filter((a) => judge(a, excluded, wantsFable, lastResort)).sort((a, b) => {
       const routed = outside(a) - outside(b); if (routed) return routed;
-      if (a.priority !== null || b.priority !== null) return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+      if (a.priority !== null || b.priority !== null) {
+        const diff = (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+        if (diff !== 0) return diff;
+      }
       return rank(a, b);
     });
     // Prefer accounts under the switch threshold; only when none is left does

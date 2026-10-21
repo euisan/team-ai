@@ -16,20 +16,25 @@ const claude: Provider = {
   id: 'claude', label: 'Claude', upstreamBase: 'http://127.0.0.1:1', fableModel: 'claude-fable-5-1', normalizePath: (p) => p,
   buildHeaders: (h) => h, rewriteBody: (b) => b, readQuota: () => null, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }), refresh: async (c) => c,
 };
+const codex: Provider = {
+  id: 'codex', label: 'Codex', upstreamBase: 'http://127.0.0.1:1', normalizePath: (p) => p,
+  buildHeaders: (h) => h, rewriteBody: (b) => b, readQuota: () => null, classifyFailure: () => ({ kind: 'fatal', retryAfterMs: 0 }), refresh: async (c) => c,
+};
 const DAY = 86_400_000;
 const reset = Date.now() + 3 * DAY;
 const max = (week: number, fable: number, session = 0.1): Record<string, QuotaWindow> => ({ '5h': { usage: session, resetsAt: Date.now() + 3_600_000 }, '7d': { usage: week, resetsAt: reset }, '7d_oi': { usage: fable, resetsAt: reset } });
 const pro = (week: number, session = 0.05): Record<string, QuotaWindow> => ({ '5h': { usage: session, resetsAt: Date.now() + 3_600_000 }, '7d': { usage: week, resetsAt: reset } });
 
-function fleet(accounts: Array<{ id: string; priority: number | null; windows: Record<string, QuotaWindow> }>, balance: Balance = 'pacing') {
-  const stored = accounts.map(({ id, priority }): StoredAccount => ({ id, provider: 'claude', label: id, enabled: true, priority, credentialId: `cred-${id}`, createdAt: '' }));
+function fleet(accounts: Array<{ id: string; priority: number | null; windows: Record<string, QuotaWindow> }>, balance: Balance = 'pacing', providerType: 'claude' | 'codex' = 'claude') {
+  const p = providerType === 'codex' ? codex : claude;
+  const stored = accounts.map(({ id, priority }): StoredAccount => ({ id, provider: providerType, label: id, enabled: true, priority, credentialId: `cred-${id}`, createdAt: '' }));
   const credentials: Record<string, OAuthCredential> = Object.fromEntries(stored.map((a) => [a.credentialId, { accessToken: 'synthetic', refreshToken: null, expiresAt: null, accountId: a.id }]));
   const state: PersistedState = { version: 1, accounts: {} };
   for (const { id, windows } of accounts) {
     const usage = Math.max(...Object.entries(windows).filter(([name]) => !/^7d_/.test(name)).map(([, w]) => w.usage ?? 0));
     state.accounts[`cred-${id}`] = { usage, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows };
   }
-  const pool = new AccountPool(claude, stored, credentials, state, 0.98, 16); pool.balance = balance;
+  const pool = new AccountPool(p, stored, credentials, state, 0.98, 16); pool.balance = balance;
   return { pool, stored, state, get: (id: string) => pool.accounts.find((a) => a.id === id)! };
 }
 const take = (pool: AccountPool, wantsFable: boolean, session = `s-${Math.random()}`) => { const a = pool.acquire(session, new Set(), wantsFable); if (a) pool.release(a); return a?.id ?? null; };
@@ -137,3 +142,83 @@ for (const balance of ['pacing', 'level'] as const) {
     assert.equal(pool.preview(false)?.id, take(pool, false));
   });
 }
+
+test('(a) equal priority accounts are balanced by pacing: less progressed account is picked first for preview and acquire', () => {
+  const now = Date.now();
+  const reset = now + 3 * DAY;
+  const { pool } = fleet([
+    { id: 'ahead', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.70, resetsAt: reset } } },
+    { id: 'behind', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.35, resetsAt: reset } } },
+  ], 'pacing');
+  pool.now = () => now;
+  assert.equal(pool.preview(false)?.id, 'behind');
+  assert.equal(take(pool, false), 'behind');
+});
+
+test('(b) equal priority accounts are balanced by level: account with lower load is picked first for preview and acquire', () => {
+  const now = Date.now();
+  const reset = now + 3 * DAY;
+  const { pool } = fleet([
+    { id: 'fuller', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.70, resetsAt: reset } } },
+    { id: 'emptier', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.35, resetsAt: reset } } },
+  ], 'level');
+  pool.now = () => now;
+  assert.equal(pool.preview(false)?.id, 'emptier');
+  assert.equal(take(pool, false), 'emptier');
+});
+
+test('(c) different priorities strictly favor the higher priority account regardless of balance', () => {
+  const now = Date.now();
+  const reset = now + 3 * DAY;
+  for (const balance of ['pacing', 'level'] as const) {
+    const { pool } = fleet([
+      { id: 'high-priority-full', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.70, resetsAt: reset } } },
+      { id: 'low-priority-empty', priority: 2, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.35, resetsAt: reset } } },
+    ], balance);
+    pool.now = () => now;
+    assert.equal(pool.preview(false)?.id, 'high-priority-full', `${balance} preview`);
+    assert.equal(take(pool, false), 'high-priority-full', `${balance} acquire`);
+  }
+});
+
+test('(d) dashboard display order balances accounts with equal priority under pacing and level, matching preview', () => {
+  const now = Date.now();
+  const reset = now + 3 * DAY;
+  // Pacing with equal priority
+  {
+    const { stored, state } = fleet([
+      { id: 'ahead', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.70, resetsAt: reset } } },
+      { id: 'behind', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.35, resetsAt: reset } } },
+    ], 'pacing');
+    assert.deepEqual(displayOrder(stored, state, true, { balance: 'pacing', now }).map((a) => a.id), ['behind', 'ahead']);
+  }
+  // Level with equal priority
+  {
+    const { stored, state } = fleet([
+      { id: 'fuller', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.70, resetsAt: reset } } },
+      { id: 'emptier', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.35, resetsAt: reset } } },
+    ], 'level');
+    assert.deepEqual(displayOrder(stored, state, true, { balance: 'level', now }).map((a) => a.id), ['emptier', 'fuller']);
+  }
+  // Different priorities: priority wins in display order
+  {
+    const { stored, state } = fleet([
+      { id: 'high-priority-full', priority: 1, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.70, resetsAt: reset } } },
+      { id: 'low-priority-empty', priority: 2, windows: { '5h': { usage: 0.1, resetsAt: now + 3_600_000 }, '7d': { usage: 0.35, resetsAt: reset } } },
+    ], 'pacing');
+    assert.deepEqual(displayOrder(stored, state, true, { balance: 'pacing', now }).map((a) => a.id), ['high-priority-full', 'low-priority-empty']);
+  }
+});
+
+test('Codex accounts with equal priority are ordered by pacing on their 10080-minute window', () => {
+  const now = Date.now();
+  const reset = now + 3 * DAY;
+  const { pool, stored, state } = fleet([
+    { id: 'hyphen', priority: 1, windows: { primary: { usage: 0.1, resetsAt: now + 3_600_000, minutes: 300 }, secondary: { usage: 0.40, resetsAt: reset, minutes: 10080 } } },
+    { id: 'putt', priority: 1, windows: { primary: { usage: 0.1, resetsAt: now + 3_600_000, minutes: 300 }, secondary: { usage: 0.31, resetsAt: reset, minutes: 10080 } } },
+  ], 'pacing', 'codex');
+  pool.now = () => now;
+  assert.equal(pool.preview(false)?.id, 'putt');
+  assert.equal(take(pool, false), 'putt');
+  assert.deepEqual(displayOrder(stored, state, true, { balance: 'pacing', now }).map((a) => a.id), ['putt', 'hyphen']);
+});
