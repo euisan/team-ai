@@ -4,6 +4,8 @@
 
 > **번역 지연 안내:** 이 번역은 영어 README 의 최근 변경(Activity 진행 중 표시 이후 추가된 기능과 설정 키)을 아직 반영하지 않았습니다. 동작과 설정은 [영어 README](README.md) 를 기준으로 하세요.
 
+> **추가 번역 지연:** Codex 업스트림 용량 재시도와 `codexCapacity*` 설정은 아직 번역하지 않았습니다. [영어 설명](README.md)을 확인하세요.
+
 TeamAI는 **Claude Code**와 공식 **Codex CLI**를 위한 로컬 다중 계정 릴레이입니다. 제공자별로 별도의 계정 풀을 유지하며, 선택된 구독 계정을 쓸 수 없거나 할당량이 소진되면 다른 계정으로 요청을 재시도합니다.
 
 ![TeamAI 대시보드](docs/dashboard.png)
@@ -186,6 +188,8 @@ Codex keep-warm은 이벤트 기반입니다. 측정된 5시간 창이 리셋된
 
 설정과 자격증명은 `$TEAMAI_HOME`에 저장되며, 없으면 `$XDG_CONFIG_HOME/teamai`, 그다음 `~/.config/teamai` 순으로 결정됩니다. 프록시는 `127.0.0.1`에 바인딩하며 생성된 로컬 클라이언트 토큰을 요구합니다.
 
+`config.json`·`credentials.json`을 바꿀 때는 `<파일>.lock`을 한 번에 한 프로세스(서버, 대시보드, 명령)만 잡은 채 파일을 다시 읽고, 쓰기마다 따로 만든 임시 파일을 제자리로 rename합니다. 그래서 저장이 겹쳐도 파일이 깨지거나 서로를 되돌리지 않습니다 — 서버 저장 때문에 로그인이 사라지거나 지운 계정이 되살아나지 않습니다. 죽은 프로세스가 남긴 lock은 넘겨받습니다.
+
 `config.json`은 첫 실행 시 다음 기본값으로 생성됩니다.
 
 | 키 | 기본값 | 의미 |
@@ -222,6 +226,8 @@ npm run typecheck
 npm test
 npm run lint
 ```
+
+`npm test`는 모든 파일 앞에 `test/isolation.ts`를 불러옵니다. 시험마다 임시 `TEAMAI_HOME`과 홈 폴더를 따로 쓰고, 시험 서버는 포트 0으로 열며, 실제 TeamAI·Codex·Claude 폴더나 릴레이 포트(3456/3457/3556, 3466/3467/3566), 이 기계 밖의 호스트에 닿는 시험은 시험 대상 코드가 오류를 삼켜도 실패합니다.
 
 파생 저작물 관련은 [NOTICE](NOTICE), 로컬 보안 모델은 [SECURITY.md](SECURITY.md)를 참고하세요.
 

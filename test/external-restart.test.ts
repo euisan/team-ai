@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ExternalUsageMonitor, externalUsageSettings, type ExternalUsage } from '../src/external-usage.js';
 import { buildFrame } from '../src/frame.js';
-import { startServer } from '../src/runtime.js';
+import { anyPorts, startOnAnyPorts } from './server-ports.js';
 import { defaultConfig, loadState } from '../src/storage.js';
 import type { PersistedState, TeamAIConfig } from '../src/types.js';
 
@@ -21,11 +20,6 @@ const TOKEN = 'local-test-token';
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 const plain = (line: string): string => line.replace(ANSI, '');
 
-async function freePort(): Promise<number> {
-  const probe = createServer(); await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
-  const address = probe.address(); assert(address && typeof address !== 'string');
-  await new Promise<void>((r) => probe.close(() => r())); return address.port;
-}
 
 const reading = (provider: ExternalUsage['provider'], name: string, used: number, at: number): ExternalUsage => ({ provider, status: 'ok', identity: null, groups: [{ name, windows: [{ label: 'wk', minutes: 10_080, usedPercent: used, resetsAt: null }] }], note: null, measuredAt: at, lastOkAt: at });
 const saved = (at: number): NonNullable<PersistedState['external']> => ({ antigravity: reading('antigravity', 'Gemini Models', 38, at), opencodeGo: reading('opencodeGo', 'OpenCode Go', 29, at), grok: reading('grok', 'Grok', 12, at) });
@@ -36,7 +30,7 @@ async function home() {
   const root = await mkdtemp(join(tmpdir(), 'teamai-external-'));
   const previous = process.env.TEAMAI_HOME; process.env.TEAMAI_HOME = root;
   const config = defaultConfig();
-  config.proxy = { ...config.proxy, claudePort: await freePort(), codexPort: await freePort(), controlPort: await freePort(), clientToken: TOKEN };
+  config.proxy = { ...config.proxy, ...anyPorts, clientToken: TOKEN };
   config.warmup = { enabled: false };
   config.accounts = [
     { id: 'c', provider: 'claude', label: 'c@example.com', enabled: true, priority: null, credentialId: 'claude:c', createdAt: '' },
@@ -62,7 +56,7 @@ test('the other agents stay on every frame while Claude and Codex accounts chang
     const changes: Array<(c: TeamAIConfig) => void> = [(c) => { c.accounts[1]!.priority = 1; }, (c) => { c.accounts[0]!.enabled = false; }, (c) => { c.accounts[0]!.enabled = true; }, (c) => { c.accounts[1]!.priority = null; }];
     for (const change of changes) {
       change(h.config); await h.writeConfig(h.config);
-      const server = await startServer({ background: false });
+      const server = await startOnAnyPorts();
       await server.stop();
       const state = await loadState();
       assert.deepEqual(otherAgents(h.config, state), expected, 'a restart wiped the other agents');
@@ -75,7 +69,7 @@ test('a provider switched off in config is the only box a restart removes', asyn
   const h = await home();
   try {
     h.config.externalUsage = { providers: { opencodeGo: false } }; await h.writeConfig(h.config);
-    const server = await startServer({ background: false }); await server.stop();
+    const server = await startOnAnyPorts(); await server.stop();
     const state = JSON.parse(await readFile(join(h.root, 'state.json'), 'utf8')) as PersistedState;
     assert.deepEqual(Object.keys(state.external ?? {}).sort(), ['antigravity', 'grok']);
     const lines = otherAgents(h.config, state);

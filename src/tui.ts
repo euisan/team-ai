@@ -9,7 +9,7 @@ import { createHostTracker } from './host-metrics.js';
 import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
 import { liveState } from './runtime.js';
-import { loadConfig, loadState, removeAccount, saveConfig, upsertAccount } from './storage.js';
+import { loadConfig, loadState, removeAccount, updateConfig, upsertAccount } from './storage.js';
 import type { ResetCredit, StoredAccount } from './types.js';
 
 export async function runTui(): Promise<void> {
@@ -38,7 +38,7 @@ export async function runTui(): Promise<void> {
   // place — never by restarting it, which cut every response in flight. Only
   // a stopped server is started. Silent when it simply applied.
   const apply = async (done = ''): Promise<void> => { let note: string; try { note = describeApply(await applyConfig()); } catch (error) { note = (error as Error).message; } message = [done, note === 'applied' ? '' : note].filter(Boolean).join(' — '); };
-  const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const config = await loadConfig(); const account = selected(config.accounts); if (!account) return; fn(account, config.accounts); await saveConfig(config); await apply(); };
+  const mutate = async (fn: (account: StoredAccount, accounts: StoredAccount[]) => void): Promise<void> => { const saved = await updateConfig((config) => { const account = selected(config.accounts); if (!account) return false; fn(account, config.accounts); }); if (saved) await apply(); };
   // Fleet-wide quota re-measure. The server owns the pools (and the committed
   // probe template), so this asks it over the local control channel rather than
   // restarting it — a restart only re-read profiles and left every bar blank.
@@ -222,8 +222,12 @@ export function orderKey(priority: number | null, key: string): { priority?: num
 // is written for the selected account (the first one when none is), and
 // `saved` says whether anything was, so the caller knows to apply it.
 export async function pressOrderKey(selectedId: string | null, key: string): Promise<{ saved: boolean; move?: -1 | 1; done?: true }> {
-  const config = await loadConfig(); const account = config.accounts.find((a) => a.credentialId === selectedId) || config.accounts[0];
-  const step = orderKey(account?.priority ?? null, key);
-  if (!account || step.priority === undefined) return { saved: false, move: step.move, done: step.done };
-  account.priority = step.priority; await saveConfig(config); return { saved: true };
+  let step: ReturnType<typeof orderKey> = {};
+  const saved = await updateConfig((config) => {
+    const account = config.accounts.find((a) => a.credentialId === selectedId) || config.accounts[0];
+    step = orderKey(account?.priority ?? null, key);
+    if (!account || step.priority === undefined) return false;
+    account.priority = step.priority;
+  });
+  return saved ? { saved: true } : { saved: false, move: step.move, done: step.done };
 }

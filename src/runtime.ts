@@ -15,9 +15,10 @@ import { parseRoutes } from './routes.js';
 import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
-import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
+import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveState, updateCredentials } from './storage.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 import { UsageRefresher, type UsageRefreshOptions } from './usage-refresh.js';
+import { codexCapacitySettings } from './codex-capacity.js';
 import { Warmer } from './warmer.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
@@ -37,7 +38,7 @@ export function legacyPorts(config: TeamAIConfig, id: ProviderId): number[] {
 
 // What startServer hands back: stop() drains and closes every port, saves,
 // and gives up server.json; the process itself keeps running.
-export interface RunningServer { stop(): Promise<void> }
+export interface RunningServer { stop(): Promise<void>; ports: Readonly<Record<ProviderId | 'control', number>> }
 // background: false leaves out the timers that reach upstream (warm-up, usage,
 // profile and token refreshes, other agents' usage) — for tests.
 export interface StartOptions { background?: boolean; usageRefresh?: boolean | UsageRefreshOptions }
@@ -60,10 +61,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const bodyLimit = maxBodyBytes(config.proxy.maxBodyMb);
   // One budget for every proxy in this process: the memory is shared.
   const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)), timeoutMs: bodyTimeoutMs(config.proxy.bodyTimeoutMs) };
+  const capacitySettings = codexCapacitySettings(config);
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   const balance = parseBalance(config.routing?.balance);
-  for (const pool of pools) pool.balance = balance;
+  for (const pool of pools) { pool.balance = balance; pool.codexCapacity = capacitySettings; }
   // Model routes are checked before anything listens: a malformed route is a
   // startup error rather than a route that silently never applies.
   const routeWarnings = pools.flatMap((pool) => pool.setRoutes(parseRoutes(config.routes?.[pool.provider.id], pool.provider.id)).map((warning) => `${pool.provider.label} ${warning}`));
@@ -87,13 +89,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // interval instead of being overwritten by the stale one it replaced. Only
   // tokens still on disk are written back: one the dashboard deleted along
   // with its account (and a retired account's) is not brought back.
-  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) if (!a.retired && updated[a.credentialId]) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
+  const persistNow = (): Promise<void> => updateCredentials(async (updated) => { const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) if (!a.retired && updated[a.credentialId]) updated[a.credentialId] = a.credential; await saveState(next); });
   // A request starting or picking an account changes only what the dashboard
   // shows, so it rewrites state.json alone; credentials wait for a real save.
   const persistStateOnly = async (): Promise<void> => { await saveState(snapshot()); };
   let fullSave = false;
   const schedule = (): void => { if (saveTimer || stopped) return; saveTimer = setTimeout(() => { saveTimer = null; const run = fullSave ? persistNow : persistStateOnly; fullSave = false; saving = saving.then(run, run); }, 25); };
-  const persist = (event?: string | ActivityEvent): void => { if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
+  const persist = (event?: string | ActivityEvent): void => { if (typeof event === 'string' && /\bcapacity (?:retry|failure after output)\b/.test(event)) console.log(`${new Date().toISOString()} [TeamAI] ${event}`); if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
   const persistActivity = (): void => schedule();
   // Reset credits: the ledger goes to disk before and after each consume call,
   // through the same save chain so it never races a scheduled save.
@@ -104,6 +106,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);
   }
   const servers: Server[] = [];
+  const ports = { claude: 0, codex: 0, control: 0 };
   const readExternal = async (force = false): Promise<void> => { try { if (await external.tick(force)) persistActivity(); } catch { /* display only */ } };
   const listen = (server: Server, port: number): Promise<void> => new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, config.proxy.host, () => { server.removeListener('error', reject); resolve(); }); });
   // Proxy ports per provider: bound at startup for a provider with accounts,
@@ -114,12 +117,17 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const port = pool.provider.id === 'claude' ? config.proxy.claudePort : config.proxy.codexPort;
     const server = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
     try { await listen(server, port); } catch (error) { server.close(); server.removeAllListeners(); throw error; }
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('proxy has no TCP address');
+    // Port 0 asks for any free port; the running config then names the one
+    // bound, so a reload of a file that lists it sees no proxy change.
+    ports[pool.provider.id] = address.port;
+    if (port === 0) config.proxy[pool.provider.id === 'claude' ? 'claudePort' : 'codexPort'] = address.port;
     servers.push(server); bound.add(pool.provider.id);
     // Past startup, a socket-level error must never end the process: the relay
     // is the only route its clients have, and killing it over one bad socket
     // strands every open session with connection refused.
     server.on('error', (error) => console.log(`[TeamAI] ${pool.provider.label} proxy error: ${error.message}`));
-    console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${port}`);
+    console.log(`[TeamAI] ${pool.provider.label} proxy: http://${config.proxy.host}:${address.port}`);
 
     // Also answer on ports this provider used before. A client is handed its
     // base URL through the environment when it starts (cli.ts), and a running
@@ -128,7 +136,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     // Keeping the old port alive is what makes a port change survivable.
     // Failures here are not fatal: a port taken by something else just means
     // that one legacy address is unavailable, not that the proxy cannot serve.
-    for (const legacy of legacyPorts(config, pool.provider.id)) {
+    // A port picked at random was never handed to a session, so it has none.
+    for (const legacy of port === 0 ? [] : legacyPorts(config, pool.provider.id)) {
       const alias = createProxy(pool, config.proxy.clientToken, persist, () => pool.totalCapacity(), activity, body);
       try {
         await listen(alias, legacy);
@@ -187,6 +196,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       res.end(JSON.stringify({ ...total, ready, ...changes }));
     });
     await listen(control, config.proxy.controlPort ?? config.proxy.claudePort + 100); servers.push(control);
+    const address = control.address(); if (!address || typeof address === 'string') throw new Error('control has no TCP address');
+    ports.control = address.port; if (config.proxy.controlPort === 0) config.proxy.controlPort = address.port;
   } catch (error) {
     // Close what did bind, drop the save a route warning may have scheduled,
     // and let the reason go up (to server-start.log, via cli.ts).
@@ -212,7 +223,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // warmer that silently stopped warming left no trace anywhere (2026-10-19).
   const codexPool = pools.find((pool) => pool.provider.id === 'codex');
   const warmer = background && codexPool && config.warmup?.enabled !== false
-    ? new Warmer(codexPool, { enabled: true, port: config.proxy.codexPort, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
+    ? new Warmer(codexPool, { enabled: true, port: ports.codex, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
     : null;
   if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
   usageRefresher?.start();
@@ -272,7 +283,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     stopped = true; if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     saving = saving.then(persistNow, persistNow); await saving; await releaseServerFile(serverPath);
   };
-  return { stop };
+  return { stop, ports };
 }
 
 // Remove server.json only while it still names this process. A restart lets the

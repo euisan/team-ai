@@ -4,6 +4,8 @@
 
 > **Traducción desactualizada:** esta traducción aún no refleja los cambios recientes del README en inglés (las funciones y claves de configuración añadidas desde la actividad en curso). Para el comportamiento y la configuración, consulta el [README en inglés](README.md).
 
+> **Pendiente de traducir:** los reintentos de capacidad de Codex y las opciones `codexCapacity*` se describen en el [README en inglés](README.md).
+
 TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **Codex**. Mantiene un grupo de cuentas independiente para cada proveedor y reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota.
 
 ![Panel de TeamAI](docs/dashboard.png)
@@ -243,6 +245,8 @@ La configuración y las credenciales viven en `$TEAMAI_HOME`, con respaldo en
 `$XDG_CONFIG_HOME/teamai` y luego en `~/.config/teamai`. Los proxies se enlazan
 a `127.0.0.1` y exigen un token de cliente local generado.
 
+Cada cambio en `config.json` o `credentials.json` vuelve a leer el archivo y lo escribe mientras retiene `<archivo>.lock`, un proceso a la vez (el servidor, el panel o un comando), mediante un archivo temporal propio que se renombra a su sitio. Por eso los guardados simultáneos ni corrompen un archivo ni se deshacen entre sí: un guardado del servidor no pierde un inicio de sesión ni vuelve a escribir una cuenta borrada. Un lock que dejó un proceso ya terminado se recupera.
+
 `config.json` se crea en la primera ejecución con estos valores por defecto:
 
 | Clave | Valor por defecto | Significado |
@@ -285,6 +289,8 @@ npm run typecheck
 npm test
 npm run lint
 ```
+
+`npm test` carga `test/isolation.ts` antes de cada archivo. Cada prueba usa su propio `TEAMAI_HOME` y directorio personal temporales; los servidores de prueba escuchan en el puerto 0; y una prueba que toque los directorios reales de TeamAI, Codex o Claude, los puertos del relay (3456/3457/3556 y 3466/3467/3566) o cualquier host fuera de la máquina falla, aunque el código bajo prueba se trague el error.
 
 Consulta [NOTICE](NOTICE) para lo relativo a obra derivada y [SECURITY.md](SECURITY.md) para el modelo de seguridad local.
 

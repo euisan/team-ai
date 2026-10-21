@@ -176,14 +176,14 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
   const routed = (r: { provider: string; route?: string | null; routeFallback?: boolean }): string => r.route ? ` ${color(tint(r.provider, r.route), `[route:${r.route}${r.routeFallback ? '→fallback' : ''}]`)}` : '';
   const out = shownActive.map((entry) => {
     const account = entry.account ? ` → ${entry.account}` : '';
-    return `${color(36, spin)} ${clock(entry.startedAt)}  ${tag(entry.sessionId)}${entry.providerLabel} ${entry.method} ${entry.path}${model(entry, true)}${account}${routed(entry)} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
+    return `${color(36, spin)} ${clock(entry.startedAt)}  ${tag(entry.sessionId)}${entry.providerLabel} ${entry.method} ${entry.path}${model(entry, true)}${account}${routed(entry)}${entry.capacityRetries ? color(33, ` capacity retry x${entry.capacityRetries}`) : ''} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
   });
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(`  ${clock(event.at)}  ${event.message}`); continue; }
     const failed = typeof request.status !== 'number' || request.status >= 400 || Boolean(request.streamEnd);
     const outcome = `(${request.status}${request.streamEnd ? ` ${request.streamEnd}` : ''}, ${(request.durationMs / 1000).toFixed(1)}s)`;
-    out.push(`  ${clock(event.at)}  ${tag(request.sessionId)}${request.providerLabel} ${request.method} ${request.path}${model(request, false)}${request.account ? ` → ${request.account}` : ''}${routed(request)} ${failed ? color(31, outcome) : outcome}`);
+    out.push(`  ${clock(event.at)}  ${tag(request.sessionId)}${request.providerLabel} ${request.method} ${request.path}${model(request, false)}${request.account ? ` → ${request.account}` : ''}${routed(request)}${request.capacityRetries ? color(33, ` capacity retry x${request.capacityRetries}`) : ''} ${failed ? color(31, outcome) : outcome}`);
   }
   return out;
 }
@@ -503,14 +503,14 @@ function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: 
   const out = shownActive.map((entry) => {
     const seconds = Math.max(0, Math.round((now - entry.startedAt) / 1000));
     const elapsed = (seconds < 100 ? `${seconds}s` : `${Math.round(seconds / 60)}m`).padStart(3);
-    return fit(`${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.account ?? ''}`, width);
+    return fit(`${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.capacityRetries ? color(33, `retry x${entry.capacityRetries} `) : ''}${entry.account ?? ''}`, width);
   });
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(fit(` ${hhmm(event.at)} ${event.message}`, width)); continue; }
     const failed = typeof request.status !== 'number' || request.status >= 400 || Boolean(request.streamEnd);
     const status = String(request.status).padStart(3);
-    out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.account ?? ''}`, width));
+    out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.capacityRetries ? color(33, `retry x${request.capacityRetries} `) : ''}${request.account ?? ''}`, width));
   }
   return out;
 }

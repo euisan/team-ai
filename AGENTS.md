@@ -137,6 +137,30 @@ TEAMAI_HOME=/tmp/teamai-test teamai status
 section. The proxy binds to `127.0.0.1` only. Do not change `proxy.host` to
 `0.0.0.0` — it would expose the user's subscription accounts to the network.
 
+Codex upstream capacity handling is on by default. `codexCapacityEnabled`
+(default `true`), `codexCapacityRetryMs` (`500`),
+`codexCapacityPreambleHoldMs` (`500`, `0` for no deadline) and
+`codexCapacityRotation` (`false`) are checked at startup and applied atomically
+by `POST /reload`. Retry intervals are whole milliseconds from 1 to 86400000;
+hold deadlines are whole milliseconds from 0 to 86400000. A bad value refuses
+the whole reload. Capacity retries have no count or elapsed-time ceiling and
+keep the account's slot reserved by default; disconnecting the client stops
+them. The Activity line stays active with a retry count, and server output
+records each retry. After output, capacity failures become stream disconnects
+without a terminal event so Codex can retry. The preamble/frame buffer is
+bounded at 4 MiB; an oversized unfinished frame also ends without a terminal
+event. Tests must use fake upstreams and an isolated `TEAMAI_HOME`; `npm test`
+enforces the isolation through `test/isolation.ts` (a temporary `TEAMAI_HOME`
+and `HOME` per test, port-0 listeners only, and no access to the real
+TeamAI/Codex/Claude directories, the relay's ports or non-loopback hosts). Start
+the real server in a test with `startOnAnyPorts` from `test/server-ports.ts`.
+
+Changes to `config.json` and `credentials.json` go through `updateConfig` /
+`updateCredentials` in `src/storage.ts`: a read/change/write under
+`<file>.lock`, serialized in-process and across processes, with a unique temp
+file per write. Do not load, edit and `saveConfig` a file the server or another
+command may be changing at the same time.
+
 Startup failures write their reason to `$TEAMAI_HOME/server-start.log`. Read it
 before speculating; a port conflict is the common cause.
 
@@ -148,6 +172,7 @@ before speculating; a port conflict is the common cause.
 | `src/runtime.ts` | Server lifecycle, warmup timer, profile refresh |
 | `src/account-pool.ts` | Selection order, quota windows, warmup probes |
 | `src/proxy.ts` | Request relaying and retry-on-another-account |
+| `src/codex-capacity.ts` | Codex capacity detection, bounded SSE gate and reloadable settings |
 | `src/providers.ts` | Claude/Codex specifics: headers, quota parsing, refresh |
 | `src/frame.ts` | The dashboard as text: display order, gauges, the frame builder both the TUI and capture draw through, and the narrow (< 80 columns) summary layout |
 | `src/columns.ts` | Terminal cell widths (wide/zero-width characters), `fit`, and the usage grid every dashboard panel shares (identity, three gauges, tail) |
@@ -159,12 +184,12 @@ before speculating; a port conflict is the common cause.
 | `src/routes.ts` | Model-route parsing and matching (`parseRoutes` is the one validator) |
 | `src/route-config.ts` | Saving routes (validate, write only `routes`, reload a running server); `teamai route` |
 | `src/route-control.ts` | Control-port `POST /routes/reload` |
-| `src/config-reload.ts` | Control-port `POST /reload`: validate `config.json` whole, then apply accounts and routes to the running pools in place |
+| `src/config-reload.ts` | Control-port `POST /reload`: validate `config.json` whole, then apply accounts, routes and Codex capacity settings to the running pools in place |
 | `src/config-apply.ts` | What the dashboard and account commands call after a write: reload a running server, start one only when none runs |
 | `src/route-editor.ts` | The dashboard's route editor (`g`): pure key handling and drawing |
-| `src/storage.ts` | Config/state persistence, paths |
+| `src/storage.ts` | Config/state persistence, paths, the per-file lock that serializes config and credential changes |
 | `src/auth.ts` | Login and credential import |
-| `test/` | `node --test` suites |
+| `test/` | `node --test` suites; `isolation.ts` is the guard every run loads, `server-ports.ts` starts the real server on port 0 |
 
 ## Before you commit
 

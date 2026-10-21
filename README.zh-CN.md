@@ -4,6 +4,8 @@
 
 > **翻译滞后说明：** 本译文尚未反映英文 README 的近期变更（自进行中 Activity 显示起新增的功能和配置项）。行为与配置请以[英文 README](README.md) 为准。
 
+> **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置尚未翻译，请参阅[英文版](README.md)。
+
 TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
 
 ![TeamAI 仪表盘](docs/dashboard.png)
@@ -177,6 +179,8 @@ Codex keep-warm 采用事件驱动。已测量的 5 小时窗口重置 10 秒后
 
 配置和凭据存放在 `$TEAMAI_HOME` 中，若未设置则依次回退到 `$XDG_CONFIG_HOME/teamai` 和 `~/.config/teamai`。各代理均绑定在 `127.0.0.1` 上，并要求提供一个自动生成的本地客户端令牌。
 
+每次修改 `config.json` 或 `credentials.json` 时，都会在持有 `<文件>.lock`（同一时刻只有一个进程：服务器、仪表盘或命令）的情况下重新读取文件，并把每次写入专用的临时文件 rename 到原位。因此重叠的保存既不会损坏文件，也不会互相覆盖——登录不会因服务器保存而丢失，已删除的账号也不会被写回。已退出进程遗留的 lock 会被接管。
+
 `config.json` 会在首次运行时以下列默认值创建：
 
 | 键 | 默认值 | 含义 |
@@ -211,6 +215,8 @@ npm run typecheck
 npm test
 npm run lint
 ```
+
+`npm test` 会在每个文件之前加载 `test/isolation.ts`。每个测试使用各自的临时 `TEAMAI_HOME` 和主目录，测试服务器监听端口 0；触及真实 TeamAI、Codex 或 Claude 目录、中继端口（3456/3457/3556 和 3466/3467/3566）或本机之外任何主机的测试都会失败，即使被测代码吞掉了错误。
 
 衍生作品相关说明见 [NOTICE](NOTICE)，本地安全模型见 [SECURITY.md](SECURITY.md)。
 

@@ -5,6 +5,7 @@ import { AccountPool } from './account-pool.js';
 import { ActivityLog, type ActivitySink } from './activity.js';
 import type { Route } from './routes.js';
 import type { Provider, RuntimeAccount } from './types.js';
+import { gateCodexCapacityPreamble, isCapacityOverloadBody } from './codex-capacity.js';
 
 // Upper bound on waiting for upstream response headers only. Never applies to the body.
 const HEADER_TIMEOUT_MS = 300_000;
@@ -178,7 +179,7 @@ let requestCounter = 0;
 // an upstream stream that broke after the headers went out; finished is the
 // terminal SSE event the stream delivered, if any; setEnd records it on the
 // activity line.
-interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void; setEnd(end: StreamEnd): void }
+interface RequestTrack { cut: boolean; finished?: StreamEnd | null; setAccount(label: string, outsideRoute?: boolean): void; setEnd(end: StreamEnd): void; setCapacityRetries(count: number): void }
 
 // The body parsed once, for the fields the activity line shows. Not kept.
 function parsedBody(body: Buffer): unknown {
@@ -204,7 +205,7 @@ function finalStatus(res: ServerResponse, track: RequestTrack): number | string 
 export function createProxy(pool: AccountPool, clientToken: string, onChange: (event?: string) => void, capacity?: () => number, activity: ActivitySink = new ActivityLog((event) => onChange(event.message)), body: number | BodyOptions = DEFAULT_MAX_BODY_MB * MB): Server {
   const { limit: bodyLimit, budget = null, timeoutMs = DEFAULT_BODY_TIMEOUT_MS } = typeof body === 'number' ? { limit: body } : body;
   const server = createServer(async (req, res) => {
-    let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {}, setEnd: () => {} };
+    let opened: string | null = null; let track: RequestTrack = { cut: false, setAccount: () => {}, setEnd: () => {}, setCapacityRetries: () => {} };
     try {
       if (!authorized(req, clientToken)) return json(res, 401, { error: 'Unauthorized local client' });
       const rawPath = req.url || '/';
@@ -232,7 +233,7 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
       begin(); opened = id;
       // A response.failed or response.incomplete arrives under a 200: without
       // a mark of its own the line reads as a success.
-      track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })), setEnd: (end) => { if (end !== 'completed') safely(() => activity.update(id, { streamEnd: end })); } };
+      track = { cut: false, setAccount: (label, outsideRoute) => safely(() => activity.update(id, outsideRoute === undefined ? { account: label } : { account: label, routeFallback: outsideRoute })), setEnd: (end) => { if (end !== 'completed') safely(() => activity.update(id, { streamEnd: end })); }, setCapacityRetries: (count) => safely(() => activity.update(id, { capacityRetries: count })) };
       let held = 0;
       try {
         let body: Buffer;
@@ -303,12 +304,25 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
   let creditPass = pool.resetCredits.enabled && pool.provider.id === 'codex';
   const creditRetried = new Set<string>(); const staleRetried = new Set<string>();
   let retryOn: RuntimeAccount | null = null;
+  let capacityHeld: RuntimeAccount | null = null;
+  const capacityExcluded = new Set<string>(); let capacityRetries = 0;
+  const retryCapacity = async (account: RuntimeAccount): Promise<void> => {
+    const settings = pool.codexCapacity;
+    track.setCapacityRetries(++capacityRetries);
+    onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} capacity retry ${capacityRetries} after ${settings.retryMs}ms`);
+    if (settings.rotateAccounts && !pinnedAccount) { pool.release(account); capacityExcluded.add(account.id); }
+    else capacityHeld = account; // retain the lease: another request cannot steal this slot
+    await waitForRetry(settings.retryMs, res);
+    if (res.destroyed && capacityHeld) { pool.release(capacityHeld); capacityHeld = null; }
+  };
   while (!res.destroyed) {
     const forced: RuntimeAccount | null = retryOn; retryOn = null;
     const pinned = pinnedAccount ? pool.accounts.find((candidate) => candidate.id === pinnedAccount) || null : null;
-    const account: RuntimeAccount | null = pinnedAccount
+    let account: RuntimeAccount | null = capacityHeld ?? (pinnedAccount
       ? (!pinned || excluded.has(pinned.id) ? null : (pool.claim(pinned, excluded, wantsFable) ? pinned : null))
-      : (forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, excluded, wantsFable, route));
+      : (forced && pool.claim(forced, excluded, wantsFable) ? forced : pool.acquire(session, new Set([...excluded, ...capacityExcluded]), wantsFable, route)));
+    capacityHeld = null;
+    if (!account && capacityExcluded.size) { capacityExcluded.clear(); account = pool.acquire(session, excluded, wantsFable, route); }
     if (!account) {
       // Exhausting this request's candidates does not mean exhausting quota.
       // Only retry explicit pre-stream transient HTTP failures; never replay a
@@ -356,8 +370,15 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     let response: Response;
     let phase = 'token refresh';
     let dispatchedAt = Date.now();
+    const headerGuard = new AbortController();
+    let cancelRefresh: ((reason: Error) => void) | null = null;
+    const onClientClose = (): void => { const reason = new Error('client disconnected'); headerGuard.abort(reason); cancelRefresh?.(reason); };
+    res.once('close', onClientClose);
     try {
-      await pool.refresh(account);
+      // Refresh can be shared by other requests; detach this caller on close.
+      await Promise.race([pool.refresh(account), new Promise<never>((_resolve, reject) => { cancelRefresh = reject; })]);
+      cancelRefresh = null;
+      if (res.destroyed) { pool.release(account); res.off('close', onClientClose); return; }
       phase = 'upstream';
       const headers = pool.provider.buildHeaders(incomingHeaders(req), account);
       const sendBody = pool.provider.rewriteBody(body, account);
@@ -372,13 +393,15 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // to stop a request that never answers, so it is disarmed the moment
       // headers arrive; a streaming body has no time limit. A client that
       // goes away mid-stream is handled in pipeStream, so no slot leaks.
-      const headerGuard = new AbortController();
       dispatchedAt = Date.now();
       const headerTimer = setTimeout(() => headerGuard.abort(new Error('upstream sent no response headers within 300s')), HEADER_TIMEOUT_MS);
       try {
         response = await fetch(`${pool.provider.upstreamBase}${path}`, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : sendBody as Uint8Array<ArrayBuffer>, signal: headerGuard.signal });
       } finally { clearTimeout(headerTimer); }
     } catch (error) {
+      res.off('close', onClientClose);
+      if (res.destroyed) { pool.release(account); return; }
+      if (res.headersSent) { pool.release(account); track.cut = true; res.end(); return; }
       // A dropped connection is the network, not the account: on 2026-10-14
       // ETIMEDOUT bursts hit every account within seconds, the fleet was
       // exhausted in one pass and Claude Code got a bare 502. Mark it transient
@@ -398,7 +421,13 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // after enough such cuts the account sat at its concurrency cap with
       // quota to spare, shown active, serving nothing until a restart.
       let errorBody: string;
-      try { errorBody = await response.text(); } catch (error) { pool.release(account); throw error; }
+      try { errorBody = await response.text(); } catch (error) { pool.release(account); if (res.destroyed) return; throw error; } finally { res.off('close', onClientClose); }
+      if (pool.provider.id === 'codex' && pool.codexCapacity.enabled && response.status === 503 && isCapacityOverloadBody(errorBody)) {
+        await retryCapacity(account); continue;
+      }
+      // Only preamble was committed by an earlier attempt. A different error
+      // cannot replace that HTTP status; close without a terminal for the client.
+      if (res.headersSent) { pool.release(account); res.end(); return; }
       const decision = pool.provider.classifyFailure(response.status, response.headers, errorBody);
       pool.release(account);
       // A transient failure keeps its place as the request's failure of record:
@@ -472,20 +501,33 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       }
       copyHeaders(response, res); res.writeHead(response.status); res.end(errorBody); return;
     }
+    res.off('close', onClientClose);
     for (const item of forbidden) { pool.cooldown(item.account, item.ms, 'forbidden'); onChange(`${pool.provider.label} ${item.account.label} benched: 403 while ${account.label} served the same request`); }
     pool.commitProbe(path, incomingHeaders(req), body, response.headers);
-    copyHeaders(response, res); res.writeHead(response.status);
+    const isCodexCapacityStream = pool.provider.id === 'codex' && pool.codexCapacity.enabled && response.body && isEventStream(response.headers);
+    if (res.headersSent && !isCodexCapacityStream) { await response.body?.cancel().catch(() => {}); pool.release(account); res.end(); return; }
+    if (!isCodexCapacityStream && !res.headersSent) { copyHeaders(response, res); res.writeHead(response.status); }
     // A stream that breaks after the 200 was written used to be logged as a
     // plain 200, indistinguishable from success; the client saw a destroyed
     // socket ("error decoding response body") and the relay showed nothing.
     let cut: string | null = null;
+    let released = false;
     try {
       if (!response.body) res.end();
-      else await pipeStream(response.body, res, isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; track.setEnd(end); }) : null);
+      else if (isCodexCapacityStream) {
+        const gate = gateCodexCapacityPreamble(response.body, pool.codexCapacity.preambleHoldMs);
+        await pipeStream(gate.stream, res, new SseWatcher((end) => { track.finished = end; track.setEnd(end); }), false, () => { if (!res.headersSent) { copyHeaders(response, res); res.writeHead(response.status); } });
+        if (gate.outcome.retry) { released = true; await retryCapacity(account); continue; }
+        if (gate.outcome.afterOutput || gate.outcome.bufferLimit) {
+          track.cut = true;
+          onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${gate.outcome.afterOutput ? 'capacity failure after output' : 'SSE buffer limit'}; stream ended without terminal event`);
+        }
+        if (!res.destroyed) { if (!res.headersSent) { copyHeaders(response, res); res.writeHead(response.status); } res.end(); }
+      } else await pipeStream(response.body, res, isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; track.setEnd(end); }) : null);
     } catch (error) { cut = (error as Error).message; track.cut = true; throw error; }
     // The finished-request line itself comes from the activity log; only a
     // cut, with its cause, needs a sentence of its own.
-    finally { pool.release(account); if (cut) onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} stream cut mid-body: ${cut}`); }
+    finally { if (!released) pool.release(account); if (cut) onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} stream cut mid-body: ${cut}`); }
     return;
   }
 }
@@ -506,7 +548,7 @@ async function waitForRetry(ms: number, res: ServerResponse): Promise<void> {
 // hung here forever and the account's inflight slot leaked until restart. On
 // close the upstream read is cancelled too, so the model stops generating into
 // the void instead of spending the account's quota on a response nobody reads.
-async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse, watcher: SseWatcher | null = null): Promise<void> {
+async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse, watcher: SseWatcher | null = null, endResponse = true, onFirstChunk: (() => void) | null = null): Promise<void> {
   const reader = body.getReader();
   const closed = new Promise<void>((resolve) => { if (res.destroyed) resolve(); else res.once('close', () => resolve()); });
   const onClose = () => { void reader.cancel().catch(() => {}); };
@@ -517,10 +559,11 @@ async function pipeStream(body: ReadableStream<Uint8Array>, res: ServerResponse,
       if (res.destroyed) break;
       // The watcher reads what was just written, after it is on its way:
       // the bytes are untouched and nothing waits on the parse.
+      onFirstChunk?.(); onFirstChunk = null;
       const flowing = res.write(Buffer.from(part.value)); watcher?.feed(part.value);
       if (!flowing && !res.destroyed) await Promise.race([new Promise<void>((resolve) => res.once('drain', resolve)), closed]);
     }
-    if (!res.destroyed) res.end();
+    if (endResponse && !res.destroyed) res.end();
   } finally { res.removeListener('close', onClose); await reader.cancel().catch(() => {}); }
 }
 

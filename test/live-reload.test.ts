@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
 import { providers } from '../src/providers.js';
-import { startServer, type RunningServer } from '../src/runtime.js';
+import type { RunningServer } from '../src/runtime.js';
+import { anyPorts, startOnAnyPorts } from './server-ports.js';
 import { defaultConfig, loadConfig, removeAccount, saveConfig } from '../src/storage.js';
 import type { ExternalUsage } from '../src/external-usage.js';
 import type { PersistedState, TeamAIConfig } from '../src/types.js';
@@ -20,11 +21,6 @@ import type { PersistedState, TeamAIConfig } from '../src/types.js';
 
 const TOKEN = 'local-test-token';
 
-async function freePort(): Promise<number> {
-  const probe = createServer(); await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
-  const address = probe.address(); assert(address && typeof address !== 'string');
-  await new Promise<void>((r) => probe.close(() => r())); return address.port;
-}
 
 const grok = (at: number): ExternalUsage => ({ provider: 'grok', status: 'ok', identity: null, groups: [{ name: 'Grok', windows: [{ label: 'wk', minutes: 10_080, usedPercent: 12, resetsAt: null }] }], note: null, measuredAt: at, lastOkAt: at });
 const codex = (id: string, priority: number | null) => ({ id, provider: 'codex' as const, label: `${id}@example.com`, enabled: true, priority, credentialId: `codex:${id}`, createdAt: '' });
@@ -54,7 +50,7 @@ async function home(edit: (config: TeamAIConfig) => void = () => {}) {
   const root = await mkdtemp(join(tmpdir(), 'teamai-live-reload-'));
   const previous = process.env.TEAMAI_HOME; process.env.TEAMAI_HOME = root;
   const config = defaultConfig();
-  config.proxy = { ...config.proxy, claudePort: await freePort(), codexPort: await freePort(), controlPort: await freePort(), clientToken: TOKEN };
+  config.proxy = { ...config.proxy, ...anyPorts, clientToken: TOKEN };
   config.warmup = { enabled: false };
   // c first, then a; b is on auto.
   config.accounts = [codex('a', 2), codex('b', null), codex('c', 1)];
@@ -75,7 +71,7 @@ test('a stream in flight runs to the end through a re-rank, a switch-off and a d
   const up = await upstream(); const h = await home(); const base = providers.codex.upstreamBase; providers.codex.upstreamBase = up.base;
   let server: RunningServer | undefined;
   try {
-    server = await startServer({ background: false });
+    server = await startOnAnyPorts(h.config);
     const port = h.config.proxy.codexPort;
     // c is tried first, is out of quota and is benched; a serves.
     const first = await ask(port); assert.equal(first.status, 200); assert.equal(await first.text(), 'first second');
@@ -122,7 +118,7 @@ test('a config the server cannot use is refused with the reason, and the running
   const up = await upstream(); const h = await home((c) => { c.accounts = [codex('a', 1), codex('b', 2)]; }); const base = providers.codex.upstreamBase; providers.codex.upstreamBase = up.base;
   let server: RunningServer | undefined;
   try {
-    server = await startServer({ background: false });
+    server = await startOnAnyPorts(h.config);
     const port = h.config.proxy.codexPort;
     const refusals: Array<[(c: TeamAIConfig) => void, RegExp]> = [
       [(c) => { find(c, 'b').priority = 'top' as never; find(c, 'a').priority = 5; }, /accounts\[1\]: priority must be a whole number/],
@@ -155,8 +151,8 @@ test('a provider\'s first account opens its port on reload; restart-only setting
   const h = await home();
   let server: RunningServer | undefined;
   try {
-    server = await startServer({ background: false });
-    assert.equal(await listening(h.config.proxy.claudePort), false, 'no Claude accounts, no Claude port');
+    server = await startOnAnyPorts(h.config);
+    assert.equal(server.ports.claude, 0, 'no Claude accounts, no Claude port');
     await edit((c) => { c.accounts.push({ id: 'k', provider: 'claude', label: 'k@example.com', enabled: true, priority: null, credentialId: 'claude:k', createdAt: '' }); c.switchThreshold = 0.9; });
     const credentials = JSON.parse(await readFile(join(h.root, 'credentials.json'), 'utf8')) as Record<string, unknown>;
     await writeFile(join(h.root, 'credentials.json'), JSON.stringify({ ...credentials, 'claude:k': credential('k') }));
@@ -164,7 +160,7 @@ test('a provider\'s first account opens its port on reload; restart-only setting
     const result = await res.json() as { accounts: { claude: { added: number } }; warnings: string[] };
     assert.equal(result.accounts.claude.added, 1);
     assert.deepEqual(result.warnings, ['switchThreshold changed — applies after teamai restart']);
-    assert.equal(await listening(h.config.proxy.claudePort), true);
+    assert.notEqual(server.ports.claude, 0); assert.equal(await listening(server.ports.claude), true);
   } finally { await server?.stop(); await h.restore(); }
 });
 
@@ -172,7 +168,7 @@ test('reload is local-only, behind the client token, and POST only', async () =>
   const h = await home();
   let server: RunningServer | undefined;
   try {
-    server = await startServer({ background: false });
+    server = await startOnAnyPorts(h.config);
     const url = `http://127.0.0.1:${h.config.proxy.controlPort}/reload`;
     assert.equal((await fetch(url, { method: 'POST', headers: { authorization: 'Bearer nope' } })).status, 401);
     assert.equal((await fetch(url, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 405);
@@ -200,4 +196,34 @@ test('an account removed while serving finishes that request, takes no new one, 
   assert.equal(held.retired, false); assert.equal(held.enabled, true); assert.equal(held.usage, 0.4);
   again.release(held);
   assert.deepEqual(again.accounts.map((x) => x.id), ['a', 'b'], 'a live account stays after release');
+});
+
+test('Codex capacity settings are validated and adopted atomically by POST /reload without replacing the listener', { timeout: 10_000 }, async () => {
+  let attempts = 0; let alwaysFail = true; const accounts: string[] = []; const times: number[] = [];
+  const fake = createServer((req, res) => {
+    req.resume(); attempts++; accounts.push(String(req.headers['chatgpt-account-id'])); times.push(Date.now());
+    if (alwaysFail || attempts % 2) { res.writeHead(503, { 'retry-after': '120' }); res.end('{"error":{"code":"server_is_overloaded"}}'); }
+    else { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"type":"response.completed"}\n\n'); }
+  });
+  await new Promise<void>((r) => fake.listen(0, '127.0.0.1', r)); const address = fake.address(); assert(address && typeof address !== 'string');
+  const h = await home((c) => { c.accounts = [codex('a', 1), codex('b', 2)]; c.codexCapacityEnabled = false; });
+  const base = providers.codex.upstreamBase; providers.codex.upstreamBase = `http://127.0.0.1:${address.port}`;
+  let server: RunningServer | undefined;
+  try {
+    server = await startOnAnyPorts(h.config);
+    const first = await ask(h.config.proxy.codexPort); assert.equal(first.status, 503); await first.text(); assert.equal(attempts, 2);
+    await edit((c) => { c.codexCapacityEnabled = true; c.codexCapacityRetryMs = 60; c.codexCapacityPreambleHoldMs = 0; c.codexCapacityRotation = true; });
+    assert.equal((await reload(h.config)).status, 200);
+    alwaysFail = false; attempts = 0; accounts.length = 0; times.length = 0;
+    const next = await ask(h.config.proxy.codexPort); assert.equal(next.status, 200); assert.equal(await next.text(), 'data: {"type":"response.completed"}\n\n');
+    assert.equal(attempts, 2); assert.deepEqual(accounts, ['a', 'b']); assert(times[1]! - times[0]! >= 55);
+    for (const key of ['codexCapacityEnabled', 'codexCapacityRetryMs', 'codexCapacityPreambleHoldMs', 'codexCapacityRotation'] as const) {
+      const before = await readFile(join(h.root, 'config.json'), 'utf8');
+      await edit((c) => { find(c, 'a').enabled = false; Object.assign(c, { [key]: 'invalid' }); });
+      const refused = await reload(h.config); assert.equal(refused.status, 400); assert.match((await refused.json() as { error: string }).error, new RegExp(key));
+      attempts = 0; accounts.length = 0;
+      const served = await ask(h.config.proxy.codexPort); assert.equal(served.status, 200); await served.text(); assert.deepEqual(accounts, ['a', 'b'], 'invalid settings must not partly apply account edits');
+      await writeFile(join(h.root, 'config.json'), before);
+    }
+  } finally { await server?.stop(); providers.codex.upstreamBase = base; fake.closeAllConnections(); fake.close(); await h.restore(); }
 });

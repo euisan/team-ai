@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
 import { claudeProvider, codexProvider, providers } from '../src/providers.js';
-import { startServer, type RunningServer } from '../src/runtime.js';
+import type { RunningServer } from '../src/runtime.js';
+import { anyPorts, startOnAnyPorts } from './server-ports.js';
 import { defaultConfig, loadConfig, saveConfig } from '../src/storage.js';
 import { UsageRefresher, defaultUsageJitter } from '../src/usage-refresh.js';
 import type { OAuthCredential, PersistedState, Provider, StoredAccount, TeamAIConfig } from '../src/types.js';
@@ -46,14 +47,6 @@ function fakeClock(start: number) {
   };
 }
 
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
-  const address = probe.address();
-  assert(address && typeof address !== 'string');
-  await new Promise<void>((r) => probe.close(() => r()));
-  return address.port;
-}
 
 const storedAccount = (
   provider: 'claude' | 'codex',
@@ -462,9 +455,7 @@ test('POST /reload updates usage refresh targets and persists refreshed state ac
     const config = defaultConfig();
     config.proxy = {
       ...config.proxy,
-      claudePort: await freePort(),
-      codexPort: await freePort(),
-      controlPort: await freePort(),
+      ...anyPorts,
       clientToken: token,
     };
     config.warmup = { enabled: false };
@@ -484,7 +475,7 @@ test('POST /reload updates usage refresh targets and persists refreshed state ac
     );
     await writeFile(join(root, 'state.json'), JSON.stringify({ version: 1, accounts: {}, events: [] }));
 
-    server = await startServer({
+    server = await startOnAnyPorts(config, {
       background: false,
       usageRefresh: {
         intervalMs: 60_000,
@@ -590,9 +581,7 @@ test('startServer with background enabled automatically probes enabled idle acco
     const config = defaultConfig();
     config.proxy = {
       ...config.proxy,
-      claudePort: await freePort(),
-      codexPort: await freePort(),
-      controlPort: await freePort(),
+      ...anyPorts,
       clientToken: 'bg-token',
     };
     config.warmup = { enabled: false };
@@ -611,7 +600,7 @@ test('startServer with background enabled automatically probes enabled idle acco
     );
     await writeFile(join(root, 'state.json'), JSON.stringify({ version: 1, accounts: {}, events: [] }));
 
-    server = await startServer({ background: true });
+    server = await startOnAnyPorts(config, { background: true });
     for (let i = 0; i < 30 && probed.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 20));
     }
