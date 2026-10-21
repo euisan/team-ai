@@ -15,7 +15,7 @@ import { parseRoutes } from './routes.js';
 import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js';
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
-import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
+import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveState, updateCredentials } from './storage.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 import { UsageRefresher, type UsageRefreshOptions } from './usage-refresh.js';
 import { codexCapacitySettings } from './codex-capacity.js';
@@ -89,7 +89,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // interval instead of being overwritten by the stale one it replaced. Only
   // tokens still on disk are written back: one the dashboard deleted along
   // with its account (and a retired account's) is not brought back.
-  const persistNow = async (): Promise<void> => { const updated = await loadCredentials(); const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) if (!a.retired && updated[a.credentialId]) updated[a.credentialId] = a.credential; await Promise.all([saveState(next), saveCredentials(updated)]); };
+  const persistNow = (): Promise<void> => updateCredentials(async (updated) => { const adopted = pools.reduce((n, p) => n + p.adoptCredentials(updated), 0); if (adopted) events.push({ at: Date.now(), message: `Adopted ${adopted} re-logged credential(s)` }); const next = snapshot(); for (const p of pools) for (const a of p.accounts) if (!a.retired && updated[a.credentialId]) updated[a.credentialId] = a.credential; await saveState(next); });
   // A request starting or picking an account changes only what the dashboard
   // shows, so it rewrites state.json alone; credentials wait for a real save.
   const persistStateOnly = async (): Promise<void> => { await saveState(snapshot()); };

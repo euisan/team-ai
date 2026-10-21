@@ -5,12 +5,12 @@
 import { ROUTE_RELOAD_PATH } from './route-control.js';
 import { parseRoutes, type RouteConfig } from './routes.js';
 import { runningPid } from './runtime.js';
-import { loadConfig, saveConfig } from './storage.js';
+import { loadConfig, updateConfig } from './storage.js';
 import type { ProviderId, StoredAccount } from './types.js';
 
 // Throws parseRoutes' own message and writes nothing when the list is invalid.
-// Everything else in config.json is written back as it was read; saveConfig
-// writes a 0600 temp file and renames it over the old one.
+// Everything else in config.json is written back as it was read; updateConfig
+// re-reads it under the file lock and renames a 0600 temp file over it.
 function accountConfigured(accounts: StoredAccount[], provider: ProviderId, ref: string | number): boolean {
   const own = accounts.filter((account) => account.provider === provider);
   if (typeof ref === 'number') return Number.isInteger(ref) && ref >= 0 && ref < own.length;
@@ -30,13 +30,13 @@ const sameRoutes = (a: RouteConfig[] | undefined, b: RouteConfig[]): boolean => 
 
 export async function saveRoutes(provider: ProviderId, routes: RouteConfig[], expected?: RouteConfig[]): Promise<void> {
   parseRoutes(routes, provider);
-  const config = await loadConfig();
-  assertExclusiveAccounts(provider, routes, config.accounts);
-  if (expected && !sameRoutes(config.routes?.[provider], expected)) {
-    throw new Error(`routes.${provider} changed while you were editing; reload and try again`);
-  }
-  config.routes = { ...config.routes, [provider]: routes };
-  await saveConfig(config);
+  await updateConfig((config) => {
+    assertExclusiveAccounts(provider, routes, config.accounts);
+    if (expected && !sameRoutes(config.routes?.[provider], expected)) {
+      throw new Error(`routes.${provider} changed while you were editing; reload and try again`);
+    }
+    config.routes = { ...config.routes, [provider]: routes };
+  });
 }
 
 export type ReloadOutcome = { status: 'applied'; warnings: string[] } | { status: 'not-running' } | { status: 'failed'; error: string };

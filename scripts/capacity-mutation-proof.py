@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove capacity tests reject individual regressions; always restore source bytes."""
+"""Prove the capacity and storage-race tests each reject a single regression; always restore source bytes."""
 import argparse
 import hashlib
 import json
@@ -34,6 +34,10 @@ cases = [
     ('activity-count', 'src/proxy.ts', 'track.setCapacityRetries(++capacityRetries);', 'capacityRetries++;', 'a capacity wait retains its account lease', 'test/codex-capacity-proxy.test.ts'),
     ('reload-adoption', 'src/config-reload.ts', '    pool.codexCapacity = capacity;', '    // capacity adoption removed', 'Codex capacity settings are validated and adopted atomically', 'test/live-reload.test.ts'),
     ('reload-validation', 'src/config-reload.ts', '  const capacity = codexCapacitySettings(config);', '  const capacity = codexCapacitySettings({});', 'Codex capacity settings are validated and adopted atomically', 'test/live-reload.test.ts'),
+    # Storage races: the fix taken back out, one piece at a time.
+    ('storage-shared-temp', 'src/storage.ts', "const temp = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;", "const temp = `${path}.${process.pid}.tmp`;", 'concurrent atomic saves use independent temporary files', 'test/storage-race.test.ts'),
+    ('storage-no-file-lock', 'src/storage.ts', 'const locked = (): Promise<T> => withFileLock(path, run);', 'const locked = (): Promise<T> => run();', 'from another process|from different processes', 'test/storage-race.test.ts'),
+    ('storage-stale-lock', 'src/storage.ts', 'if (await staleLock(lock)) await rm(lock, { force: true }); else await delay(LOCK_POLL_MS);', 'await delay(LOCK_POLL_MS);', 'a lock left by a process that died', 'test/storage-race.test.ts'),
 ]
 results = []
 for name, filename, before, after, pattern, test_file in cases:
@@ -47,7 +51,7 @@ for name, filename, before, after, pattern, test_file in cases:
     try:
         path.write_text(text.replace(before, after, 1))
         command = ['node', '--test', '--test-reporter=tap', '--import', 'tsx', f'--test-name-pattern={pattern}', test_file]
-        result = subprocess.run(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
+        result = subprocess.run(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, check=False)
         output = result.stdout.decode(errors='replace')
         (args.out_dir / f'{name}.log').write_text(output)
         failed_tests = re.findall(r'^not ok \d+ - (.*)$', output, re.M)

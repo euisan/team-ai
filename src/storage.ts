@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { codexUserId } from './auth.js';
 import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
 
@@ -18,17 +19,76 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
   try { return JSON.parse(await readFile(path, 'utf8')) as T; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback; throw error; }
 }
 
+// Each write gets a temporary file of its own: two saves of one file used to
+// share `<file>.<pid>.tmp`, so the second overwrote the first's half-written
+// copy and the first rename then failed or moved the wrong bytes into place.
 async function atomicWrite(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temp = `${path}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await rename(temp, path);
+  const temp = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+  try {
+    await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    await rename(temp, path);
+  } finally { await rm(temp, { force: true }); }
+}
+
+// A lock older than this is from a process that died holding it: every hold is
+// one read, one change and one write.
+const LOCK_STALE_MS = 10_000;
+const LOCK_POLL_MS = 10;
+
+async function staleLock(lock: string): Promise<boolean> {
+  try {
+    const [text, info] = await Promise.all([readFile(lock, 'utf8'), stat(lock)]);
+    if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return true;
+    const pid = Number(text);
+    // Still being written by its owner: only its age can make it stale.
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+  } catch { return false; }
+}
+
+// `<file>.lock`, created exclusively, is held across processes (the server's
+// saves, the dashboard, a CLI command) for the whole read/change/write.
+async function withFileLock<T>(path: string, run: () => Promise<T>): Promise<T> {
+  const lock = `${path}.lock`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  for (;;) {
+    try { const handle = await open(lock, 'wx', 0o600); try { await handle.writeFile(String(process.pid)); } finally { await handle.close(); } break; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (await staleLock(lock)) await rm(lock, { force: true }); else await delay(LOCK_POLL_MS);
+    }
+  }
+  try { return await run(); } finally { await rm(lock, { force: true }); }
+}
+
+// Changes to one file run one at a time: queued in this process, and behind the
+// lock file between processes. Without it a server save that read the file
+// before a login or a delete wrote it back as it was, losing the login or
+// bringing the deleted account back.
+const queues = new Map<string, Promise<unknown>>();
+function serialized<T>(path: string, run: () => Promise<T>): Promise<T> {
+  const locked = (): Promise<T> => withFileLock(path, run);
+  const next = (queues.get(path) ?? Promise.resolve()).then(locked, locked);
+  const tail = next.then(() => {}, () => {}); queues.set(path, tail);
+  return next.finally(() => { if (queues.get(path) === tail) queues.delete(path); });
+}
+
+export function updateCredentials(update: (credentials: Record<string, OAuthCredential>) => void | Promise<void>): Promise<void> {
+  const path = paths().credentials;
+  return serialized(path, async () => { const current = await readJson<Record<string, OAuthCredential>>(path, {}); await update(current); await atomicWrite(path, current); });
+}
+
+// config.json read, changed and written under the same lock. A change that
+// returns false writes nothing; the result says whether it was written.
+export function updateConfig(change: (config: TeamAIConfig) => void | false | Promise<void | false>): Promise<boolean> {
+  const path = paths().config;
+  return serialized(path, async () => { const config = await readJson(path, defaultConfig()); if (await change(config) === false) return false; await atomicWrite(path, config); return true; });
 }
 
 export async function loadConfig(): Promise<TeamAIConfig> { return readJson(paths().config, defaultConfig()); }
-export async function saveConfig(config: TeamAIConfig): Promise<void> { await atomicWrite(paths().config, config); }
+export async function saveConfig(config: TeamAIConfig): Promise<void> { const path = paths().config; await serialized(path, () => atomicWrite(path, config)); }
 export async function loadCredentials(): Promise<Record<string, OAuthCredential>> { return readJson(paths().credentials, {}); }
-export async function saveCredentials(value: Record<string, OAuthCredential>): Promise<void> { await atomicWrite(paths().credentials, value); }
+export async function saveCredentials(value: Record<string, OAuthCredential>): Promise<void> { const path = paths().credentials; await serialized(path, () => atomicWrite(path, value)); }
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
 
@@ -54,25 +114,29 @@ function legacyAccount(config: TeamAIConfig, credentials: Record<string, OAuthCr
 }
 
 export async function upsertAccount(provider: ProviderId, label: string, credential: OAuthCredential): Promise<StoredAccount> {
-  const config = await loadConfig();
-  const credentials = await loadCredentials();
-  const key = accountKey(credential);
-  const existing = config.accounts.find((a) => a.provider === provider && a.id === key) || legacyAccount(config, credentials, provider, label, credential);
-  const credentialId = existing?.credentialId || `${provider}:${key}`;
-  const account: StoredAccount = existing || { id: key, provider, label, enabled: true, priority: null, credentialId, createdAt: new Date().toISOString() };
-  // A migrated record keeps its credentialId, so its saved usage history stays attached.
-  account.id = key;
-  account.label = label || account.label;
-  if (!existing) config.accounts.push(account);
-  credentials[credentialId] = credential;
-  await saveCredentials(credentials);
-  await saveConfig(config);
-  return account;
+  let saved!: StoredAccount;
+  await updateConfig(async (config) => {
+    const credentials = await loadCredentials();
+    const key = accountKey(credential);
+    const existing = config.accounts.find((a) => a.provider === provider && a.id === key) || legacyAccount(config, credentials, provider, label, credential);
+    const credentialId = existing?.credentialId || `${provider}:${key}`;
+    const account: StoredAccount = existing || { id: key, provider, label, enabled: true, priority: null, credentialId, createdAt: new Date().toISOString() };
+    // A migrated record keeps its credentialId, so its saved usage history stays attached.
+    account.id = key;
+    account.label = label || account.label;
+    if (!existing) config.accounts.push(account);
+    await updateCredentials((current) => { current[credentialId] = credential; });
+    saved = account;
+  });
+  return saved;
 }
 
 export async function removeAccount(credentialId: string): Promise<boolean> {
-  const config = await loadConfig(); const credentials = await loadCredentials(); const before = config.accounts.length;
-  config.accounts = config.accounts.filter((account) => account.credentialId !== credentialId); delete credentials[credentialId];
-  if (config.accounts.length === before) return false;
-  await Promise.all([saveConfig(config), saveCredentials(credentials)]); return true;
+  const removed = await updateConfig((config) => {
+    const before = config.accounts.length;
+    config.accounts = config.accounts.filter((account) => account.credentialId !== credentialId);
+    if (config.accounts.length === before) return false;
+  });
+  if (removed) await updateCredentials((current) => { delete current[credentialId]; });
+  return removed;
 }

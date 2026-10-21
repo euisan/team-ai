@@ -252,6 +252,13 @@ Configuration and credentials live in `$TEAMAI_HOME`, falling back to
 `$XDG_CONFIG_HOME/teamai` and then `~/.config/teamai`. The proxies bind to
 `127.0.0.1` and require a generated local client token.
 
+Every change to `config.json` or `credentials.json` re-reads the file and
+writes it back while holding `<file>.lock`, one process at a time (the server,
+the dashboard, a command), through a temporary file of its own that is renamed
+into place. Overlapping saves therefore neither tear a file nor undo each
+other — a login is not lost to a server save, and a deleted account is not
+written back. A lock left by a process that died is taken over.
+
 `config.json` is created on first run with these defaults:
 
 | Key | Default | Meaning |

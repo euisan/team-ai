@@ -245,6 +245,8 @@ La configuración y las credenciales viven en `$TEAMAI_HOME`, con respaldo en
 `$XDG_CONFIG_HOME/teamai` y luego en `~/.config/teamai`. Los proxies se enlazan
 a `127.0.0.1` y exigen un token de cliente local generado.
 
+Cada cambio en `config.json` o `credentials.json` vuelve a leer el archivo y lo escribe mientras retiene `<archivo>.lock`, un proceso a la vez (el servidor, el panel o un comando), mediante un archivo temporal propio que se renombra a su sitio. Por eso los guardados simultáneos ni corrompen un archivo ni se deshacen entre sí: un guardado del servidor no pierde un inicio de sesión ni vuelve a escribir una cuenta borrada. Un lock que dejó un proceso ya terminado se recupera.
+
 `config.json` se crea en la primera ejecución con estos valores por defecto:
 
 | Clave | Valor por defecto | Significado |
