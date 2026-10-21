@@ -18,6 +18,7 @@
 // apply at the next `teamai restart`.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AccountPool } from './account-pool.js';
+import { codexCapacitySettings } from './codex-capacity.js';
 import { parseBalance } from './pacing.js';
 import { secureEqual } from './proxy.js';
 import { isLoopback } from './reset-credit-control.js';
@@ -77,6 +78,7 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
   const accounts = checkAccounts(config.accounts);
   const routes = pools.map((pool) => parseRoutes(config.routes?.[pool.provider.id], pool.provider.id));
   const balance = parseBalance(config.routing?.balance);
+  const capacity = codexCapacitySettings(config);
   for (const pool of pools) if (accounts.some((a) => a.provider === pool.provider.id && credentials[a.credentialId])) await hooks.listen?.(pool);
 
   // Nothing below awaits: the swap is one step for every request.
@@ -85,6 +87,7 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
     result.accounts[pool.provider.id] = pool.sync(accounts, credentials);
     result.adopted += pool.adoptCredentials(credentials);
     pool.balance = balance;
+    pool.codexCapacity = capacity;
     result.routes[pool.provider.id] = routes[index]!.length;
     result.warnings.push(...pool.setRoutes(routes[index]!).map((warning) => `${pool.provider.label} ${warning}`));
   });

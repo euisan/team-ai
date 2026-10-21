@@ -4,6 +4,8 @@
 
 > **翻译滞后说明：** 本译文尚未反映英文 README 的近期变更（自进行中 Activity 显示起新增的功能和配置项）。行为与配置请以[英文 README](README.md) 为准。
 
+> **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置尚未翻译，请参阅[英文版](README.md)。
+
 TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
 
 ![TeamAI 仪表盘](docs/dashboard.png)

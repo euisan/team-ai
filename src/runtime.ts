@@ -18,6 +18,7 @@ import { providers } from './providers.js';
 import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveCredentials, saveState } from './storage.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 import { UsageRefresher, type UsageRefreshOptions } from './usage-refresh.js';
+import { codexCapacitySettings } from './codex-capacity.js';
 import { Warmer } from './warmer.js';
 
 // How long a stopping server waits for in-flight responses before cutting them.
@@ -60,10 +61,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const bodyLimit = maxBodyBytes(config.proxy.maxBodyMb);
   // One budget for every proxy in this process: the memory is shared.
   const body: BodyOptions = { limit: bodyLimit, budget: new BodyBudget(maxInflightBodyBytes(config.proxy.maxInflightBodyMb, bodyLimit)), timeoutMs: bodyTimeoutMs(config.proxy.bodyTimeoutMs) };
+  const capacitySettings = codexCapacitySettings(config);
   const pools = (['claude', 'codex'] as const).map((id) => new AccountPool(providers[id], config.accounts, credentials, state, config.switchThreshold, config.maxConcurrentPerAccount));
   if (pools.every((p) => p.accounts.length === 0)) throw new Error('No accounts configured');
   const balance = parseBalance(config.routing?.balance);
-  for (const pool of pools) pool.balance = balance;
+  for (const pool of pools) { pool.balance = balance; pool.codexCapacity = capacitySettings; }
   // Model routes are checked before anything listens: a malformed route is a
   // startup error rather than a route that silently never applies.
   const routeWarnings = pools.flatMap((pool) => pool.setRoutes(parseRoutes(config.routes?.[pool.provider.id], pool.provider.id)).map((warning) => `${pool.provider.label} ${warning}`));
@@ -93,7 +95,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const persistStateOnly = async (): Promise<void> => { await saveState(snapshot()); };
   let fullSave = false;
   const schedule = (): void => { if (saveTimer || stopped) return; saveTimer = setTimeout(() => { saveTimer = null; const run = fullSave ? persistNow : persistStateOnly; fullSave = false; saving = saving.then(run, run); }, 25); };
-  const persist = (event?: string | ActivityEvent): void => { if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
+  const persist = (event?: string | ActivityEvent): void => { if (typeof event === 'string' && /\bcapacity (?:retry|failure after output)\b/.test(event)) console.log(`${new Date().toISOString()} [TeamAI] ${event}`); if (event) { events.push(typeof event === 'string' ? { at: Date.now(), message: event } : event); if (events.length > 200) events.splice(0, events.length - 200); } fullSave = true; schedule(); };
   const persistActivity = (): void => schedule();
   // Reset credits: the ledger goes to disk before and after each consume call,
   // through the same save chain so it never races a scheduled save.

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
@@ -43,6 +44,8 @@ export class AccountPool {
   private usageRefreshes = new Map<string, Promise<boolean>>();
   private sweepInFlight = false;
   private usageRead: Promise<unknown> | null = null;
+  // Codex capacity retries, shared by the provider's proxy ports.
+  codexCapacity: CodexCapacitySettings = { ...CAPACITY_DEFAULTS };
   // Codex reset credits. The server fills these in: the settings from config,
   // saveNow to put state on disk immediately (a redemption is recorded before
   // the call and again after it, never left to the debounced save), and log

@@ -69,6 +69,12 @@ export interface TeamAIConfig {
   codexResetCreditsListRefreshMs?: number;
   // Also spend a ticket when only the short (5-hour) window is used up.
   codexResetCreditsSessionWindow?: boolean;
+  // Codex upstream model-capacity retry (enabled by default). Retries keep the
+  // selected account unless rotation is explicitly enabled.
+  codexCapacityEnabled?: boolean;
+  codexCapacityRetryMs?: number;
+  codexCapacityPreambleHoldMs?: number;
+  codexCapacityRotation?: boolean;
   accounts: StoredAccount[];
 }
 
@@ -163,6 +169,7 @@ export interface ActiveRequest {
   // A stream that delivered its terminal event as response.failed or
   // response.incomplete: the status says 200, the answer is not a whole one.
   streamEnd?: 'failed' | 'incomplete';
+  capacityRetries?: number;
 }
 
 // The same request once it has ended. status is the HTTP status the client
@@ -182,6 +189,7 @@ export interface RequestSummary {
   route?: string | null;
   routeFallback?: boolean;
   streamEnd?: 'failed' | 'incomplete';
+  capacityRetries?: number;
 }
 
 // message is the readable sentence (and what capture redaction rewrites);

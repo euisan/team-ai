@@ -201,3 +201,33 @@ test('an account removed while serving finishes that request, takes no new one, 
   again.release(held);
   assert.deepEqual(again.accounts.map((x) => x.id), ['a', 'b'], 'a live account stays after release');
 });
+
+test('Codex capacity settings are validated and adopted atomically by POST /reload without replacing the listener', { timeout: 10_000 }, async () => {
+  let attempts = 0; let alwaysFail = true; const accounts: string[] = []; const times: number[] = [];
+  const fake = createServer((req, res) => {
+    req.resume(); attempts++; accounts.push(String(req.headers['chatgpt-account-id'])); times.push(Date.now());
+    if (alwaysFail || attempts % 2) { res.writeHead(503, { 'retry-after': '120' }); res.end('{"error":{"code":"server_is_overloaded"}}'); }
+    else { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"type":"response.completed"}\n\n'); }
+  });
+  await new Promise<void>((r) => fake.listen(0, '127.0.0.1', r)); const address = fake.address(); assert(address && typeof address !== 'string');
+  const h = await home((c) => { c.accounts = [codex('a', 1), codex('b', 2)]; c.codexCapacityEnabled = false; });
+  const base = providers.codex.upstreamBase; providers.codex.upstreamBase = `http://127.0.0.1:${address.port}`;
+  let server: RunningServer | undefined;
+  try {
+    server = await startServer({ background: false });
+    const first = await ask(h.config.proxy.codexPort); assert.equal(first.status, 503); await first.text(); assert.equal(attempts, 2);
+    await edit((c) => { c.codexCapacityEnabled = true; c.codexCapacityRetryMs = 60; c.codexCapacityPreambleHoldMs = 0; c.codexCapacityRotation = true; });
+    assert.equal((await reload(h.config)).status, 200);
+    alwaysFail = false; attempts = 0; accounts.length = 0; times.length = 0;
+    const next = await ask(h.config.proxy.codexPort); assert.equal(next.status, 200); assert.equal(await next.text(), 'data: {"type":"response.completed"}\n\n');
+    assert.equal(attempts, 2); assert.deepEqual(accounts, ['a', 'b']); assert(times[1]! - times[0]! >= 55);
+    for (const key of ['codexCapacityEnabled', 'codexCapacityRetryMs', 'codexCapacityPreambleHoldMs', 'codexCapacityRotation'] as const) {
+      const before = await readFile(join(h.root, 'config.json'), 'utf8');
+      await edit((c) => { find(c, 'a').enabled = false; Object.assign(c, { [key]: 'invalid' }); });
+      const refused = await reload(h.config); assert.equal(refused.status, 400); assert.match((await refused.json() as { error: string }).error, new RegExp(key));
+      attempts = 0; accounts.length = 0;
+      const served = await ask(h.config.proxy.codexPort); assert.equal(served.status, 200); await served.text(); assert.deepEqual(accounts, ['a', 'b'], 'invalid settings must not partly apply account edits');
+      await writeFile(join(h.root, 'config.json'), before);
+    }
+  } finally { await server?.stop(); providers.codex.upstreamBase = base; fake.closeAllConnections(); fake.close(); await h.restore(); }
+});
