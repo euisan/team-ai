@@ -230,7 +230,7 @@ test('exportState omits probes when none was learned', () => {
   assert.equal(exported.probes, undefined, 'nothing to persist means no probes key');
 });
 
-test('a restart does not restore cooldown or error, but keeps quota', () => {
+test('a legacy cooldown without a saved reason is discarded on restart, but quota remains', () => {
   // A saved snapshot where the account is cooled down and errored, yet its
   // long-lived quota shows plenty of room.
   const saved: PersistedState = { version: 1, accounts: { 'codex:a': {
@@ -415,6 +415,45 @@ test('refreshUsage re-reads only readings older than the limit, busy accounts in
   assert.deepEqual(read.sort(), ['busy', 'stale']);
   assert.equal(stale!.windows.primary?.usage, 0.4);
   assert.ok(Date.now() - stale!.measuredAt! < 1_000);
+});
+
+test('a quota cooldown clears when a later usage read shows every window below its limit', async () => {
+  const usageProvider: Provider = { ...provider, fetchUsage: async () => ({ routingUsage: 0.2, routingResetsAt: null, windows: { primary: { usage: 0.2, resetsAt: null }, secondary: { usage: 0.3, resetsAt: null } } }) };
+  const pool = new AccountPool(usageProvider, [account('recovered')], { 'codex:recovered': credential('recovered') }, state);
+  const acct = pool.accounts[0]!;
+  pool.cooldown(acct, 60_000, 'quota');
+  await pool.refreshUsage(0);
+  assert.equal(acct.cooldownUntil, null);
+  assert.equal(pool.acquire('s')?.id, 'recovered');
+});
+
+test('usage reads do not clear network or forbidden cooldowns', async () => {
+  for (const reason of ['network', 'forbidden'] as const) {
+    const usageProvider: Provider = { ...provider, fetchUsage: async () => ({ routingUsage: 0.2, routingResetsAt: null, windows: { primary: { usage: 0.2, resetsAt: null } } }) };
+    const pool = new AccountPool(usageProvider, [account(reason)], { [`codex:${reason}`]: credential(reason) }, state);
+    const acct = pool.accounts[0]!;
+    pool.cooldown(acct, 60_000, reason);
+    await pool.refreshUsage(0);
+    assert.ok((acct.cooldownUntil ?? 0) > Date.now());
+    assert.equal(acct.cooldownReason, reason);
+  }
+});
+
+test('cooldown reason and active cooldown survive restart, while expired cooldown is omitted from state', () => {
+  const pool = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, state);
+  const acct = pool.accounts[0]!;
+  pool.cooldown(acct, 60_000, 'quota');
+  const output: PersistedState = { version: 1, accounts: {} };
+  pool.exportState(output);
+  assert.equal(output.accounts['codex:a']?.cooldownReason, 'quota');
+  assert.ok((output.accounts['codex:a']?.cooldownUntil ?? 0) > Date.now());
+  const restored = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, output).accounts[0]!;
+  assert.equal(restored.cooldownReason, 'quota');
+  assert.ok((restored.cooldownUntil ?? 0) > Date.now());
+  const expired: PersistedState = { version: 1, accounts: {} };
+  new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, { version: 1, accounts: { 'codex:a': { ...output.accounts['codex:a']!, cooldownUntil: Date.now() - 1 } } }).exportState(expired);
+  assert.equal(expired.accounts['codex:a']?.cooldownUntil, null);
+  assert.equal(expired.accounts['codex:a']?.cooldownReason, null);
 });
 
 test('R reads usage first and probes only the accounts the endpoint could not read', async () => {

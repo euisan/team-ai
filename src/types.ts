@@ -136,6 +136,8 @@ export interface AccountRuntimeState extends ResetCreditLedger {
   windows?: Record<string, QuotaWindow>;
   profile?: SubscriptionProfile | null;
   cooldownUntil: number | null;
+  cooldownReason?: 'network' | 'quota' | 'forbidden' | null;
+  cooldownAt?: number | null;
   lastUsed: number | null;
   error: string | null;
   // When the quota figures above were last read from upstream, by any route
@@ -228,6 +230,7 @@ export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   // Why the account is cooling down: a network cooldown benches it for a
   // moment but does not make it a lost home; a quota/forbidden one does.
   cooldownReason: 'network' | 'quota' | 'forbidden' | null;
+  cooldownAt?: number | null;
   lastUsed: number | null;
   error: string | null;
   windows: Record<string, QuotaWindow>;

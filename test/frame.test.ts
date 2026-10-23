@@ -71,6 +71,17 @@ test('buildFrame draws both sections, the column titles and the footer within th
   assert.equal(lines.join('\n').includes('tai-secret'), false);
 });
 
+test('a recovered account is shown as active instead of cooldown', () => {
+  const config: TeamAIConfig = { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: 't' }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [account('codex', 'recovered@example.com')] };
+  const state = usage({ 'recovered@example.com': 0.2 });
+  state.accounts['cred-recovered@example.com']!.cooldownUntil = null;
+  state.accounts['cred-recovered@example.com']!.cooldownReason = null;
+  const lines = buildFrame(config, state, { width: 100, selectedId: null, mode: 'normal', message: '', sortByHeadroom: true }).map(plain).join('\n');
+  assert.match(lines, /recovered@example\.com/);
+  assert.doesNotMatch(lines, /cooldown/);
+  assert.match(lines, /active/);
+});
+
 test('buildFrame pads to the terminal height when given one and not otherwise', () => {
   const config: TeamAIConfig = { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: 't' }, switchThreshold: 0.98, maxConcurrentPerAccount: 3, accounts: [account('claude', 'c@example.com')] };
   const view = { width: 100, selectedId: null, mode: 'normal' as const, message: '', sortByHeadroom: true };

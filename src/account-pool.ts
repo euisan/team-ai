@@ -64,18 +64,14 @@ export class AccountPool {
   constructor(readonly provider: Provider, stored: StoredAccount[], credentials: Record<string, OAuthCredential>, state: PersistedState, readonly threshold = 0.98, readonly maxConcurrent = 16, readonly maxSessions = 4096) {
     this.accounts = stored.filter((a) => a.provider === provider.id && credentials[a.credentialId]).map((account) => {
       const saved = state.accounts[account.credentialId];
-      // Restore the long-lived quota state (usage/windows/reset/profile) so the
-      // dashboard and ranking survive a restart without re-measuring — but NOT
-      // cooldownUntil or error. Both are per-response signals: a cooldown says
-      // "one 429 told us to rest this account for a while", an error says "the
-      // last attempt failed". Persisting them means a restart re-benches an
-      // account that may be fine now — exactly how a Fable-only 429's weekly
-      // retry-after came back to park seven accounts across restarts. If the
-      // account really is spent, the next request re-derives the right cooldown
-      // (model-quota → Fable only, real quota → whole account).
-      // The reset-credit ledger is restored, unlike the cooldown: a ticket
-      // redeemed (or possibly redeemed) before a restart stays counted.
-      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, warmupStartWindows: saved?.warmupStartWindows ?? {}, cooldownUntil: null, cooldownReason: null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0, ...AccountPool.ledger(saved) };
+      // Restore the quota state and active cooldown reason so a usage reading
+      // after a restart can distinguish quota recovery from network/forbidden
+      // benches. Expired cooldowns are discarded when state is exported.
+      // The reset-credit ledger is restored as well: a ticket redeemed (or
+      // possibly redeemed) before a restart stays counted.
+      const cooldownUntil = saved?.cooldownUntil && saved.cooldownUntil > Date.now() && saved.cooldownReason ? saved.cooldownUntil : null;
+      const cooldownReason = cooldownUntil ? (saved?.cooldownReason ?? null) : null;
+      return { ...account, credential: credentials[account.credentialId]!, usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: saved?.windows ?? {}, profile: saved?.profile ?? null, measuredAt: saved?.measuredAt ?? null, warmupStartWindows: saved?.warmupStartWindows ?? {}, cooldownUntil, cooldownReason, cooldownAt: cooldownUntil ? (saved?.cooldownAt ?? null) : null, lastUsed: saved?.lastUsed ?? null, error: null, inflight: 0, ...AccountPool.ledger(saved) };
     });
     // Restore the probe shape learned last run so warm-up and R work on a fresh
     // idle proxy, instead of falling back to a hardcoded client version.
@@ -202,7 +198,7 @@ export class AccountPool {
   // benches the account — better than refusing on a number we chose ourselves.
   private availableIgnoringConcurrency(account: RuntimeAccount, excluded: Set<string>, wantsFable = true, lastResort = false): boolean {
     const now = Date.now();
-    if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; }
+    if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null; }
     return this.eligible(account, excluded, wantsFable, lastResort, now);
   }
 
@@ -471,6 +467,7 @@ export class AccountPool {
   }
   private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot, source: 'headers' | 'usage' = 'headers'): void {
     const now = this.now();
+    const previousMeasuredAt = account.measuredAt;
     this.applyCreditCount(account, quota, now);
     // Shortly after a reset, a usage read may still describe the windows as
     // they were before it: let it lower usage, never raise it.
@@ -481,11 +478,22 @@ export class AccountPool {
       }));
       const usage = account.usage === null || quota.routingUsage === null ? quota.routingUsage : Math.min(account.usage, quota.routingUsage);
       account.usage = usage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...windows }; account.measuredAt = now;
+      this.clearRecoveredQuotaCooldown(account, quota, now, previousMeasuredAt, source);
       this.changeListener?.(account);
       return;
     }
     account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = now;
+    this.clearRecoveredQuotaCooldown(account, quota, now, previousMeasuredAt, source);
     this.changeListener?.(account);
+  }
+
+  private clearRecoveredQuotaCooldown(account: RuntimeAccount, quota: QuotaSnapshot, measuredAt: number, previousMeasuredAt: number | null, source: 'headers' | 'usage'): void {
+    if (source !== 'usage' || account.cooldownReason !== 'quota' || account.cooldownUntil === null || account.cooldownUntil <= measuredAt) return;
+    const measuredAfterCooldown = account.cooldownAt === null || account.cooldownAt === undefined ? previousMeasuredAt !== null && previousMeasuredAt <= measuredAt : measuredAt >= account.cooldownAt;
+    if (!measuredAfterCooldown) return;
+    const windows = Object.values(quota.windows);
+    if (windows.length === 0 || windows.some((window) => window.usage === null || window.usage === undefined || window.usage >= 1)) return;
+    account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null;
   }
 
   /** Listen for usage/window changes so the event-driven warmer can re-plan. */
@@ -512,7 +520,7 @@ export class AccountPool {
     this.updateQuota(account, headers);
     return 'applied';
   }
-  cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownUntil = Date.now() + Math.max(1_000, ms); account.cooldownReason = reason; }
+  cooldown(account: RuntimeAccount, ms: number, reason: 'network' | 'quota' | 'forbidden' = 'quota'): void { account.cooldownAt = this.now(); account.cooldownUntil = account.cooldownAt + Math.max(1_000, ms); account.cooldownReason = reason; }
 
   // Upstream refused this account for the top model only. Record the Fable
   // window as spent rather than cooling the account down: every other model is
@@ -585,7 +593,7 @@ export class AccountPool {
       for (const [name, window] of Object.entries(account.windows)) {
         if (window.resetsAt && window.resetsAt <= now) { delete account.windows[name]; delete account.warmupStartWindows?.[name]; changed = true; }
       }
-      if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; changed = true; }
+      if (account.resetsAt && account.resetsAt <= now) { account.usage = null; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null; changed = true; }
       if (changed) { this.warmupTries.delete(account.credentialId); swept++; }
     }
     return swept;
@@ -612,7 +620,7 @@ export class AccountPool {
       // read too: busy accounts stay fresh through headers, which never carry
       // the count, and would otherwise never have one.
       const countsDue = (a: RuntimeAccount) => this.resetCredits.enabled && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff;
-      const due = this.accounts.filter((a) => a.enabled && !a.retired && !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a)));
+      const due = this.accounts.filter((a) => a.enabled && !a.retired && !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a) || (a.cooldownReason === 'quota' && (a.cooldownUntil ?? 0) > this.now())));
       await Promise.all(due.map(async (account) => {
         try {
           await this.refresh(account);
@@ -756,7 +764,7 @@ export class AccountPool {
         next.push(Object.assign(live, { id: account.id, label: account.label, enabled: account.enabled, priority: account.priority, retired: false }));
       } else {
         added++;
-        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, warmupStartWindows: {}, cooldownUntil: null, cooldownReason: null, lastUsed: null, error: null, inflight: 0, ...AccountPool.ledger(undefined) });
+        next.push({ ...account, credential: credentials[account.credentialId]!, usage: null, resetsAt: null, windows: {}, profile: null, measuredAt: null, warmupStartWindows: {}, cooldownUntil: null, cooldownReason: null, cooldownAt: null, lastUsed: null, error: null, inflight: 0, ...AccountPool.ledger(undefined) });
       }
     }
     const dropped = this.accounts.filter((a) => !keep.has(a.credentialId));
@@ -863,7 +871,7 @@ export class AccountPool {
           if (measured) { this.applyQuota(account, measured, 'usage'); observedQuota = true; }
         } catch { /* retain the response-header reading as a fallback */ }
       }
-      if (response.ok) { account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownReason = null; }
+      if (response.ok) { account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null; }
       // A rejection that only names the model-weekly window says the account is
       // spent for the top model, not unusable: an ordinary probe (the default
       // model) still succeeds here. Clearing the bench on that reading is what
@@ -871,7 +879,7 @@ export class AccountPool {
       // cooldown it was given was the weekly retry-after, which no other model
       // has to wait for.
       else if (!modelOverride && this.provider.classifyFailure(response.status, response.headers, text).kind === 'model-quota') {
-        account.error = null; account.cooldownUntil = null; account.cooldownReason = null;
+        account.error = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null;
       }
       if (startWindows.length) {
         const opened = startWindows.some((name) => !isWindowNotStarted(this.provider.id, name, account.windows[name], account.measuredAt, this.now()));
@@ -984,7 +992,7 @@ export class AccountPool {
     }
     // A reset that reset nothing leaves usage and benches as they were.
     if (outcome.kind !== 'reset') return;
-    account.usage = 0; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; account.resetCreditResetAt = now;
+    account.usage = 0; account.resetsAt = null; account.cooldownUntil = null; account.cooldownReason = null; account.cooldownAt = null; account.resetCreditResetAt = now;
     for (const name of ['primary', 'secondary']) { const window = account.windows[name]; if (window) account.windows[name] = { ...window, usage: 0, resetsAt: null }; }
   }
 
@@ -1051,7 +1059,11 @@ export class AccountPool {
   }
 
   exportState(target: PersistedState): void {
-    for (const a of this.accounts.filter((x) => !x.retired)) target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, warmupStartWindows: a.warmupStartWindows, cooldownUntil: a.cooldownUntil, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
+    const now = this.now();
+    for (const a of this.accounts.filter((x) => !x.retired)) {
+      const activeCooldown = a.cooldownUntil !== null && a.cooldownUntil > now;
+      target.accounts[a.credentialId] = { usage: a.usage, resetsAt: a.resetsAt, windows: a.windows, profile: a.profile, measuredAt: a.measuredAt, warmupStartWindows: a.warmupStartWindows, cooldownUntil: activeCooldown ? a.cooldownUntil : null, cooldownReason: activeCooldown ? a.cooldownReason : null, cooldownAt: activeCooldown ? (a.cooldownAt ?? null) : null, lastUsed: a.lastUsed, error: a.error, ...AccountPool.ledger(a) };
+    }
     if (this.probeTemplate) { target.probes ??= {}; target.probes[this.provider.id] = this.probeTemplate; }
     // What the dashboard needs to mark route accounts, worked out here since
     // the dashboard cannot judge availability itself. Judged without side
