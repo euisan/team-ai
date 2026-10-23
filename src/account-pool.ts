@@ -334,7 +334,14 @@ export class AccountPool {
   // looks, preview's only looks.
   private pick(excluded: Set<string>, wantsFable: boolean, route: Route | null, judge: Judge, pinned?: string): RuntimeAccount | null {
     const outside = (a: RuntimeAccount) => route?.mode === 'prefer' && !this.isMember(route, a) ? 1 : 0;
-    const rank = this.balance === 'level' ? this.spread(wantsFable) : this.paced(wantsFable, pinned);
+    // TeamCodex has one automatic order for Codex accounts: weekly pacing.
+    // TeamAI's optional level order remains a Claude setting, but applying it
+    // to Codex would rank by the fuller 5-hour/session window and undo the
+    // weekly-first policy. Keep the provider-specific decision here so routes,
+    // previews and real acquisition cannot drift apart.
+    const rank = this.provider.id === 'codex' || this.balance !== 'level'
+      ? this.paced(wantsFable, pinned)
+      : this.spread(wantsFable);
     // Inside a route: an explicit priority first (lower first, set before
     // unset), then the balance. A Fable request has already left out accounts
     // that cannot serve it; nothing here holds an account back for Fable.

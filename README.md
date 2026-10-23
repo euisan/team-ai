@@ -176,9 +176,11 @@ priority, the switch threshold — which also sets aside
 an account whose 5-hour window is at it, however far behind its week is — the
 session pin and the concurrency cap all apply first, as before. Each row shows
 its deviation as `+12%p` / `-30%p`. `routing.balance: "level"` restores the
-older order (the fuller of the 5-hour and weekly windows, in 10% steps, fewest
-requests in flight first; the dashboard draws that order too), and `c`
-toggles back to configured order.
+older order for Claude (the fuller of the 5-hour and weekly windows, in 10%
+steps, fewest requests in flight first; the dashboard draws that order too).
+Codex always uses weekly pacing, regardless of `routing.balance`, so its
+5-hour window is a threshold and tie-break signal rather than the ranking
+budget. `c` toggles back to configured order.
 
 A green `►` after the cursor marks the account a **new** request would go to right now, worked out by the server with the same ranking the pool itself uses — routes, priority, pacing, the switch threshold and the concurrency cap included — but without taking a slot, pinning a session or calling upstream. On Claude rows a magenta `►` before the `7d Fable` gauge marks where a new Fable request would go, and each model route's own target shows as a bold route marker. It is a preview, not a promise: an existing session keeps going to the account it is pinned to, and requests racing each other can land elsewhere. No arrow means no account could take a new request (all spent or all at their concurrency cap), and none is drawn while the server is stopped. The arrows are re-derived every 15 seconds, so a cooldown that runs out shows without any traffic.
 
@@ -186,7 +188,8 @@ A green `►` after the cursor marks the account a **new** request would go to r
 the model-weekly window. The pool holds nothing back for it: within a route,
 every request — Fable or not — goes by priority (explicit ranks first, lowest
 first), then by the balance above, which for a non-Fable request reads the
-shared weekly window and for a Fable request the Fable one. What a Fable
+shared weekly window and for a Fable request the Fable one. Codex requests
+always use the weekly window in this step. What a Fable
 request does skip is an account that cannot serve it: one whose Fable window is
 fully spent (100%), and a measured account that reports no Fable window at all
 (a plan without Fable, such as Pro); an account not measured yet is still tried.
@@ -271,7 +274,7 @@ written back. A lock left by a process that died is taken over.
 | `switchThreshold` | `0.98` | Usage ratio above which an account stops being selected. |
 | `warmup.enabled` | `true` | Event-driven Codex keep-warm; `false` disables it. |
 | `maxConcurrentPerAccount` | `16` | In-flight requests allowed per account. `0` means unlimited. |
-| `routing.balance` | `"pacing"` | How accounts of equal priority are ordered: `pacing` (weekly progress, see above) or `level` (least-full windows in 10% steps). Anything else stops startup with the reason; the dashboard then draws the `pacing` order. |
+| `routing.balance` | `"pacing"` | How equal-priority Claude accounts are ordered: `pacing` (weekly progress, see above) or `level` (least-full windows in 10% steps). Codex always uses weekly pacing. Anything else stops startup with the reason; the dashboard then draws the `pacing` order. |
 | `codexCapacityEnabled` | `true` | Retry Codex upstream model-capacity failures transparently. |
 | `codexCapacityRetryMs` | `500` | Fixed interval between capacity attempts, with no attempt or elapsed-time limit; whole milliseconds from `1` to `86400000`. |
 | `codexCapacityPreambleHoldMs` | `500` | Maximum time to withhold received preamble before releasing it; `0` holds until output, capacity failure or EOF. Whole milliseconds from `0` to `86400000`. |

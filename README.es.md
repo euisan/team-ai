@@ -186,8 +186,10 @@ prioridad explícita, el umbral de cambio (que también aparta una
 cuenta cuya ventana de 5 horas lo alcanza, por atrasada que vaya su semana), el
 anclaje de sesión y el límite de concurrencia se aplican antes, como siempre.
 Cada fila muestra su desviación como `+12%p` / `-30%p`. `routing.balance:
-"level"` recupera el orden anterior (la más llena de las ventanas de 5 horas y
-semanal, en pasos del 10 %, con menos solicitudes en curso primero), y `c`
+"level"` solo se aplica a Claude y recupera el orden anterior (la más llena de
+las ventanas de 5 horas y semanal, en pasos del 10 %, con menos solicitudes en
+curso primero). Codex siempre usa el ritmo semanal, sin importar
+`routing.balance`; su ventana de 5 horas sirve como umbral y desempate. `c`
 vuelve al orden configurado.
 
 **Fable y los demás modelos.** Solo el modelo superior (el nivel Fable de
@@ -195,7 +197,8 @@ Claude) consume la ventana semanal por modelo. El pool no aparta cuentas para
 él: dentro de una ruta, toda solicitud —Fable o no— sigue la prioridad (primero
 los valores explícitos, el número menor primero) y luego el equilibrio descrito
 arriba, que para una solicitud no Fable lee la ventana semanal compartida y para
-una Fable la ventana Fable. Lo único que una solicitud Fable salta es una cuenta
+una Fable la ventana Fable. Las solicitudes de Codex siempre leen la ventana
+semanal en este paso. Lo único que una solicitud Fable salta es una cuenta
 que no puede atenderla: la que tiene la ventana Fable agotada (100 %) y la cuenta
 medida que no informa ninguna ventana Fable (un plan sin Fable, como Pro); una
 cuenta aún sin medir se intenta. Esas cuentas siguen atendiendo los demás
@@ -259,7 +262,7 @@ Cada cambio en `config.json` o `credentials.json` vuelve a leer el archivo y lo 
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |
 | `warmup.enabled` | `true` | Keep-warm de Codex impulsado por eventos; `false` lo desactiva. |
 | `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
-| `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). |
+| `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas Claude de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). Codex siempre usa el ritmo semanal. |
 | `routes` | — | Opcional. Rutas por modelo y proveedor, `{ "claude": [...], "codex": [...] }`; se editan con `g` en el panel o con `teamai route`. |
 | `proxy.legacyPorts` | — | Opcional. Puertos adicionales en los que seguir respondiendo, por proveedor — p. ej. `{ "claude": [3400] }`. |
 | `proxy.maxBodyMb` | `512` | Opcional. Tamaño máximo del cuerpo de una petición que acepta el relé, en MB. Un número mayor que `0` y como mucho `4096`; otro valor detiene el arranque con el motivo. Un cuerpo mayor no se envía: el relé responde `413` y registra solo el tamaño y el límite. El `413` del propio upstream llega al cliente sin cambios. |

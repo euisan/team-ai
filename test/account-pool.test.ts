@@ -249,13 +249,14 @@ test('a legacy cooldown without a saved reason is discarded on restart, but quot
   assert.equal(pool.acquire('s')?.id, 'a');
 });
 
-test('new sessions spread across accounts whose load is within the same 10% step', () => {
+test('Claude level order still spreads new sessions whose load is within the same 10% step', () => {
   // Weekly figures a point apart (51%..57%) used to herd every new session onto
   // the lowest one until its figure crept past the next — a tenth of a percent
   // per request. Inside a 10% step the account with fewer requests in flight
   // wins, so four sessions land on four accounts.
   const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
-  const pool = new AccountPool(provider, ids.map((id) => account(id)), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: {} }, 0.98, 16);
+  const claude = { ...provider, id: 'claude' as const, label: 'Claude' };
+  const pool = new AccountPool(claude, ids.map((id) => ({ ...account(id), provider: 'claude' as const })), Object.fromEntries(ids.map((id) => [`codex:${id}`, credential(id)])), { version: 1, accounts: {} }, 0.98, 16);
   pool.balance = 'level';
   const now = Date.now();
   pool.accounts.forEach((a, i) => { a.windows = { '7d': { usage: 0.51 + i * 0.01, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 1, resetsAt: now + 86_400_000 }, '5h': { usage: 0, resetsAt: now + 3_600_000 } }; a.usage = 0.51 + i * 0.01; });
@@ -266,16 +267,16 @@ test('new sessions spread across accounts whose load is within the same 10% step
   assert.equal(pool.acquire('s1', new Set(), false)!.id, picked[0]);
 });
 
-test('the 5-hour session window counts toward load, not just the weekly budget', () => {
-  // x is lighter on the week but its session window is nearly full; y is the
-  // one that can actually take more requests right now — for Opus and for Fable.
+test('Codex keeps weekly pacing when routing.balance is level', () => {
+  // x is lighter on the week but its session window is nearly full. Codex must
+  // still follow the weekly policy; the optional Claude level order is ignored.
   const pool = new AccountPool(provider, [account('x'), account('y')], { 'codex:x': credential('x'), 'codex:y': credential('y') }, { version: 1, accounts: {} }, 0.98, 16);
   pool.balance = 'level';
   const now = Date.now();
-  pool.accounts[0]!.windows = { '7d': { usage: 0.4, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 0.6, resetsAt: now + 86_400_000 }, '5h': { usage: 0.95, resetsAt: now + 3_600_000 } }; pool.accounts[0]!.usage = 0.95;
-  pool.accounts[1]!.windows = { '7d': { usage: 0.5, resetsAt: now + 86_400_000 }, '7d_oi': { usage: 0.7, resetsAt: now + 86_400_000 }, '5h': { usage: 0.1, resetsAt: now + 3_600_000 } }; pool.accounts[1]!.usage = 0.5;
-  assert.equal(pool.acquire('opus', new Set(), false)!.id, 'y');
-  assert.equal(pool.acquire('fable', new Set(), true)!.id, 'y');
+  pool.accounts[0]!.windows = { primary: { usage: 0.26, resetsAt: now + 3_600_000, minutes: 300 }, secondary: { usage: 0.20, resetsAt: now + 3 * 86_400_000, minutes: 10_080 } }; pool.accounts[0]!.usage = 0.26;
+  pool.accounts[1]!.windows = { primary: { usage: 0, resetsAt: now + 3_600_000, minutes: 300 }, secondary: { usage: 0.24, resetsAt: now + 3 * 86_400_000, minutes: 10_080 } }; pool.accounts[1]!.usage = 0.24;
+  assert.equal(pool.acquire('opus', new Set(), false)!.id, 'x', '20% weekly wins over 24% even with 26% in the session window');
+  assert.equal(pool.acquire('fable', new Set(), true)!.id, 'x');
 });
 
 test('a clearly lighter account still wins over a busier one with fewer requests in flight', () => {

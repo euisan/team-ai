@@ -121,9 +121,14 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
     const inflight = (state.active ?? []).filter((entry) => entry.provider === account.provider && entry.account === account.label).length;
     return { usage: saved?.usage ?? null, resetsAt: saved?.resetsAt ?? null, windows: windows(account), inflight };
   };
-  const balanced = options.balance === 'level'
-    ? ((level) => (a: StoredAccount, b: StoredAccount) => level(ranked(a), ranked(b)))(AccountPool.levelOrder(false))
-    : (a: StoredAccount, b: StoredAccount) => comparePacing({ id: a.id, windows: windows(a) }, { id: b.id, windows: windows(b) }, false, now);
+  const balanced = (provider: 'claude' | 'codex') => provider === 'codex'
+    // TeamCodex's Codex order is always weekly pacing. The optional TeamAI
+    // level order is kept for Claude, but must not make a Codex 5-hour window
+    // outrank a less-used weekly window.
+    ? (a: StoredAccount, b: StoredAccount) => comparePacing({ id: a.id, windows: windows(a) }, { id: b.id, windows: windows(b) }, false, now)
+    : options.balance === 'level'
+      ? ((level) => (a: StoredAccount, b: StoredAccount) => level(ranked(a), ranked(b)))(AccountPool.levelOrder(false))
+      : (a: StoredAccount, b: StoredAccount) => comparePacing({ id: a.id, windows: windows(a) }, { id: b.id, windows: windows(b) }, false, now);
   const ordered: StoredAccount[] = [];
   for (const provider of ['claude', 'codex'] as const) {
     const group = accounts.filter((account) => account.provider === provider);
@@ -133,7 +138,7 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
           const diff = (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
           if (diff !== 0) return diff;
         }
-        return balanced(a, b);
+        return balanced(provider)(a, b);
       });
     }
     ordered.push(...group);

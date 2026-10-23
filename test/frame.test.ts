@@ -124,10 +124,26 @@ test('with routing.balance "level" the dashboard order is the pool\'s own select
 });
 
 test('with routing.balance "level" in-flight requests break a tie the way the pool does', () => {
-  const stored = [account('codex', 'busy@example.com'), account('codex', 'idle@example.com')];
-  const state: PersistedState = { version: 1, accounts: {}, active: [{ id: '1', provider: 'codex', providerLabel: 'Codex', method: 'POST', path: '/', account: 'busy@example.com', startedAt: 0 }] };
-  for (const a of stored) state.accounts[a.credentialId] = { usage: 0.3, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows: { primary: { usage: 0.31, resetsAt: null, minutes: 300 }, secondary: { usage: 0.32, resetsAt: null, minutes: 10_080 } } };
+  const stored = [account('claude', 'busy@example.com'), account('claude', 'idle@example.com')];
+  const state: PersistedState = { version: 1, accounts: {}, active: [{ id: '1', provider: 'claude', providerLabel: 'Claude', method: 'POST', path: '/', account: 'busy@example.com', startedAt: 0 }] };
+  for (const a of stored) state.accounts[a.credentialId] = { usage: 0.3, resetsAt: null, cooldownUntil: null, lastUsed: null, error: null, windows: { '5h': { usage: 0.31, resetsAt: null }, '7d': { usage: 0.32, resetsAt: null } } };
   assert.deepEqual(displayOrder(stored, state, true, LEVEL).map((a) => a.label), ['idle@example.com', 'busy@example.com']);
+});
+
+test('Codex dashboard order stays weekly-first when routing.balance is level', () => {
+  const stored = [account('codex', 'weekly20@example.com'), account('codex', 'weekly24@example.com')];
+  const now = Date.now();
+  const state: PersistedState = { version: 1, accounts: {
+    'cred-weekly20@example.com': { usage: 0.36, resetsAt: now + 3_600_000, cooldownUntil: null, lastUsed: null, error: null, windows: {
+      primary: { usage: 0.36, resetsAt: now + 3_600_000, minutes: 300 },
+      secondary: { usage: 0.20, resetsAt: now + 3 * 86_400_000, minutes: 10_080 },
+    } },
+    'cred-weekly24@example.com': { usage: 0.24, resetsAt: now + 3_600_000, cooldownUntil: null, lastUsed: null, error: null, windows: {
+      primary: { usage: 0, resetsAt: now + 3_600_000, minutes: 300 },
+      secondary: { usage: 0.24, resetsAt: now + 3 * 86_400_000, minutes: 10_080 },
+    } },
+  } };
+  assert.deepEqual(displayOrder(stored, state, true, LEVEL).map((a) => a.label), ['weekly20@example.com', 'weekly24@example.com']);
 });
 
 test('routing.balance is read by one parser: the server refuses what the dashboard falls back from', () => {
