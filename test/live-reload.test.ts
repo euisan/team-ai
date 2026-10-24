@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createServer, request } from 'node:http';
+import { createServer, request, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
+import { configReloadHandler } from '../src/config-reload.js';
 import { providers } from '../src/providers.js';
 import type { RunningServer } from '../src/runtime.js';
 import { anyPorts, startOnAnyPorts } from './server-ports.js';
@@ -173,6 +174,39 @@ test('reload is local-only, behind the client token, and POST only', async () =>
     assert.equal((await fetch(url, { method: 'POST', headers: { authorization: 'Bearer nope' } })).status, 401);
     assert.equal((await fetch(url, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 405);
   } finally { await server?.stop(); await h.restore(); }
+});
+
+// The address a request arrived from, without a network: /reload reads only
+// req.socket.remoteAddress, and these are the two response methods it uses.
+function fromAddress(remoteAddress: string | undefined, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }): { req: IncomingMessage; res: ServerResponse; seen: { status: number; body: string } } {
+  const seen = { status: 0, body: '' };
+  const res = { writeHead: (status: number) => { seen.status = status; }, end: (body?: string) => { seen.body = body ?? ''; } } as unknown as ServerResponse;
+  const req = { url: '/reload', method: 'POST', headers, socket: { remoteAddress } } as unknown as IncomingMessage;
+  return { req, res, seen };
+}
+
+test('with the control port exposed beyond loopback, an outside address cannot reload and a loopback one can', async () => {
+  const h = await home((c) => { c.proxy.host = '0.0.0.0'; });
+  const pool = new AccountPool(providers.codex, [], {}, { version: 1, accounts: {} }); pool.log = () => {};
+  const reload = configReloadHandler([pool], h.config);
+  try {
+    // A valid token and POST from an address that is not loopback: refused,
+    // even when the Host header claims loopback, and nothing is applied.
+    const outside = fromAddress('203.0.113.9', { authorization: `Bearer ${TOKEN}`, host: '127.0.0.1' });
+    assert.equal(await reload(outside.req, outside.res), true);
+    assert.equal(outside.seen.status, 403);
+    assert.deepEqual(JSON.parse(outside.seen.body), { error: 'local only' });
+    assert.equal(pool.accounts.length, 0, 'a refused request changed nothing');
+
+    const local = fromAddress('127.0.0.1');
+    assert.equal(await reload(local.req, local.res), true);
+    assert.equal(local.seen.status, 200, local.seen.body);
+    assert.deepEqual(pool.accounts.map((a) => a.id).sort(), ['a', 'b', 'c']);
+
+    const mapped = fromAddress('::ffff:127.0.0.1', { authorization: `Bearer ${TOKEN}`, host: 'teamai.example' });
+    assert.equal(await reload(mapped.req, mapped.res), true);
+    assert.equal(mapped.seen.status, 200, mapped.seen.body);
+  } finally { await h.restore(); }
 });
 
 test('an account removed while serving finishes that request, takes no new one, and leaves when it ends', () => {
