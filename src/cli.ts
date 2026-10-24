@@ -29,7 +29,7 @@ function flag(name: string): string | undefined { const index = args.indexOf(nam
 
 async function main(): Promise<void> {
   switch (command) {
-    case 'login': { const id = args[0] ? provider(args[0]) : await selectProvider('Login provider'); const result = id === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); await reportReload(); break; }
+    case 'login': { const id = await loginProvider(); const result = id === 'claude' ? await loginClaude({ manual: args.includes('--manual') }) : await loginCodex({ deviceAuth: args.includes('--device-auth') }); const account = await upsertAccount(id, result.label, result.credential); console.log(`Added ${id} account: ${account.label}`); await reportReload(); break; }
     case 'import': { const id = provider(args[0]); const results = await importAuth(id, flag('--from')); for (const result of results) { const account = await upsertAccount(id, result.label, result.credential); console.log(`Imported ${id} account: ${account.label}`); } await reportReload(); break; }
     case 'accounts': await accounts(args[0] ? provider(args[0]) : undefined); break;
     case 'enable': await toggle(true); break;
@@ -54,6 +54,17 @@ async function main(): Promise<void> {
     case 'help': case '--help': case '-h': help(); break;
     default: throw new Error(`Unknown command: ${command}`);
   }
+}
+
+// `--manual` is Claude's paste-only login and `--device-auth` Codex's device
+// code; either one names the provider when none is given.
+async function loginProvider(): Promise<ProviderId> {
+  const unknown = args.find((arg) => arg.startsWith('-') && arg !== '--manual' && arg !== '--device-auth'); if (unknown) throw new Error(`Unknown login option ${unknown}`);
+  const named = args.find((arg) => !arg.startsWith('-'));
+  const id = named ? provider(named) : args.includes('--manual') ? 'claude' : args.includes('--device-auth') ? 'codex' : await selectProvider('Login provider');
+  if (id === 'codex' && args.includes('--manual')) throw new Error('--manual is for Claude; use --device-auth for Codex');
+  if (id === 'claude' && args.includes('--device-auth')) throw new Error('--device-auth is for Codex; use --manual for Claude');
+  return id;
 }
 
 async function selectProvider(promptLabel: string): Promise<ProviderId> {
@@ -187,7 +198,10 @@ Usage:
   teamai claude [CLAUDE_ARGS...]       Start a relayed Claude Code session
   teamai codex [CODEX_ARGS...]         Start a relayed Codex session
   teamai session [CLIENT_ARGS...]      Choose Claude or Codex interactively
-  teamai login [claude|codex]
+  teamai login [claude|codex]          Claude: the browser callback, or paste the
+                                       redirect URL or code it ends on
+  teamai login claude --manual         Paste-only Claude login (no callback server)
+  teamai login codex --device-auth     Codex device-code login (codex login --device-auth)
   teamai import <claude|codex> [--from PATH]
   teamai accounts [claude|codex]
   teamai start|restart|status|stop

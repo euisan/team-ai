@@ -131,7 +131,9 @@ hereda el PATH de tu shell.
 
 ## Cuentas
 
-Codex usa su flujo habitual de inicio de sesión por navegador. TeamAI no requiere que esté habilitada la opción de autenticación por código de dispositivo de ChatGPT.
+**Iniciar sesión desde otra máquina.** `teamai login claude` abre el navegador y espera su callback en `localhost`, y a la vez acepta un pegado en la terminal. Si el navegador está en un dispositivo distinto del de TeamAI, tras aprobar termina en una página de `localhost` que allí no carga: copia la URL de la barra de direcciones (o solo el código que contiene) y pégala. Lo que llegue primero completa el inicio de sesión y lo otro se cierra; una URL o un `code#state` pegado cuyo `state` no sea el de este inicio de sesión se rechaza y se vuelve a pedir, y una petición ajena al puerto del callback recibe `400` sin terminar el inicio de sesión. `teamai login claude --manual` no levanta ningún servidor de callback: abre la URL impresa en cualquier dispositivo, aprueba y pega el código que muestra la página. Un inicio de sesión lanzado desde el panel (`a` → `1`) solo espera el callback del navegador, para no quitarle las teclas al panel; tampoco se lee un pegado cuando stdin no es una terminal.
+
+Codex usa su flujo habitual de inicio de sesión por navegador (`codex login`). En una máquina remota, `teamai login codex --device-auth` ejecuta en su lugar `codex login --device-auth`, que muestra un código para introducir en cualquier dispositivo; eso requiere tener habilitada la autorización por código de dispositivo en la configuración de ChatGPT. Sin esa opción, TeamAI no exige ese ajuste.
 
 Importar credenciales es opcional y solo funciona cuando existe un archivo de credenciales exportable:
 
