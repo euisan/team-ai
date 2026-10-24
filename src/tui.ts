@@ -119,7 +119,7 @@ export async function runTui(): Promise<void> {
     if (!routeEditor) mode = 'normal';
   };
 
-  const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude() : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; await apply(`Added ${account.label}`); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
+  const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude({ interactive: false }) : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; await apply(`Added ${account.label}`); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
   const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
     busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url)); const result = spawnSync(process.execPath, [cli, 'run', provider], { stdio: 'inherit', env: process.env });

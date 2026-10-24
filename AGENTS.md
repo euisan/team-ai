@@ -56,6 +56,9 @@ this to the user rather than attempting it:
 
 ```bash
 teamai login      # prompts: [1] Claude  [2] Codex
+teamai login claude            # browser callback, or paste the redirect URL / code
+teamai login claude --manual   # paste-only: no callback server
+teamai login codex --device-auth   # codex login --device-auth (code on any device)
 ```
 
 Import is non-interactive, but only works when an exportable credential file

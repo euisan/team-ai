@@ -108,7 +108,9 @@ Node 路径请用 `command -v node` 查到的真实路径填写；LaunchAgent �
 
 ## 账号
 
-Codex 沿用其常规的浏览器登录流程。TeamAI 并不要求开启 ChatGPT 中那个可选的设备码（device-code）认证设置。
+**在另一台机器上登录。** `teamai login claude` 会打开浏览器并等待 `localhost` 回调，同时也接受终端中的粘贴。若浏览器与 TeamAI 不在同一台设备上，授权后会停在一个打不开的 `localhost` 页面：复制地址栏中的 URL（或其中的授权码）粘贴进来即可。先到的一方完成登录，另一方随即被清理；粘贴的 URL 或 `code#state` 中的 `state` 若不属于本次登录，会被拒绝并要求重新粘贴，发到回调端口的无关请求只会得到 `400`，不会结束登录。`teamai login claude --manual` 完全不启动回调服务器：在任意设备上打开输出的 URL 并授权，然后粘贴页面显示的授权码。从仪表盘发起的登录（`a` → `1`）只等待浏览器回调，以免干扰仪表盘的按键；stdin 不是终端时同样不接受粘贴。
+
+Codex 沿用其常规的浏览器登录流程（`codex login`）。在远程机器上，`teamai login codex --device-auth` 会改为运行 `codex login --device-auth`，显示一个可在任意设备上输入的代码；这需要在 ChatGPT 设置中开启设备码认证。不加该选项时，TeamAI 不要求开启这一设置。
 
 导入凭据是可选的，且仅在存在可导出的凭据文件时才有效：
 

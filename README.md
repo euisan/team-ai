@@ -122,7 +122,9 @@ your shell's PATH.
 
 ## Accounts
 
-Codex uses its normal browser login flow. TeamAI does not require ChatGPT's optional device-code authentication setting to be enabled.
+**Logging in on another machine.** `teamai login claude` opens the browser and waits for its callback on `localhost`, and at the same time reads a paste from the terminal. When the browser runs on a different device than TeamAI, the approval ends on a `localhost` page that cannot load there: copy that address-bar URL (or just the code in it) and paste it. Whichever arrives first finishes the login and the other is shut down; a pasted URL or `code#state` whose `state` is not this login's is refused and asked for again, and a stray request to the callback port is answered `400` without ending the login. `teamai login claude --manual` starts no callback server at all: open the printed URL on any device, approve, and paste the code the page shows. A login started from the dashboard (`a` → `1`) waits for the browser callback only, so the dashboard keeps its keys; the terminal paste is also skipped when stdin is not a terminal.
+
+Codex uses its normal browser login flow (`codex login`). For a remote machine, `teamai login codex --device-auth` runs `codex login --device-auth` instead, which prints a code to enter on any device; that needs device-code authorization enabled in ChatGPT's settings. Without the flag TeamAI does not require that setting.
 
 Credential import is optional and only works when an exportable credential file exists:
 
