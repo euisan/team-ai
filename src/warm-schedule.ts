@@ -3,6 +3,12 @@
 // and after the last successful warm.
 export const WARM_DELAY_AFTER_RESET_MS = 10_000;
 export const WARM_RETRY_MS = 10 * 60_000;
+// Transient relay/upstream failures keep retrying, but the delay is bounded so
+// one unhealthy upstream cannot create an ever-growing timer.
+export const WARM_RETRY_MAX_MS = 60 * 60_000;
+// A permanent warm failure is a local observation, not a permanent account
+// ban. Re-measure the idle account after an hour and give it another chance.
+export const WARM_GIVE_UP_MS = 60 * 60_000;
 export const MAX_TIMER_MS = 2 ** 31 - 1;
 const DEFAULT_SWITCH_THRESHOLD = 0.98;
 const CODEX_SESSION_WINDOW_MS = 300 * 60_000;
@@ -24,6 +30,8 @@ type WarmAccount = {
   quota?: Record<string, unknown>;
   warmRetryAt?: number | null;
   warmGaveUp?: boolean;
+  warmGaveUpAt?: number | null;
+  warmTransientRetries?: number;
   warmedAt?: number;
 };
 
@@ -76,7 +84,7 @@ export function warmEligibility(account: WarmAccount | null | undefined, now: nu
   if (usageAt == null || usageAt < usageSince || (typeof account.warmedAt === 'number' && usageAt <= account.warmedAt)) return no('awaiting-usage');
   if (quota.unified5h !== 0) return no('awaiting-usage');
   if (typeof account.warmRetryAt === 'number' && now < account.warmRetryAt) return no('retry-backoff');
-  if (account.warmGaveUp) return no('gave-up');
+  if (account.warmGaveUp && (typeof account.warmGaveUpAt !== 'number' || now < account.warmGaveUpAt + WARM_GIVE_UP_MS)) return no('gave-up');
   return { eligible: true, reason: 'ok' };
 }
 
@@ -90,6 +98,7 @@ export function nextWarmAt(account: WarmAccount | null | undefined, now: number,
     case 'window-running': return (quota.unified5hReset as number) + WARM_DELAY_AFTER_RESET_MS;
     case 'awaiting-usage': return typeof quota.unified5h === 'number' && quota.unified5h > 0 && typeof quota.unified5hReset === 'number' ? quota.unified5hReset + WARM_DELAY_AFTER_RESET_MS : null;
     case 'retry-backoff': return account?.warmRetryAt ?? null;
+    case 'gave-up': return typeof account?.warmGaveUpAt === 'number' ? account.warmGaveUpAt + WARM_GIVE_UP_MS : null;
     default: return null;
   }
 }

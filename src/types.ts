@@ -250,9 +250,14 @@ export interface RuntimeAccount extends StoredAccount, ResetCreditLedger {
   warmFailures?: number;
   warmRetryAt?: number | null;
   warmGaveUp?: boolean;
+  warmGaveUpAt?: number | null;
+  warmTransientRetries?: number;
   warmedAt?: number;
   warmConfirmAt?: number | null;
   warmSignature?: string;
+  // Set by the pinned relay path when the warm stream ended for a retryable
+  // capacity/network reason. It is process-local and never persisted.
+  warmTransientFailure?: string | null;
   // Memory only: the redemption running for this account, shared by every
   // caller so a ticket is never spent twice concurrently; and the last list.
   resetCreditPromise?: Promise<import('./reset-credits.js').RedeemResult> | null;

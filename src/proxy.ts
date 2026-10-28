@@ -366,7 +366,15 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));
       return json(res, 429, { error: shortfall.message }, headers);
     }
+    // A capacity retry may reuse this account and eventually succeed; the
+    // marker describes only the current attempt, so discard an older one when
+    // a fresh dispatch starts.
+    if (pinnedAccount) account.warmTransientFailure = null;
     track.setAccount(account.label, route ? !pool.isMember(route, account) : undefined);
+    // The local warmer uses a pinned path. Keep the relay's classification on
+    // that in-memory account so its child-process exit can distinguish a
+    // retryable upstream/stream failure from a permanent command failure.
+    const markWarmTransient = (reason: string): void => { if (pinnedAccount === account.id) account.warmTransientFailure = reason; };
     let response: Response;
     let phase = 'token refresh';
     let dispatchedAt = Date.now();
@@ -410,7 +418,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // The retry must outwait the 2s network cooldown, or a small fleet finds
       // every account still cooling and gives up on the first round.
       transientAccounts.add(account.id); nextRetryAt = Math.max(nextRetryAt, Date.now() + 2_100);
-      pool.release(account); pool.cooldown(account, 2_000, 'network'); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error (${phase}: ${describeError(error)}); failover`);
+      markWarmTransient(`network error (${phase})`); pool.release(account); pool.cooldown(account, 2_000, 'network'); excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error (${phase}: ${describeError(error)}); failover`);
       continue;
     }
     const observed = pool.observeResponse(account, response.headers, dispatchedAt, response.status);
@@ -423,6 +431,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       let errorBody: string;
       try { errorBody = await response.text(); } catch (error) { pool.release(account); if (res.destroyed) return; throw error; } finally { res.off('close', onClientClose); }
       if (pool.provider.id === 'codex' && pool.codexCapacity.enabled && response.status === 503 && isCapacityOverloadBody(errorBody)) {
+        markWarmTransient('capacity failure');
         await retryCapacity(account); continue;
       }
       // Only preamble was committed by an earlier attempt. A different error
@@ -458,6 +467,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
       // over; when no account remains, bounded retry rounds run above before
       // the original error is returned. No quota state is mutated.
       if (decision.kind === 'transient') {
+        markWarmTransient(`transient HTTP ${response.status}`);
         excluded.add(account.id); onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} transient; failover`);
         transientAccounts.add(account.id);
         nextRetryAt = Math.max(nextRetryAt, Date.now() + decision.retryAfterMs);
@@ -512,19 +522,31 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer,
     // socket ("error decoding response body") and the relay showed nothing.
     let cut: string | null = null;
     let released = false;
+    const watcher = isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; track.setEnd(end); }) : null;
     try {
       if (!response.body) res.end();
       else if (isCodexCapacityStream) {
         const gate = gateCodexCapacityPreamble(response.body, pool.codexCapacity.preambleHoldMs);
-        await pipeStream(gate.stream, res, new SseWatcher((end) => { track.finished = end; track.setEnd(end); }), false, () => { if (!res.headersSent) { copyHeaders(response, res); res.writeHead(response.status); } });
+        await pipeStream(gate.stream, res, watcher, false, () => { if (!res.headersSent) { copyHeaders(response, res); res.writeHead(response.status); } });
         if (gate.outcome.retry) { released = true; await retryCapacity(account); continue; }
         if (gate.outcome.afterOutput || gate.outcome.bufferLimit) {
           track.cut = true;
+          markWarmTransient(gate.outcome.afterOutput ? 'capacity failure after output' : 'SSE buffer limit');
           onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${gate.outcome.afterOutput ? 'capacity failure after output' : 'SSE buffer limit'}; stream ended without terminal event`);
         }
+        if (pinnedAccount && !watcher?.ended && !res.destroyed && !gate.outcome.afterOutput && !gate.outcome.bufferLimit) {
+          track.cut = true; markWarmTransient('stream ended without terminal event');
+          onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} stream ended without terminal event`);
+        }
         if (!res.destroyed) { if (!res.headersSent) { copyHeaders(response, res); res.writeHead(response.status); } res.end(); }
-      } else await pipeStream(response.body, res, isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; track.setEnd(end); }) : null);
-    } catch (error) { cut = (error as Error).message; track.cut = true; throw error; }
+      } else {
+        await pipeStream(response.body, res, watcher);
+        if (pinnedAccount && watcher && !watcher.ended && !res.destroyed) {
+          track.cut = true; markWarmTransient('stream ended without terminal event');
+          onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} stream ended without terminal event`);
+        }
+      }
+    } catch (error) { cut = (error as Error).message; track.cut = true; if (watcher && !watcher.ended) markWarmTransient('stream ended without terminal event'); throw error; }
     // The finished-request line itself comes from the activity log; only a
     // cut, with its cause, needs a sentence of its own.
     finally { if (!released) pool.release(account); if (cut) onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} stream cut mid-body: ${cut}`); }
