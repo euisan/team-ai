@@ -442,3 +442,17 @@ test('a pinned account path that names no account is refused, not served by anot
     assert.equal(reached, 1);
   } finally { proxy.close(); upstream.close(); }
 });
+
+test('a pinned stream without a terminal event marks the warm as transient', async () => {
+  const upstream = createServer((req, res) => { req.resume(); res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"type":"response.output_text.delta"}\n\n'); });
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r)); const up = upstream.address(); assert(up && typeof up !== 'string');
+  const provider: Provider = { ...codexProvider, upstreamBase: `http://127.0.0.1:${up.port}`, readQuota: () => null, refresh: async (c) => c };
+  const stored: StoredAccount = { id: 'a', provider: 'codex', label: 'a', enabled: true, priority: null, credentialId: 'a', createdAt: '' };
+  const pool = new AccountPool(provider, [stored], { a: { accessToken: 'secret-a', refreshToken: null, expiresAt: null, accountId: 'a' } }, { version: 1, accounts: {} });
+  const proxy = createProxy(pool, 'local-secret', () => {}); await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const address = proxy.address(); assert(address && typeof address !== 'string');
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/tc-acct/a/codex`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: '{}' });
+    await response.text();
+    assert.equal(pool.accounts[0]!.warmTransientFailure, 'stream ended without terminal event');
+  } finally { proxy.close(); upstream.close(); }
+});
