@@ -12,7 +12,7 @@ function fakeClock(start: number) {
 }
 function account(id: string, usageRequestedAt: number) {
   const now = Date.now();
-  return { id, label: `account-${id}`, enabled: true, measuredAt: usageRequestedAt, usageRequestedAt, windows: { primary: { usage: 0, resetsAt: now + 5 * 60 * 60_000 }, secondary: { usage: 0.1, resetsAt: now + 3 * 86_400_000 } }, cooldownUntil: null, error: null, warmFailures: 0, warmRetryAt: null, warmGaveUp: false, warmTransientFailure: null as string | null, warmSignature: undefined as string | undefined };
+  return { id, label: `account-${id}`, enabled: true, measuredAt: usageRequestedAt, usageRequestedAt, windows: { primary: { usage: 0, resetsAt: now + 5 * 60 * 60_000 }, secondary: { usage: 0.1, resetsAt: now + 3 * 86_400_000 } }, cooldownUntil: null, error: null, warmFailures: 0, warmRetryAt: null, warmGaveUp: false, warmTransientFailure: null as string | null, warmConfirmAt: null as number | null, warmSignature: undefined as string | undefined };
 }
 
 test('warmer runs one real Codex command for a fresh idle account', async () => {
@@ -182,6 +182,33 @@ test('a failed warm is retried as a warm, not counted again by a confirmation re
   await clock.advance(10 * 60_000);
   assert.equal(warms, 3, 'the retry timer sends another warm instead of only reading');
   assert.equal(a.warmGaveUp, false, 'one failed warm is not counted twice');
+  warmer.stop();
+});
+
+test('a stale confirmation after a window-running arm does not count the retry read as a second failure', async () => {
+  const start = Date.now(); const clock = fakeClock(start); const codex = fakeCodex(clock); const a = account('stale-confirmation', start - 60_000); let warms = 0;
+  const warmer: Warmer = new Warmer({ accounts: [a] }, { port: 3457, nowFn: clock.now, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout, refreshUsage: async (x) => { codex.read(x as typeof a); warmer.onAccountChanged(x); }, spawnFn: async () => { warms++; if (warms === 1) codex.warm(); return warms === 2 ? 1 : 0; } });
+  warmer.start(); await wait();
+  assert.equal(warms, 1, 'the initial idle window is warmed');
+
+  // The successful warm schedules a confirmation read. A usage event that
+  // sees the newly opened window arms the reset timer instead, leaving the
+  // old confirmation deadline on the account. The reset timer is later
+  // replaced by the next idle measurement before it can fire.
+  await clock.advance(5 * 60_000 + 1);
+  codex.read(a); warmer.onAccountChanged(a);
+  assert.equal(clock.pending(), 1, 'the window-running reset arm replaces confirmation');
+  assert.equal(typeof a.warmConfirmAt, 'number', 'the replaced confirmation remains stale');
+  assert.ok((a.warmConfirmAt || 0) < clock.now() + 5 * 60 * 60_000, 'the stale deadline predates the reset');
+
+  await clock.advance(5 * 60 * 60_000 - (5 * 60_000 + 1));
+  codex.read(a); warmer.onAccountChanged(a); await wait();
+  assert.equal(warms, 2, 'the first warm in the next idle window fails once');
+  assert.equal(a.warmFailures, 1);
+
+  await clock.advance(10 * 60_000);
+  assert.equal(warms, 3, 'the retry timer sends a warm instead of only reading usage');
+  assert.equal(a.warmGaveUp, false, 'the retry read is not counted as a second failure');
   warmer.stop();
 });
 
