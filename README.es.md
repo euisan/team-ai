@@ -4,7 +4,7 @@
 
 > **Traducción desactualizada:** esta traducción aún no refleja los cambios recientes del README en inglés (las funciones y claves de configuración añadidas desde la actividad en curso). Para el comportamiento y la configuración, consulta el [README en inglés](README.md).
 
-> **Pendiente de traducir:** los reintentos de capacidad de Codex y las opciones `codexCapacity*` se describen en el [README en inglés](README.md).
+> **Pendiente de traducir:** los reintentos de capacidad de Codex, las opciones `codexCapacity*`, Claude keep-warm y las opciones `warmup.claude` / `warmup.codex` se describen en el [README en inglés](README.md).
 
 TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **Codex**. Mantiene un grupo de cuentas independiente para cada proveedor y reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota.
 
@@ -262,7 +262,9 @@ Cada cambio en `config.json` o `credentials.json` vuelve a leer el archivo y lo 
 | `proxy.controlPort` | `3556` | Canal de control con el que habla la TUI. |
 | `proxy.clientToken` | generado | Token local que debe enviar todo cliente que pase por el relé. |
 | `switchThreshold` | `0.98` | Proporción de uso por encima de la cual una cuenta deja de seleccionarse. |
-| `warmup.enabled` | `true` | Keep-warm de Codex impulsado por eventos; `false` lo desactiva. |
+| `warmup.enabled` | `true` | Keep-warm de Codex y Claude impulsado por eventos; `false` desactiva ambos. |
+| `warmup.claude` | `true` | Habilita keep-warm para cuentas de Claude (pendiente de traducir, ver inglés); `false` lo desactiva. |
+| `warmup.codex` | `true` | Habilita keep-warm para cuentas de Codex; `false` lo desactiva. |
 | `maxConcurrentPerAccount` | `16` | Solicitudes en curso permitidas por cuenta. `0` significa sin límite. |
 | `routing.balance` | `"pacing"` | Cómo se ordenan las cuentas Claude de igual prioridad: `pacing` (ritmo semanal, ver arriba) o `level` (ventanas menos llenas, en pasos del 10 %). Codex siempre usa el ritmo semanal. |
 | `routes` | — | Opcional. Rutas por modelo y proveedor, `{ "claude": [...], "codex": [...] }`; se editan con `g` en el panel o con `teamai route`. |

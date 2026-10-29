@@ -4,7 +4,7 @@
 
 > **翻訳の遅れについて:** この翻訳は英語版 README の最近の変更（進行中の Activity 表示以降に追加された機能と設定キー）をまだ反映していません。動作と設定は[英語版 README](README.md) を基準にしてください。
 
-> **追加の翻訳待ち:** Codex の上流容量エラー再試行と `codexCapacity*` 設定は未翻訳です。[英語版](README.md)を参照してください。
+> **追加の翻訳待ち:** Codex の上流容量エラー再試行と `codexCapacity*` 設定、および Claude keep-warm と `warmup.claude` / `warmup.codex` 設定は未翻訳です。[英語版](README.md)を参照してください。
 
 TeamAI は **Claude Code** と公式 **Codex CLI** のためのローカル多アカウントリレーです。プロバイダーごとに独立したアカウントプールを保持し、選ばれたサブスクリプションが利用できない、またはクォータを使い切っている場合は別のアカウントでリクエストを再試行します。
 
@@ -193,7 +193,9 @@ Codex の keep-warm はイベント駆動です。計測済みの 5 時間ウィ
 | `proxy.controlPort` | `3556` | TUI が通信する制御チャネル。 |
 | `proxy.clientToken` | 自動生成 | リレーされるすべてのクライアントが送る必要のあるローカルトークン。 |
 | `switchThreshold` | `0.98` | この使用率を超えたアカウントは選択されなくなります。 |
-| `warmup.enabled` | `true` | Codex のイベント駆動 keep-warm。`false` で無効化。 |
+| `warmup.enabled` | `true` | Codex および Claude のイベント駆動 keep-warm。`false` で両方を無効化。 |
+| `warmup.claude` | `true` | Claude アカウントの keep-warm（未翻訳・英語版参照）。`false` で無効化。 |
+| `warmup.codex` | `true` | Codex アカウントの keep-warm。`false` で無効化。 |
 | `maxConcurrentPerAccount` | `16` | 1 アカウントあたりに許可される同時実行リクエスト数。`0` で無制限。 |
 | `routing.balance` | `"pacing"` | 同じ優先度の Claude アカウントの並べ方：`pacing`（週次ペース、上記）または `level`（空いているウィンドウ順、10% 刻み）。Codex は常に週次ペースを使います。 |
 | `routes` | — | 任意。プロバイダーごとのモデルルート `{ "claude": [...], "codex": [...] }`。ダッシュボードの `g` か `teamai route` で編集。 |

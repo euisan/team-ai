@@ -222,18 +222,44 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // server-start.log: the dashboard's event list rolls over in hours, and a
   // warmer that silently stopped warming left no trace anywhere (2026-10-19).
   const codexPool = pools.find((pool) => pool.provider.id === 'codex');
-  const warmer = background && codexPool && config.warmup?.enabled !== false
-    ? new Warmer(codexPool, { enabled: true, port: ports.codex, clientToken: config.proxy.clientToken, switchThreshold: config.switchThreshold, refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }), log: (message) => persist(message), trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`) })
+  const claudePool = pools.find((pool) => pool.provider.id === 'claude');
+  const warmupEnabled = config.warmup?.enabled !== false;
+  const codexWarmer = background && codexPool && warmupEnabled && config.warmup?.codex !== false
+    ? new Warmer(codexPool, {
+        providerId: 'codex',
+        enabled: true,
+        port: ports.codex,
+        clientToken: config.proxy.clientToken,
+        switchThreshold: config.switchThreshold,
+        refreshUsage: (account) => codexPool.refreshUsageAccount(account as typeof codexPool.accounts[number]).then(() => { persist(); }),
+        log: (message) => persist(message),
+        trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`),
+      })
     : null;
-  if (warmer && codexPool) { codexPool.setChangeListener((account) => warmer.onAccountChanged(account)); warmer.start(); }
+  const claudeWarmer = background && claudePool && warmupEnabled && config.warmup?.claude !== false
+    ? new Warmer(claudePool, {
+        providerId: 'claude',
+        enabled: true,
+        port: ports.claude,
+        clientToken: config.proxy.clientToken,
+        switchThreshold: config.switchThreshold,
+        getProbeTemplate: () => claudePool.getProbeTemplate(),
+        refreshUsage: (account) => claudePool.refreshUsageAccount(account as typeof claudePool.accounts[number]).then(() => { persist(); }),
+        log: (message) => persist(message),
+        trace: (line) => console.log(`${new Date().toISOString()} [TeamAI] keep-warm ${line}`),
+      })
+    : null;
+  if (codexWarmer && codexPool) { codexPool.setChangeListener((account) => codexWarmer.onAccountChanged(account)); codexWarmer.start(); }
+  if (claudeWarmer && claudePool) { claudePool.setChangeListener((account) => claudeWarmer.onAccountChanged(account)); claudeWarmer.start(); }
   usageRefresher?.start();
   reloaded = (result) => {
     const line = (['claude', 'codex'] as const).map((id) => { const c = result.accounts[id]; return c ? `${id} +${c.added} -${c.removed}${c.retired ? ` (${c.retired} finishing)` : ''}` : ''; }).filter(Boolean).join(', ');
     persist(`Config reloaded: ${line}; routes claude ${result.routes.claude ?? 0}, codex ${result.routes.codex ?? 0}`);
     if (result.adopted) persist(`Adopted ${result.adopted} re-logged credential(s)`);
     for (const warning of result.warnings) persist(warning);
-    // Keep-warm re-judges every Codex account: one switched on or off, or new.
-    if (warmer && codexPool) for (const account of codexPool.accounts) warmer.onAccountChanged(account);
+    // Keep-warm re-judges every account: one switched on or off, or new.
+    if (codexWarmer && codexPool) for (const account of codexPool.accounts) codexWarmer.onAccountChanged(account);
+    if (claudeWarmer && claudePool) for (const account of claudePool.accounts) claudeWarmer.onAccountChanged(account);
     usageRefresher?.reconcile();
     // A new account has no profile yet; fill it so its plan shows right away.
     if (background && Object.values(result.accounts).some((c) => c.added)) void Promise.all(pools.map((p) => p.refreshProfiles().catch(() => 0))).then((n) => { if (n.some(Boolean)) persist(); });
@@ -272,7 +298,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // to the new process seconds later.
   const stop = async (): Promise<void> => {
     usageRefresher?.stop();
-    warmer?.stop();
+    codexWarmer?.stop();
+    claudeWarmer?.stop();
     for (const timer of timers) clearTimeout(timer); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     const drained = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS).unref())]);
