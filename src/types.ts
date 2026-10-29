@@ -43,10 +43,10 @@ export interface TeamAIConfig {
     bodyTimeoutMs?: number;
   };
   switchThreshold: number;
-  // Codex keep-warm. The warmer is event-driven; disabling it stops all
+  // Codex and Claude keep-warm. The warmer is event-driven; disabling it stops all
   // timers and requests. Kept as one setting so measurement and window starts
   // cannot drift apart.
-  warmup?: { enabled?: boolean };
+  warmup?: { enabled?: boolean; claude?: boolean; codex?: boolean };
   maxConcurrentPerAccount: number;
   // How accounts of equal priority are ordered: 'pacing' (default) puts the
   // account furthest behind a straight weekly line first; 'level' the one with

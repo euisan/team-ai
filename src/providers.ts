@@ -142,7 +142,24 @@ export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsa
 export const claudeProvider: Provider = {
   id: 'claude', label: 'Claude', upstreamBase: 'https://api.anthropic.com', fableModel: 'claude-fable-5-1',
   startWindowModel: 'claude-haiku-4-5-20251001',
-  normalizePath(path) { return path.startsWith('/v1/') || path.startsWith('/api/') ? path : null; },
+  normalizePath(path) {
+    const pathname = new URL(path, 'http://localhost').pathname;
+    const match = /^\/tc-acct\/[^/]+\/claude(?:\/(.*))?$/.exec(pathname);
+    if (match) {
+      const rawSub = match[1]?.trim();
+      const subpath = rawSub ? (rawSub.startsWith('/') ? rawSub : `/${rawSub}`) : '/v1/messages';
+      if (!subpath.startsWith('/v1/') && !subpath.startsWith('/api/')) return null;
+      const search = path.includes('?') ? path.slice(path.indexOf('?')) : '';
+      return `${subpath}${search}`;
+    }
+    return path.startsWith('/v1/') || path.startsWith('/api/') ? path : null;
+  },
+  pinnedAccount(path) {
+    const pathname = new URL(path, 'http://localhost').pathname;
+    const match = /^\/tc-acct\/([^/]+)\/claude(?:\/.*)?$/.exec(pathname);
+    if (!match) return null;
+    try { return decodeURIComponent(match[1]!); } catch { return null; }
+  },
   buildHeaders(incoming, account) {
     const headers = outboundHeaders(incoming);
     headers.set('authorization', `Bearer ${account.credential.accessToken}`);

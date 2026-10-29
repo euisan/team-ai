@@ -37,8 +37,8 @@ type WarmAccount = {
 
 function quotaOf(account: WarmAccount): Record<string, unknown> {
   if (account.quota) return account.quota;
-  const primary = account.windows?.primary;
-  const secondary = account.windows?.secondary;
+  const primary = account.windows?.primary ?? account.windows?.['5h'];
+  const secondary = account.windows?.secondary ?? account.windows?.['7d'];
   return {
     codex5hAdvertised: Boolean(primary),
     unified5h: primary?.usage ?? null,

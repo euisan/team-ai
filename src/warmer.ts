@@ -1,4 +1,6 @@
+import { buildClaudeWarmRequest, sendClaudeWarm } from './claude-warm.js';
 import { buildCodexWarmCommand, spawnCodexWarm, type WarmCommand } from './codex-warm.js';
+import type { ProbeTemplate, ProviderId } from './types.js';
 import { WARM_GIVE_UP_MS, WARM_RETRY_MAX_MS, WARM_RETRY_MS, WINDOW_START_TOLERANCE_MS, clampDelay, nextWarmAt, warmEligibility, windowOpen } from './warm-schedule.js';
 
 const WARM_TIMEOUT_MS = 120_000;
@@ -8,20 +10,24 @@ const WARM_TIMEOUT_MS = 120_000;
 const WARM_CONFIRM_DELAY_MS = WINDOW_START_TOLERANCE_MS + 60_000;
 const STALE_RECHECK_MS = 60_000;
 type Account = { id: string; label?: string; index?: number; enabled?: boolean; error?: string | null; cooldownUntil?: number | null; windows?: Record<string, { usage: number | null; resetsAt: number | null }>; usage?: number | null; measuredAt?: number | null; usageRequestedAt?: number | null; warmFailures?: number; warmRetryAt?: number | null; warmGaveUp?: boolean; warmGaveUpAt?: number | null; warmTransientRetries?: number; warmTransientFailure?: string | null; warmedAt?: number; warmConfirmAt?: number | null; warmSignature?: string };
-type Manager = { accounts: Account[] };
+type Manager = { accounts: Account[]; provider?: { id: ProviderId; label?: string } };
 type SpawnSpec = WarmCommand & { timeoutMs: number; signal: AbortSignal };
 type SpawnResult = number | { code: number; transient?: boolean; reason?: string };
 type WarmFailure = { reason: string; transient: boolean };
 type TimerHandle = { unref?: () => void };
 type StatusRecord = { status: string; lastWarmedAt?: number; error?: string | null };
 
+export type WarmSpec = { port: number; clientToken: string; timeoutMs: number; signal: AbortSignal };
+export type WarmFn = (account: Account, spec: WarmSpec) => Promise<SpawnResult>;
+
 export class Warmer {
   readonly am: Manager;
+  readonly providerId: string;
   enabled: boolean;
   readonly port: number;
   readonly clientToken: string;
   readonly timeoutMs: number;
-  private readonly spawnFn: (spec: SpawnSpec) => Promise<SpawnResult>;
+  private readonly warmFn: WarmFn;
   private readonly refreshUsage: ((account: Account) => Promise<unknown>) | null;
   private readonly switchThreshold: number;
   private readonly log: (line: string) => void;
@@ -37,11 +43,54 @@ export class Warmer {
   private status = new Map<string, StatusRecord>();
   private traced = new Map<Account, string>();
 
-  constructor(am: Manager, options: { enabled?: boolean; port: number; clientToken?: string; timeoutMs?: number; spawnFn?: (spec: SpawnSpec) => Promise<SpawnResult>; refreshUsage?: (account: Account) => Promise<unknown>; switchThreshold?: number; log?: (line: string) => void; trace?: (line: string) => void; nowFn?: () => number; setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle; clearTimeoutFn?: (timer: TimerHandle) => void } ) {
-    this.am = am; this.enabled = options.enabled !== false; this.port = options.port; this.clientToken = options.clientToken || ''; this.timeoutMs = options.timeoutMs ?? WARM_TIMEOUT_MS;
-    this.spawnFn = options.spawnFn || spawnCodexWarm; this.refreshUsage = options.refreshUsage || null; this.switchThreshold = options.switchThreshold ?? 0.98; this.log = options.log || (() => {}); this.trace = options.trace || (() => {});
-    this.nowFn = options.nowFn || Date.now; this.setTimeoutFn = options.setTimeoutFn || ((fn: () => void, ms: number): TimerHandle => setTimeout(fn, ms)); this.clearTimeoutFn = options.clearTimeoutFn || ((timer: TimerHandle): void => clearTimeout(timer as NodeJS.Timeout)); this.startedAt = this.nowFn();
+  constructor(
+    am: Manager,
+    options: {
+      providerId?: string;
+      enabled?: boolean;
+      port: number;
+      clientToken?: string;
+      timeoutMs?: number;
+      spawnFn?: (spec: SpawnSpec) => Promise<SpawnResult>;
+      warmFn?: WarmFn;
+      getProbeTemplate?: () => ProbeTemplate | null;
+      refreshUsage?: (account: Account) => Promise<unknown>;
+      switchThreshold?: number;
+      log?: (line: string) => void;
+      trace?: (line: string) => void;
+      nowFn?: () => number;
+      setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle;
+      clearTimeoutFn?: (timer: TimerHandle) => void;
+    },
+  ) {
+    this.am = am;
+    this.providerId = options.providerId ?? am.provider?.id ?? 'codex';
+    this.enabled = options.enabled !== false;
+    this.port = options.port;
+    this.clientToken = options.clientToken || '';
+    this.timeoutMs = options.timeoutMs ?? WARM_TIMEOUT_MS;
+    this.refreshUsage = options.refreshUsage || null;
+    this.switchThreshold = options.switchThreshold ?? 0.98;
+    this.log = options.log || (() => {});
+    this.trace = options.trace || (() => {});
+    this.nowFn = options.nowFn || Date.now;
+    this.setTimeoutFn = options.setTimeoutFn || ((fn: () => void, ms: number): TimerHandle => setTimeout(fn, ms));
+    this.clearTimeoutFn = options.clearTimeoutFn || ((timer: TimerHandle): void => clearTimeout(timer as NodeJS.Timeout));
+    this.startedAt = this.nowFn();
+
+    if (options.warmFn) {
+      this.warmFn = options.warmFn;
+    } else if (options.spawnFn) {
+      const spawn = options.spawnFn;
+      this.warmFn = (a, spec) => spawn({ ...buildCodexWarmCommand(spec.port, a.id, { token: spec.clientToken }), timeoutMs: spec.timeoutMs, signal: spec.signal });
+    } else if (this.providerId === 'claude') {
+      const getProbe = options.getProbeTemplate;
+      this.warmFn = (a, spec) => sendClaudeWarm({ ...buildClaudeWarmRequest(spec.port, a.id, { token: spec.clientToken, probeTemplate: getProbe?.() }), timeoutMs: spec.timeoutMs, signal: spec.signal });
+    } else {
+      this.warmFn = (a, spec) => spawnCodexWarm({ ...buildCodexWarmCommand(spec.port, a.id, { token: spec.clientToken }), timeoutMs: spec.timeoutMs, signal: spec.signal });
+    }
   }
+
   start(): void {
     this.started = true;
     if (!this.enabled) return;
@@ -72,12 +121,12 @@ export class Warmer {
   private live(a: Account): boolean { return this.am.accounts[a.index ?? this.am.accounts.indexOf(a)] === a; }
   private halt(): void { this.generation++; for (const x of this.timers.values()) this.clearTimeoutFn(x.timer); this.timers.clear(); this.queue = []; this.current = null; this.draining = null; this.abort?.abort(); this.abort = null; }
   private options() { return { switchThreshold: this.switchThreshold, usageSince: this.startedAt }; }
-  private hasWindow(a: Account): boolean { return Boolean(a.windows?.primary); }
+  private hasWindow(a: Account): boolean { return Boolean(a.windows?.primary || a.windows?.['5h']); }
   // An open window that still reads 0% (a warm alone barely registers) is
   // 'run', not 'idle': otherwise the reset that empties it changes nothing, and
   // a backoff or give-up from the previous window carries into the next one.
-  private signature(a: Account): string { const q = a.windows?.primary; if (a.enabled === false) return 'off'; if (!q) return 'none'; if (q.usage === 0 && !windowOpen(a, this.nowFn())) return 'idle'; if (typeof q.usage === 'number') return `run:${q.resetsAt}`; return 'unknown'; }
-  private who(a: Account): string { return `codex #${this.am.accounts.indexOf(a) + 1}`; }
+  private signature(a: Account): string { const q = a.windows?.primary ?? a.windows?.['5h']; if (a.enabled === false) return 'off'; if (!q) return 'none'; if (q.usage === 0 && !windowOpen(a, this.nowFn())) return 'idle'; if (typeof q.usage === 'number') return `run:${q.resetsAt}`; return 'unknown'; }
+  private who(a: Account): string { return `${this.providerId} #${this.am.accounts.indexOf(a) + 1}`; }
   // One line per account each time the decision changes, and one per warm
   // outcome. Account number only: no label, address or token.
   private note(a: Account, decision: string): void { if (this.traced.get(a) === decision) return; this.traced.set(a, decision); this.trace(`${this.who(a)}: ${decision}`); }
@@ -119,10 +168,10 @@ export class Warmer {
   private async warm(a: Account, gen: number): Promise<void> {
     const abort = new AbortController(); this.abort = abort; const previous = this.status.get(a.id); a.warmTransientFailure = null; this.record(a, { status: 'running' }); this.event(a, 'warm sent'); let failure: WarmFailure | null = null;
     try {
-      const result = await this.spawnFn({ ...buildCodexWarmCommand(this.port, a.id, { token: this.clientToken }), timeoutMs: this.timeoutMs, signal: abort.signal });
+      const result = await this.warmFn(a, { port: this.port, clientToken: this.clientToken, timeoutMs: this.timeoutMs, signal: abort.signal });
       if (typeof result === 'number') { if (result !== 0) failure = { reason: `exit ${result}`, transient: false }; }
       else if (result.code !== 0) failure = { reason: result.reason || `exit ${result.code}`, transient: result.transient === true };
-    } catch (error) { failure = classifyError(error); }
+    } catch (error) { failure = classifyError(error, this.providerId); }
     finally { if (this.abort === abort) this.abort = null; }
     if (a.warmTransientFailure) failure = { reason: a.warmTransientFailure, transient: true };
     if (abort.signal.aborted || gen !== this.generation) { if (previous) this.status.set(a.id, previous); else this.status.delete(a.id); return; }
@@ -158,6 +207,5 @@ export class Warmer {
   }
   private record(a: Account, fields: { status?: string; lastWarmedAt?: number; error?: string | null }): void { const previous = this.status.get(a.id); this.status.set(a.id, { status: fields.status ?? previous?.status ?? 'never', lastWarmedAt: fields.lastWarmedAt ?? previous?.lastWarmedAt, error: fields.error === undefined ? previous?.error : fields.error }); }
 }
-function classifyError(error: unknown): WarmFailure { const value = error && typeof error === 'object' ? error as { code?: string; message?: string; signal?: string } : {}; if (value.code === 'ETIMEDOUT' || /timed out/i.test(value.message || '')) return { reason: 'timeout', transient: true }; if (value.code === 'ENOENT') return { reason: 'codex not found', transient: false }; if (value.signal) return { reason: `killed by ${value.signal}`, transient: true }; return { reason: 'spawn failed', transient: false }; }
+function classifyError(error: unknown, providerId = 'codex'): WarmFailure { const value = error && typeof error === 'object' ? error as { code?: string; message?: string; signal?: string } : {}; if (value.code === 'ETIMEDOUT' || /timed out/i.test(value.message || '')) return { reason: 'timeout', transient: true }; if (value.code === 'ENOENT') return { reason: `${providerId} not found`, transient: false }; if (value.signal) return { reason: `killed by ${value.signal}`, transient: true }; if (/fetch failed|ECONNREFUSED|ECONNRESET/i.test(value.message || '')) return { reason: value.message || 'network error', transient: true }; return { reason: `${providerId === 'claude' ? 'request' : 'spawn'} failed`, transient: false }; }
 function iso(value: number | undefined): string | null { return typeof value === 'number' ? new Date(value).toISOString() : null; }
-

@@ -811,6 +811,7 @@ export class AccountPool {
   }
 
   hasProbe(): boolean { return this.probeTemplate !== null && Boolean(this.provider.probeRequest); }
+  getProbeTemplate(): ProbeTemplate | null { return this.probeTemplate ?? this.provider.defaultProbe?.() ?? null; }
 
   // Force a fleet-wide quota re-measure (TUI 'R'). The usage endpoint reads
   // every account first, busy ones included, at no quota cost; only accounts it

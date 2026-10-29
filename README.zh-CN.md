@@ -4,7 +4,7 @@
 
 > **翻译滞后说明：** 本译文尚未反映英文 README 的近期变更（自进行中 Activity 显示起新增的功能和配置项）。行为与配置请以[英文 README](README.md) 为准。
 
-> **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置尚未翻译，请参阅[英文版](README.md)。
+> **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置、以及 Claude keep-warm 与 `warmup.claude` / `warmup.codex` 设置尚未翻译，请参阅[英文版](README.md)。
 
 TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
 
@@ -193,7 +193,9 @@ Codex keep-warm 采用事件驱动。已测量的 5 小时窗口重置 10 秒后
 | `proxy.controlPort` | `3556` | TUI 通信所用的控制通道。 |
 | `proxy.clientToken` | 自动生成 | 每个被中继的客户端都必须发送的本地令牌。 |
 | `switchThreshold` | `0.98` | 用量比例超过该值后，该账号不再被选中。 |
-| `warmup.enabled` | `true` | Codex 事件驱动 keep-warm；`false` 禁用。 |
+| `warmup.enabled` | `true` | Codex 与 Claude 事件驱动 keep-warm；`false` 两者均禁用。 |
+| `warmup.claude` | `true` | 启用 Claude 账号 keep-warm（待翻译，见英文说明）；`false` 禁用。 |
+| `warmup.codex` | `true` | 启用 Codex 账号 keep-warm；`false` 禁用。 |
 | `maxConcurrentPerAccount` | `16` | 每个账号允许的并发在途请求数。设为 `0` 表示无限制。 |
 | `routing.balance` | `"pacing"` | 同一优先级 Claude 账号的排序方式：`pacing`（每周进度，见上文）或 `level`（窗口最空者优先，按 10% 分档）。Codex 始终使用每周节奏。 |
 | `routes` | — | 可选。按提供方的模型路由 `{ "claude": [...], "codex": [...] }`，可用仪表盘的 `g` 或 `teamai route` 编辑。 |
