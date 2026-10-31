@@ -6,7 +6,7 @@
 
 > **Pendiente de traducir:** los reintentos de capacidad de Codex, las opciones `codexCapacity*`, Claude keep-warm, las opciones `warmup.claude` / `warmup.codex`, y la política de fijación de sesiones de Claude sin traspaso automático se describen en el [README en inglés](README.md).
 
-TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **Codex**. Mantiene un grupo de cuentas independiente para cada proveedor y reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota.
+TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **Codex**. Mantiene un grupo de cuentas independiente para cada proveedor. Para Codex CLI, reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota. Para Claude Code, cada sesión queda permanentemente fijada a su cuenta inicial (`sessions.json`) para preservar el historial de conversación, bloqueando la transferencia automática a otras cuentas en caso de agotamiento de cuota o error.
 
 ![Panel de TeamAI](docs/dashboard.png)
 
@@ -68,6 +68,15 @@ teamai session        # elige [1] Claude o [2] Codex de forma interactiva
 ```
 
 Los nombres evitan deliberadamente reemplazar una función de shell `tc` existente de TeamClaude. `tc` puede seguir apuntando a TeamClaude mientras `tac` y `tax` apuntan a TeamAI.
+
+### Fijación de sesiones y reanudación en Claude
+
+Cada sesión de Claude Code queda fijada permanentemente a su cuenta inicial en `sessions.json` y en un libro mayor persistente para proteger el historial de conversación:
+- **Nuevas sesiones:** `tac` y `teamai claude` asignan un ID de sesión explícito (`--session-id`) para las sesiones nuevas y lo vinculan atómicamente a una cuenta inicial en el primer turno.
+- **Compactación y turnos:** Claude Code envía el mismo ID de sesión canónico (`x-claude-code-session-id`) a través de turnos normales, `/compact`, auto-compactación, cambios de modelo y subagentes. La vinculación inicial se mantiene inalterada.
+- **Sesiones reanudadas (`--resume`, `--continue`):** La reanudación de una sesión registrada en TeamAI continúa en su cuenta fijada. Reanudar una sesión no probada (sin registro previo en TeamAI) se rechaza con `409 Conflict` para evitar filtraciones de historial a otra cuenta.
+- **Protección contra pérdida de vinculación:** Si la entrada de una sesión es eliminada de `sessions.json`, el relé tras reiniciar detecta la pérdida mediante el libro mayor persistente y falla de forma cerrada (`500`) en lugar de revincular la conversación a otra cuenta.
+
 
 ## Configuración del shell
 

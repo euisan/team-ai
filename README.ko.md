@@ -6,7 +6,7 @@
 
 > **추가 번역 지연:** Codex 업스트림 용량 재시도와 `codexCapacity*` 설정, Claude 세션 고정 및 타 계정 자동 핸드오버 차단 정책은 아직 번역하지 않았습니다. [영어 설명](README.md)을 확인하세요.
 
-TeamAI는 **Claude Code**와 공식 **Codex CLI**를 위한 로컬 다중 계정 릴레이입니다. 제공자별로 별도의 계정 풀을 유지하며, 선택된 구독 계정을 쓸 수 없거나 할당량이 소진되면 다른 계정으로 요청을 재시도합니다.
+TeamAI는 **Claude Code**와 공식 **Codex CLI**를 위한 로컬 다중 계정 릴레이입니다. 제공자별로 별도의 계정 풀을 유지합니다. Codex CLI는 선택된 구독 계정을 쓸 수 없거나 할당량이 소진되면 다른 계정으로 요청을 재시도합니다. Claude Code는 대화 기록을 보존하기 위해 각 세션이 최초 계정에 영구 고정(`sessions.json`)되며, 할당량 소진 또는 오류 시 다른 계정으로의 자동 핸드오버가 차단됩니다.
 
 ![TeamAI 대시보드](docs/dashboard.png)
 
@@ -63,6 +63,15 @@ teamai session        # [1] Claude / [2] Codex 대화식 선택
 ```
 
 이름은 기존 TeamClaude의 `tc` 셸 함수를 덮어쓰지 않도록 의도적으로 피했습니다. `tc`는 계속 TeamClaude를, `tac`과 `tax`는 TeamAI를 가리킵니다.
+
+### Claude 세션 고정 및 재개
+
+Claude Code의 각 세션은 대화 기록 보존을 위해 `sessions.json` 및 영속 원장에 기록된 최초 계정에 영구 고정됩니다.
+- **신규 세션:** `tac` 및 `teamai claude`는 신규 세션 시작 시 명시적 세션 ID(`--session-id`)를 부여하여 첫 요청에서 초기 계정에 원자적으로 결합합니다.
+- **압축 및 턴 진행:** Claude Code는 일반 대화 턴, `/compact`, 자동 압축, 모델 전환, 하위 에이전트 요청 전반에서 동일한 정규 세션 ID(`x-claude-code-session-id`)를 유지하며 최초 계정 고정이 유지됩니다.
+- **재개 세션 (`--resume`, `--continue`):** TeamAI에 기존 기록된 세션만 해당 고정 계정으로 재개됩니다. TeamAI에 기록이 없는 입증되지 않은 세션은 타 계정으로의 대화 이력 누출을 막기 위해 `409 Conflict`로 거부됩니다.
+- **유실 바인딩 보호:** `sessions.json`에서 특정 세션 바인딩이 삭제되거나 유실된 경우, 재시작 뒤에도 영속 원장을 통해 감지하여 타 계정으로 재결합하지 않고 `500` 오류로 안전하게 차단(fail-closed)합니다.
+
 
 ## 셸 설정
 

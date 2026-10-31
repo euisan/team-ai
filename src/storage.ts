@@ -114,6 +114,46 @@ export function resetSessionStorageForTest(): void {
   initializedSessionsPaths.clear();
 }
 
+function ledgerPathFor(sessionsPath: string): string {
+  return join(dirname(sessionsPath), '.sessions-ledger.json');
+}
+
+export async function loadSessionLedger(sessionsPath = paths().sessions): Promise<Set<string>> {
+  const file = ledgerPathFor(sessionsPath);
+  try {
+    const text = await readFile(file, 'utf8');
+    const list = JSON.parse(text);
+    if (Array.isArray(list)) return new Set(list.filter((x): x is string => typeof x === 'string'));
+  } catch {
+    // optional
+  }
+  return new Set();
+}
+
+export async function isSessionInLedger(sessionId: string, sessionsPath = paths().sessions): Promise<boolean> {
+  const set = await loadSessionLedger(sessionsPath);
+  return set.has(sessionId);
+}
+
+export async function recordSessionInLedger(sessionId: string, sessionsPath = paths().sessions): Promise<void> {
+  const file = ledgerPathFor(sessionsPath);
+  await serialized(file, async () => {
+    let list: string[] = [];
+    try {
+      const text = await readFile(file, 'utf8');
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) list = parsed.filter((x): x is string => typeof x === 'string');
+    } catch {
+      // fresh
+    }
+    if (!list.includes(sessionId)) {
+      list.push(sessionId);
+      await atomicWrite(file, list);
+    }
+  });
+}
+
+
 export function validateSessionBindings(raw: unknown): StoredSessionBindings {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Corrupt session bindings: root must be an object');
@@ -196,8 +236,31 @@ export function updateSessions(change: (bindings: StoredSessionBindings) => void
       }
     }
     if (await change(bindings) === false) return false;
-    await atomicWrite(path, validateSessionBindings(bindings));
+    const validated = validateSessionBindings(bindings);
+    await atomicWrite(path, validated);
     await markSessionStorageCreated(path);
+
+    const file = ledgerPathFor(path);
+    let ledgerList: string[] = [];
+    try {
+      const text = await readFile(file, 'utf8');
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) ledgerList = parsed.filter((x): x is string => typeof x === 'string');
+    } catch {
+      // fresh
+    }
+    const ledgerSet = new Set(ledgerList);
+    let ledgerChanged = false;
+    for (const key of Object.keys(validated)) {
+      if (!ledgerSet.has(key)) {
+        ledgerSet.add(key);
+        ledgerList.push(key);
+        ledgerChanged = true;
+      }
+    }
+    if (ledgerChanged) {
+      await atomicWrite(file, ledgerList);
+    }
     return true;
   });
 }

@@ -83,3 +83,23 @@ test('replacing credentials on a stored logical account cannot change the actual
     assert.deepEqual(r.received, ['Bearer fake-a'], 'logical id reuse must not change the actual bound account');
   } finally { r.close(); }
 });
+
+test('G123: restart plus deleted entry must not rebind a compact resumed conversation to B', async () => {
+  const first = await rig();
+  try {
+    assert.equal(await first.send('g123-keep'), 200);
+    assert.equal(await first.send('g123-lost'), 200);
+    assert.deepEqual(first.received, ['Bearer fake-a', 'Bearer fake-a']);
+  } finally { first.close(); }
+  const { readFile, writeFile } = await import('node:fs/promises');
+  const stored = JSON.parse(await readFile(paths().sessions, 'utf8'));
+  delete stored['g123-lost'];
+  await writeFile(paths().sessions, JSON.stringify(stored));
+  const second = await rig();
+  try {
+    second.pool.accounts[0]!.enabled = false;
+    await second.send('g123-lost');
+    assert.deepEqual(second.received, [], 'restarted relay must not route a known-but-deleted conversation to B');
+  } finally { second.close(); }
+});
+

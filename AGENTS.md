@@ -10,9 +10,26 @@ the two seem to differ, and report the discrepancy.
 A local relay that fronts **Claude Code** and the official **Codex CLI** with a
 pool of the user's own subscription accounts. For Codex CLI, it retries on
 another account when one is out of quota. For Claude Code, each session is
-permanently pinned to its initial account (`sessions.json`) to preserve
-conversation history; automatic handover to other accounts on quota exhaustion
-or error is blocked. It is not an API gateway and holds no keys of its own.
+permanently pinned to its initial account (`sessions.json` and persistent ledger)
+to preserve conversation history; automatic handover to other accounts on quota
+exhaustion or error is blocked. It is not an API gateway and holds no keys of its own.
+
+### Claude session pinning and resumption scope
+
+- **New sessions:** `tac` and `teamai claude` assign an explicit session ID
+  (`--session-id <uuid>`) for new sessions, binding it atomically to an initial
+  account on the first turn.
+- **Compaction & sub-requests:** Claude Code retains its canonical session ID
+  (`x-claude-code-session-id`) across `/compact`, auto-compaction, model switches,
+  and subagent turns, preserving the initial account binding.
+- **Resumed sessions (`--resume`, `--continue`):** Allowed only when the session
+  was previously established and recorded in TeamAI's binding store. Resuming an
+  unproven conversation (history not recorded in TeamAI) is rejected with
+  `409 Conflict` to prevent leaking conversation history to an unintended account.
+- **Restart & entry deletion protection:** Bound sessions are tracked in a
+  persistent ledger. If a session binding is missing or deleted from `sessions.json`,
+  the restarted relay detects the lost binding and fails closed (`500`) rather
+  than rebinding the conversation to another account.
 
 ## Install
 

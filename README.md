@@ -64,6 +64,15 @@ teamai session        # choose [1] Claude or [2] Codex interactively
 
 The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.
 
+### Claude session pinning and resumption
+
+Each Claude Code session is permanently pinned to its initial account in `sessions.json` and a persistent ledger to protect conversation history:
+- **New sessions:** `tac` and `teamai claude` assign an explicit session ID (`--session-id`) for new sessions and bind it to an initial account on the first turn.
+- **Compaction & turns:** Claude Code sends the same canonical session ID (`x-claude-code-session-id`) across turns, `/compact`, auto-compaction, model switches, and subagent requests. The initial binding is preserved throughout.
+- **Resumed sessions (`--resume`, `--continue`):** Resuming an established session continues on its pinned account. Resuming an unproven session (conversation history not recorded in TeamAI) is rejected with `409 Conflict` rather than risking a history leak to a different account.
+- **Lost binding protection:** If a session's binding is removed or deleted from `sessions.json`, the relay fails closed with `500` rather than rebinding the conversation to another account after restart.
+
+
 ## Shell setup
 
 ```bash

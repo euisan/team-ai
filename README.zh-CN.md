@@ -6,7 +6,7 @@
 
 > **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置、Claude keep-warm 与 `warmup.claude` / `warmup.codex` 设置，以及 Claude 会话绑定和禁止自动交接策略尚未翻译，请参阅[英文版](README.md)。
 
-TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
+TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池。对于 Codex CLI，当所选订阅账号不可用或配额耗尽时，会换另一个账号重试请求。对于 Claude Code，每个会话永久固定到其初始账号（`sessions.json`），以保护对话历史，并在配额耗尽或出错时阻止自动交接到其他账号。
 
 ![TeamAI 仪表盘](docs/dashboard.png)
 
@@ -63,6 +63,15 @@ teamai session        # 交互式选择 [1] Claude 或 [2] Codex
 ```
 
 这些名称是有意取的，以免覆盖已有的 TeamClaude `tc` shell 函数。`tc` 可以继续指向 TeamClaude，而 `tac` 和 `tax` 指向 TeamAI。
+
+### Claude 会话绑定与恢复
+
+Claude Code 的每个会话都永久固定到记录在 `sessions.json` 及持久账本中的初始账号，以保护对话历史：
+- **新会话：** `tac` 和 `teamai claude` 为新会话分配显式会话 ID（`--session-id`），并在首次请求时原子绑定到初始账号。
+- **压缩与轮次进行：** Claude Code 在普通对话轮次、`/compact`、自动压缩、模型切换和子代理请求之间保持相同的规范会话 ID（`x-claude-code-session-id`），初始账号绑定全程保留。
+- **恢复会话 (`--resume`, `--continue`):** 仅当会话已在 TeamAI 中记录时才会在其固定账号上恢复。未在 TeamAI 中记录的未经验证会话将被拒绝并返回 `409 Conflict`，以防止对话历史泄漏到其他账号。
+- **丢失绑定保护：** 如果会话绑定从 `sessions.json` 中被删除或丢失，中继在重启后通过持久账本检测到丢失绑定，并安全阻断（fail-closed，返回 `500`），绝不重新绑定到其他账号。
+
 
 ## Shell 配置
 
