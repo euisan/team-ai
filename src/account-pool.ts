@@ -4,7 +4,7 @@ import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './paci
 import { matchRoute, type Route } from './routes.js';
 import { updateSessions } from './storage.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount, StoredSessionBinding } from './types.js';
 
 // A quota response that says "0 used, reset exactly one full window from the
 // reading" is the upstream shape for a window that has never started. A few
@@ -54,6 +54,7 @@ export class AccountPool {
   resetCredits: ResetCreditSettings = RESET_CREDIT_DEFAULTS;
   saveNow: () => Promise<void> = async () => {};
   log: (message: string) => void = () => {};
+  private sessionBindings = new Map<string, StoredSessionBinding>();
   private changeListener: ((account: RuntimeAccount) => void) | null = null;
   private deadEndLoggedAt = 0;
   // How accounts of the same priority are ordered: 'pacing' by weekly
@@ -379,63 +380,93 @@ export class AccountPool {
   async resolveOrBindClaudeSession(
     sessionId: string,
     isResumed: boolean,
-    provenAccountId: string | null,
     wantsFable: boolean,
     route: Route | null = null,
   ): Promise<{
     account: RuntimeAccount | null;
-    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error';
+    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error' | 'credential_mismatch';
     cooldownUntil?: number | null;
     cooldownReason?: string | null;
     retryAfterMs?: number | null;
   }> {
-    const state = { boundId: null as string | null, outcome: 'ok' as 'ok' | 'unproven' | 'no_account' };
+    const state = {
+      boundId: null as string | null,
+      credentialId: undefined as string | undefined,
+      actualAccountId: undefined as string | undefined,
+      outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error',
+    };
 
     try {
       await updateSessions(async (bindings) => {
         const existing = bindings[sessionId];
         if (existing && existing.provider === 'claude') {
           state.boundId = existing.accountId;
+          state.credentialId = existing.credentialId;
+          state.actualAccountId = existing.actualAccountId;
+          this.sessionBindings.set(sessionId, existing);
           return;
         }
+
+        // If the pool previously knew this session in memory, but it's missing from disk:
+        // this is entry deletion ("항목 삭제") or disk loss! Fail closed!
+        if (this.sessionBindings.has(sessionId)) {
+          state.outcome = 'storage_error';
+          return false;
+        }
+
         if (isResumed) {
-          if (provenAccountId) {
-            state.boundId = provenAccountId;
-            bindings[sessionId] = {
-              sessionId,
-              provider: 'claude',
-              accountId: provenAccountId,
-              boundAt: Date.now(),
-            };
-            return;
-          }
           state.outcome = 'unproven';
-          return;
+          return false;
         }
+
         const initialSelected = this.pickClaudeInitial(wantsFable, route);
         if (!initialSelected) {
           state.outcome = 'no_account';
-          return;
+          return false;
         }
+
+        const actualAccountId = initialSelected.credential?.accountId;
+        if (!actualAccountId) {
+          state.outcome = 'no_account';
+          return false;
+        }
+
         state.boundId = initialSelected.id;
-        bindings[sessionId] = {
+        state.credentialId = initialSelected.credentialId;
+        state.actualAccountId = actualAccountId;
+
+        const binding: StoredSessionBinding = {
           sessionId,
           provider: 'claude',
           accountId: initialSelected.id,
           credentialId: initialSelected.credentialId,
+          actualAccountId,
           boundAt: Date.now(),
         };
+        bindings[sessionId] = binding;
+        this.sessionBindings.set(sessionId, binding);
       });
     } catch {
       return { account: null, status: 'storage_error' };
     }
 
+    if (state.outcome === 'storage_error') return { account: null, status: 'storage_error' };
     if (state.outcome === 'unproven') return { account: null, status: 'unproven' };
     if (state.outcome === 'no_account' || !state.boundId) return { account: null, status: 'no_account' };
 
     const boundId = state.boundId;
-    const bound = this.accounts.find((a) => a.id === boundId || a.credentialId === boundId || a.credential.accountId === boundId);
+    const bound = this.accounts.find((a) => a.id === boundId);
     if (!bound || bound.retired) return { account: null, status: 'removed' };
+
+    // Strict credential identity check:
+    // Both credentialId and actualAccountId must be present and match the account's real credential!
+    if (!state.credentialId || bound.credentialId !== state.credentialId) {
+      return { account: null, status: 'credential_mismatch' };
+    }
+    if (!state.actualAccountId || !bound.credential?.accountId || bound.credential.accountId !== state.actualAccountId) {
+      return { account: null, status: 'credential_mismatch' };
+    }
+
     if (!bound.enabled) return { account: null, status: 'disabled' };
 
     const now = Date.now();

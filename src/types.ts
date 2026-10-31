@@ -332,7 +332,8 @@ export interface StoredSessionBinding {
   sessionId: string;
   provider: ProviderId;
   accountId: string;
-  credentialId?: string;
+  credentialId: string;
+  actualAccountId: string;
   boundAt: number;
 }
 export type StoredSessionBindings = Record<string, StoredSessionBinding>;

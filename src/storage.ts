@@ -92,24 +92,58 @@ export async function saveCredentials(value: Record<string, OAuthCredential>): P
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
 
+const initializedSessionsPaths = new Set<string>();
+
+async function isSessionStorageCreated(path: string): Promise<boolean> {
+  if (initializedSessionsPaths.has(path)) return true;
+  try {
+    await stat(join(dirname(path), '.sessions-created'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function markSessionStorageCreated(path: string): Promise<void> {
+  initializedSessionsPaths.add(path);
+  const marker = join(dirname(path), '.sessions-created');
+  await writeFile(marker, '1\n', { mode: 0o600 });
+}
+
+export function resetSessionStorageForTest(): void {
+  initializedSessionsPaths.clear();
+}
+
 export function validateSessionBindings(raw: unknown): StoredSessionBindings {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Corrupt session bindings: root must be an object');
   }
-  const result: StoredSessionBindings = {};
+  const result: StoredSessionBindings = Object.create(null);
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new Error(`Corrupt session binding: invalid prototype property name "${key}"`);
+    }
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error(`Corrupt session binding for "${key}": entry must be an object`);
     }
     const entry = value as Record<string, unknown>;
-    if (typeof entry.sessionId !== 'string' || !entry.sessionId) {
+    if (typeof entry.sessionId !== 'string' || !entry.sessionId.trim()) {
       throw new Error(`Corrupt session binding for "${key}": missing or invalid sessionId`);
+    }
+    if (key !== entry.sessionId) {
+      throw new Error(`Corrupt session binding for "${key}": key does not match entry.sessionId "${entry.sessionId}"`);
     }
     if (entry.provider !== 'claude' && entry.provider !== 'codex') {
       throw new Error(`Corrupt session binding for "${key}": invalid provider "${String(entry.provider)}"`);
     }
-    if (typeof entry.accountId !== 'string' || !entry.accountId) {
+    if (typeof entry.accountId !== 'string' || !entry.accountId.trim()) {
       throw new Error(`Corrupt session binding for "${key}": missing or invalid accountId`);
+    }
+    if (typeof entry.credentialId !== 'string' || !entry.credentialId.trim()) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid credentialId`);
+    }
+    if (typeof entry.actualAccountId !== 'string' || !entry.actualAccountId.trim()) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid actualAccountId`);
     }
     if (typeof entry.boundAt !== 'number' || !Number.isFinite(entry.boundAt)) {
       throw new Error(`Corrupt session binding for "${key}": invalid boundAt timestamp`);
@@ -118,7 +152,8 @@ export function validateSessionBindings(raw: unknown): StoredSessionBindings {
       sessionId: entry.sessionId,
       provider: entry.provider,
       accountId: entry.accountId,
-      credentialId: typeof entry.credentialId === 'string' ? entry.credentialId : undefined,
+      credentialId: entry.credentialId.trim(),
+      actualAccountId: entry.actualAccountId.trim(),
       boundAt: entry.boundAt,
     };
   }
@@ -129,9 +164,15 @@ export async function loadSessions(): Promise<StoredSessionBindings> {
   const path = paths().sessions;
   try {
     const text = await readFile(path, 'utf8');
+    await markSessionStorageCreated(path);
     return validateSessionBindings(JSON.parse(text));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (await isSessionStorageCreated(path)) {
+        throw new Error(`Strict load failed on ${path}: session bindings file was deleted after creation (ENOENT)`);
+      }
+      return Object.create(null);
+    }
     throw new Error(`Strict load failed on ${path}: ${(error as Error).message}`);
   }
 }
@@ -139,17 +180,24 @@ export async function loadSessions(): Promise<StoredSessionBindings> {
 export function updateSessions(change: (bindings: StoredSessionBindings) => void | false | Promise<void | false>): Promise<boolean> {
   const path = paths().sessions;
   return serialized(path, async () => {
-    let bindings: StoredSessionBindings = {};
+    let bindings: StoredSessionBindings = Object.create(null);
     try {
       const text = await readFile(path, 'utf8');
+      await markSessionStorageCreated(path);
       bindings = validateSessionBindings(JSON.parse(text));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (await isSessionStorageCreated(path)) {
+          throw new Error(`Strict load failed on ${path}: session bindings file was deleted after creation (ENOENT)`);
+        }
+        bindings = Object.create(null);
+      } else {
         throw new Error(`Strict load failed on ${path}: ${(error as Error).message}`);
       }
     }
     if (await change(bindings) === false) return false;
     await atomicWrite(path, validateSessionBindings(bindings));
+    await markSessionStorageCreated(path);
     return true;
   });
 }

@@ -285,6 +285,85 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
   return server;
 }
 
+function extractCanonicalSessionId(
+  req: IncomingMessage,
+  body: Buffer,
+): {
+  sessionId: string | null;
+  error?: { status: number; message: string };
+} {
+  const ids: string[] = [];
+
+  const addId = (raw: string, source: string): { status: number; message: string } | null => {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return { status: 400, message: `Empty Claude session identifier in ${source}` };
+    }
+    if (trimmed === '__proto__' || trimmed === 'constructor' || trimmed === 'prototype') {
+      return { status: 400, message: `Invalid prototype property name as session identifier in ${source}` };
+    }
+    ids.push(trimmed);
+    return null;
+  };
+
+  const headerClaudeSession = req.headers['x-claude-code-session-id'];
+  if (headerClaudeSession !== undefined) {
+    const rawList = Array.isArray(headerClaudeSession) ? headerClaudeSession : [headerClaudeSession];
+    for (const item of rawList) {
+      for (const part of item.split(',')) {
+        const err = addId(part, 'x-claude-code-session-id header');
+        if (err) return { sessionId: null, error: err };
+      }
+    }
+  }
+
+  const headerSession = req.headers['session-id'];
+  if (headerSession !== undefined) {
+    const rawList = Array.isArray(headerSession) ? headerSession : [headerSession];
+    for (const item of rawList) {
+      for (const part of item.split(',')) {
+        const err = addId(part, 'session-id header');
+        if (err) return { sessionId: null, error: err };
+      }
+    }
+  }
+
+  if (body.length > 0) {
+    try {
+      const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+      if (parsed && typeof parsed.metadata === 'object' && parsed.metadata !== null) {
+        const meta = parsed.metadata as Record<string, unknown>;
+        if (typeof meta.user_id === 'string' && meta.user_id.trim()) {
+          try {
+            const bodyIdentity = JSON.parse(meta.user_id) as Record<string, unknown>;
+            if (typeof bodyIdentity?.session_id === 'string') {
+              const err = addId(bodyIdentity.session_id, 'metadata');
+              if (err) return { sessionId: null, error: err };
+            }
+          } catch {
+            // ignore non-JSON user_id
+          }
+        }
+      }
+    } catch {
+      // ignore non-JSON body
+    }
+  }
+
+  if (ids.length === 0) {
+    return { sessionId: null };
+  }
+
+  const first = ids[0]!;
+  for (let i = 1; i < ids.length; i++) {
+    if (ids[i] !== first) {
+      return { sessionId: null, error: { status: 400, message: 'Conflicting Claude session identifiers provided' } };
+    }
+  }
+
+  return { sessionId: first };
+}
+
 async function dispatchClaude(
   req: IncomingMessage,
   res: ServerResponse,
@@ -296,45 +375,34 @@ async function dispatchClaude(
   route: Route | null = null,
   pinnedAccount: string | null = null
 ): Promise<void> {
+  const sessionExtraction = extractCanonicalSessionId(req, body);
+  if (sessionExtraction.error) {
+    json(res, sessionExtraction.error.status, { error: sessionExtraction.error.message });
+    return;
+  }
+  const canonicalSessionId = sessionExtraction.sessionId;
+
   let account: RuntimeAccount | null = null;
-  const headers = incomingHeaders(req);
 
-  if (pinnedAccount) {
-    const pinned = pool.accounts.find((a) => a.id === pinnedAccount) || null;
-    if (!pinned) {
-      json(res, 404, { error: 'Unknown pinned account' });
-      return;
-    }
-    if (!pool.claim(pinned, new Set(), false)) {
-      json(res, 429, { error: 'Pinned account unavailable' }, { 'x-teamai-429-reason': 'pinned_unavailable' });
-      return;
-    }
-    account = pinned;
-  } else {
-    const headerId = headers.get('x-claude-code-session-id')?.trim() || headers.get('session-id')?.trim() || null;
-    let parsed: Record<string, unknown> | null = null;
-    try { parsed = body.length > 0 ? JSON.parse(body.toString('utf8')) : null; } catch { /* ignore non-JSON */ }
-    let bodyIdentity: Record<string, unknown> | null = null;
-    if (parsed && typeof parsed.metadata === 'object' && parsed.metadata !== null) {
-      const meta = parsed.metadata as Record<string, unknown>;
-      if (typeof meta.user_id === 'string') {
-        try { bodyIdentity = JSON.parse(meta.user_id) as Record<string, unknown>; } catch { /* ignore non-JSON */ }
+  if (!canonicalSessionId) {
+    if (pinnedAccount) {
+      const pinned = pool.accounts.find((a) => a.id === pinnedAccount) || null;
+      if (!pinned) {
+        json(res, 404, { error: 'Unknown pinned account' });
+        return;
       }
-    }
-    const bodyId = typeof bodyIdentity?.session_id === 'string' && bodyIdentity.session_id.trim().length > 0
-      ? bodyIdentity.session_id.trim()
-      : null;
-
-    if (headerId && bodyId && headerId !== bodyId) {
-      json(res, 400, { error: 'Conflicting Claude session identifier between header and body' });
-      return;
-    }
-    const canonicalSessionId = headerId ?? bodyId;
-    if (!canonicalSessionId) {
+      if (!pool.claim(pinned, new Set(), false)) {
+        json(res, 429, { error: 'Pinned account unavailable' }, { 'x-teamai-429-reason': 'pinned_unavailable' });
+        return;
+      }
+      account = pinned;
+    } else {
       json(res, 400, { error: 'Missing canonical Claude session identifier (x-claude-code-session-id or metadata.user_id.session_id)' });
       return;
     }
-
+  } else {
+    let parsed: Record<string, unknown> | null = null;
+    try { parsed = body.length > 0 ? JSON.parse(body.toString('utf8')) : null; } catch { /* ignore non-JSON */ }
     const messages = Array.isArray(parsed?.messages) ? parsed.messages : null;
     const hasHistoryMessages = messages !== null && (
       messages.length > 1 ||
@@ -343,19 +411,16 @@ async function dispatchClaude(
         (Array.isArray((messages[0] as Record<string, unknown>)?.content) && ((messages[0] as Record<string, unknown>).content as Array<{ type?: string }>).some((c) => c?.type === 'tool_result'))
       ))
     );
-    const claimedUuid = typeof bodyIdentity?.account_uuid === 'string' && bodyIdentity.account_uuid.trim().length > 0
-      ? bodyIdentity.account_uuid.trim()
-      : null;
-    const isResumed = Boolean(hasHistoryMessages || claimedUuid !== null);
-    const provenAccount = claimedUuid
-      ? (pool.accounts.find((a) => a.credential.accountId === claimedUuid || a.id === claimedUuid)?.id ?? null)
-      : null;
-
+    const isResumed = Boolean(hasHistoryMessages);
     const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? false;
-    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, isResumed, provenAccount, wantsFable, route);
+    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, isResumed, wantsFable, route);
 
     if (resolution.status === 'storage_error') {
       json(res, 500, { error: 'Session binding storage corrupted: fail-closed to protect session pinning' });
+      return;
+    }
+    if (resolution.status === 'credential_mismatch') {
+      json(res, 500, { error: 'Claude session bound account credential identity changed: fail-closed to protect session pinning' });
       return;
     }
     if (resolution.status === 'unproven') {
@@ -399,6 +464,13 @@ async function dispatchClaude(
       if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));
       return json(res, 429, { error: shortfall.message }, headers);
     }
+
+    if (pinnedAccount && pinnedAccount !== resolution.account.id) {
+      pool.release(resolution.account);
+      json(res, 400, { error: 'Explicit account path cannot bypass established session binding' });
+      return;
+    }
+
     account = resolution.account;
   }
 

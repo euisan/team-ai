@@ -199,13 +199,39 @@ test('5. 5xx and network errors: retried on account A only, account B receives 0
   }
 });
 
+test('5b. upstream socket destruction and connection failure retried on account A only, account B receives 0 requests', async () => {
+  let attempts = 0;
+  const rig = await createClaudeRig({
+    onA: (_n, req, res) => {
+      attempts++;
+      if (attempts <= 2) {
+        req.destroy(new Error('simulated upstream socket cut'));
+        res.destroy();
+        return true;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'msg_recovered', content: [{ type: 'text', text: 'recovered' }] }));
+      return true;
+    },
+  });
+  try {
+    const res = await rig.send({ 'x-claude-code-session-id': 'sess-socket-cut' });
+    assert.equal(res.status, 200);
+    assert.ok(attempts > 1, 'socket error retried on account A');
+    assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests on network socket errors');
+  } finally {
+    rig.close();
+    await rm(paths().sessions, { force: true });
+  }
+});
+
 test('6. busy concurrency cap: when account A is at max concurrent capacity, returns 429 without calling B', async () => {
   const rig = await createClaudeRig({}, { maxConcurrent: 1 });
   try {
     const accA = rig.pool.accounts.find((a) => a.id === 'a')!;
     accA.inflight = 1;
     await updateSessions(async (b) => {
-      b['sess-busy'] = { sessionId: 'sess-busy', provider: 'claude', accountId: 'a', boundAt: Date.now() };
+      b['sess-busy'] = { sessionId: 'sess-busy', provider: 'claude', accountId: 'a', credentialId: 'claude:a', actualAccountId: 'uuid-a', boundAt: Date.now() };
     });
 
     const res = await rig.send({ 'x-claude-code-session-id': 'sess-busy' });
@@ -321,7 +347,11 @@ test('11. reconnect and relay restart restores persistent binding from disk, acc
     rig.close();
 
     // Start fresh proxy referencing the same persisted sessions.json in TEAMAI_HOME
-    const proxy2 = createProxy(rig.pool, 'test-secret', () => {});
+    // Construct a brand new AccountPool instance so in-memory state is empty and bindings must be restored from disk
+    const storedA: StoredAccount = { id: 'a', provider: 'claude', label: 'acc-a', enabled: true, priority: 1, credentialId: 'claude:a', createdAt: '' };
+    const storedB: StoredAccount = { id: 'b', provider: 'claude', label: 'acc-b', enabled: true, priority: 2, credentialId: 'claude:b', createdAt: '' };
+    const pool2 = new AccountPool(rig.provider, [storedA, storedB], rig.creds, { version: 1, accounts: {} }, 0.98, 16);
+    const proxy2 = createProxy(pool2, 'test-secret', () => {});
     await new Promise<void>((r) => proxy2.listen(0, '127.0.0.1', r));
     const p2Addr = proxy2.address();
     assert(p2Addr && typeof p2Addr !== 'string');
@@ -545,5 +575,104 @@ test('18. Codex regression: Codex still fails over to next account on quota 429'
     upstream.closeAllConnections();
     proxy.close();
     upstream.close();
+  }
+});
+
+test('19. legacy/corrupt binding missing credentialId or actualAccountId fails closed, account B receives 0 requests', async () => {
+  const rig = await createClaudeRig();
+  try {
+    // Write a session binding directly that lacks actualAccountId (or credentialId)
+    await writeFile(paths().sessions, JSON.stringify({
+      'sess-missing-identity': {
+        sessionId: 'sess-missing-identity',
+        provider: 'claude',
+        accountId: 'a',
+        boundAt: Date.now(),
+      },
+    }, null, 2), 'utf8');
+
+    const res = await rig.send({ 'x-claude-code-session-id': 'sess-missing-identity' });
+    assert.equal(res.status, 500);
+    assert.equal(rig.hitsA.length, 0);
+    assert.equal(rig.hitsB.length, 0, 'missing credential identity must fail closed without calling upstream');
+  } finally {
+    rig.close();
+    await rm(paths().sessions, { force: true });
+  }
+});
+
+test('20. concurrent initial session requests across independent AccountPool instances bind to account A under lock, account B receives 0 requests', async () => {
+  const rig = await createClaudeRig();
+  try {
+    // Create a second pool and proxy sharing the same underlying disk storage (TEAMAI_HOME)
+    const storedA: StoredAccount = { id: 'a', provider: 'claude', label: 'acc-a', enabled: true, priority: 1, credentialId: 'claude:a', createdAt: '' };
+    const storedB: StoredAccount = { id: 'b', provider: 'claude', label: 'acc-b', enabled: true, priority: 2, credentialId: 'claude:b', createdAt: '' };
+    const pool2 = new AccountPool(rig.provider, [storedA, storedB], rig.creds, { version: 1, accounts: {} }, 0.98, 16);
+    const proxy2 = createProxy(pool2, 'test-secret', () => {});
+    await new Promise<void>((r) => proxy2.listen(0, '127.0.0.1', r));
+    const p2Addr = proxy2.address();
+    assert(p2Addr && typeof p2Addr !== 'string');
+
+    try {
+      const sendPool1 = () => rig.send({ 'x-claude-code-session-id': 'sess-multi-instance' }, { messages: [{ role: 'user', content: 'req-pool1' }] });
+      const sendPool2 = () => fetch(`http://127.0.0.1:${p2Addr.port}/v1/messages?beta=true`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-multi-instance' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'req-pool2' }] }),
+      });
+
+      const [res1, res2] = await Promise.all([sendPool1(), sendPool2()]);
+      assert.equal(res1.status, 200);
+      assert.equal(res2.status, 200);
+      assert.equal(rig.hitsA.length, 2, 'both independent instances must resolve to account A');
+      assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests');
+    } finally {
+      proxy2.closeAllConnections();
+      proxy2.close();
+    }
+  } finally {
+    rig.close();
+    await rm(paths().sessions, { force: true });
+  }
+});
+
+test('21. deleted sessions.json before a fresh relay restart is recognized as lost file and fails closed, account B receives 0 requests', async () => {
+  const rig = await createClaudeRig();
+  try {
+    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-restart-deleted' });
+    assert.equal(res1.status, 200);
+    assert.equal(rig.hitsA.length, 1);
+    assert.equal(rig.hitsB.length, 0);
+
+    rig.close();
+
+    // Delete sessions.json while .sessions-created marker remains
+    await rm(paths().sessions);
+
+    // Restart with brand new pool and proxy
+    const storedA: StoredAccount = { id: 'a', provider: 'claude', label: 'acc-a', enabled: true, priority: 1, credentialId: 'claude:a', createdAt: '' };
+    const storedB: StoredAccount = { id: 'b', provider: 'claude', label: 'acc-b', enabled: true, priority: 2, credentialId: 'claude:b', createdAt: '' };
+    const poolRestarted = new AccountPool(rig.provider, [storedA, storedB], rig.creds, { version: 1, accounts: {} }, 0.98, 16);
+    const proxyRestarted = createProxy(poolRestarted, 'test-secret', () => {});
+    await new Promise<void>((r) => proxyRestarted.listen(0, '127.0.0.1', r));
+    const pAddr = proxyRestarted.address();
+    assert(pAddr && typeof pAddr !== 'string');
+
+    try {
+      const res2 = await fetch(`http://127.0.0.1:${pAddr.port}/v1/messages?beta=true`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-restart-deleted' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'turn 2 after deleted sessions' }] }),
+      });
+      assert.equal(res2.status, 500);
+      assert.equal(rig.hitsA.length, 1);
+      assert.equal(rig.hitsB.length, 0, 'lost sessions file across restart must fail closed without calling account B');
+    } finally {
+      proxyRestarted.closeAllConnections();
+      proxyRestarted.close();
+    }
+  } finally {
+    rig.close();
+    await rm(paths().sessions, { force: true });
   }
 });
