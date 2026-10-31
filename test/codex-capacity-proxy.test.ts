@@ -10,7 +10,7 @@ import { buildFrame } from '../src/frame.js';
 import { claudeProvider, codexProvider } from '../src/providers.js';
 import { BodyBudget, createProxy } from '../src/proxy.js';
 import { parseRoutes } from '../src/routes.js';
-import { defaultConfig } from '../src/storage.js';
+import { defaultConfig, issueClaudeSession } from '../src/storage.js';
 import type { ActivityEvent, ProviderId } from '../src/types.js';
 
 const event = (type: string, extra: object = {}) => `event: ${type}\ndata: ${JSON.stringify({ type, ...extra })}\n\n`;
@@ -37,7 +37,8 @@ async function rig(handler: Handler, options: Partial<CodexCapacitySettings> & {
   const log = new ActivityLog((entry) => events.push(entry)); const budget = new BodyBudget(1024 * 1024);
   const proxy = createProxy(pool, 'synthetic-local', (message) => { if (message) notes.push(message); }, undefined, log, { limit: 1024 * 1024, budget });
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
-  const call = (signal = AbortSignal.timeout(4000), path = id === 'codex' ? '/v1/responses' : '/v1/messages') => fetch(`http://127.0.0.1:${pa.port}${path}`, { method: 'POST', headers: { authorization: 'Bearer synthetic-local', 'content-type': 'application/json', 'session-id': 'synthetic-session' }, body: BODY, signal });
+  const sessionId = id === 'claude' ? await issueClaudeSession() : 'synthetic-session';
+  const call = (signal = AbortSignal.timeout(4000), path = id === 'codex' ? '/v1/responses' : '/v1/messages') => fetch(`http://127.0.0.1:${pa.port}${path}`, { method: 'POST', headers: { authorization: 'Bearer synthetic-local', 'content-type': 'application/json', 'session-id': sessionId }, body: BODY, signal });
   const close = () => { proxy.closeAllConnections(); upstream.closeAllConnections(); proxy.close(); upstream.close(); };
   return { hits, pool, log, events, notes, budget, call, close };
 }

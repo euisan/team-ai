@@ -2,7 +2,7 @@
 
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [中文](README.zh-CN.md) · [Español](README.es.md)
 
-TeamAI is a local multi-account relay for **Claude Code** and the official **Codex CLI**. It keeps a separate account pool for each provider and retries a request with another account when the selected subscription is unavailable or out of quota.
+TeamAI is a local multi-account relay for **Claude Code** and the official **Codex CLI**. It keeps a separate account pool for each provider. For Codex CLI, it retries a request with another account when the selected subscription is unavailable or out of quota. For Claude Code, each session is permanently pinned to its initial account (`sessions.json`) to preserve conversation history, blocking automatic handover to other accounts on quota exhaustion or error.
 
 ![TeamAI dashboard](docs/dashboard.png)
 
@@ -63,6 +63,17 @@ teamai session        # choose [1] Claude or [2] Codex interactively
 ```
 
 The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.
+
+### Claude session pinning and resumption
+
+Each Claude Code session is permanently pinned to its initial account in `sessions.json` and a persistent ledger to protect conversation history:
+
+- **New sessions:** Before launching Claude Code, `tac` and `teamai claude` request a UUID from the relay's authenticated local control port. The relay persists its registration and atomically consumes it when binding the first conversation request. An unregistered ID is rejected with `409`, regardless of message count, role or client account metadata. User-supplied `--session-id` and `--fork-session` are rejected.
+- **Turns, compaction and sub-requests:** Requests using the same canonical ID (`x-claude-code-session-id` or matching metadata) retain the initial binding across model changes and compaction. A subagent or in-session `/resume`, `/clear` or fork that introduces an unregistered ID is rejected; TeamAI does not infer parentage or register IDs from conversation bodies. Compatibility depends on the client preserving that ID; these boundaries are tested with synthetic requests, not live subscription sessions.
+- **Resumed sessions (`--resume`, `--continue`):** These flags pass through without registering anything. Only a previously recorded binding can resume on its original account. Unproven sessions return `409`; missing or inconsistent storage returns `500`. Resume pickers and names work only if the resulting ID already has a binding.
+- **Storage and migration:** Registration, ledger checks and binding use one cross-process file lock. Missing, unreadable, corrupt or inconsistent session files fail closed with `500`, including deletion of an entry followed by restart. An interrupted binding write also fails closed. Existing complete bindings with a consistent older ledger remain usable; conversations without those records cannot be adopted. Restore a consistent backup rather than deleting files to repair storage. Internal account warmups use a private process token and cannot register conversation IDs.
+
+The [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) documents UUID `--session-id`, resume/continue, and the new ID created by `--fork-session`. Its [hooks reference](https://code.claude.com/docs/en/hooks#common-input-fields) distinguishes the session ID from subagent IDs; it does not guarantee HTTP header behavior for every client feature or version.
 
 ## Shell setup
 

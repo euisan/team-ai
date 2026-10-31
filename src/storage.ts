@@ -1,15 +1,15 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { codexUserId } from './auth.js';
-import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
+import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, StoredSessionBindings, TeamAIConfig } from './types.js';
 
 export function dataDir(): string {
   return process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai');
 }
-export const paths = () => ({ config: join(dataDir(), 'config.json'), credentials: join(dataDir(), 'credentials.json'), state: join(dataDir(), 'state.json'), server: join(dataDir(), 'server.json') });
+export const paths = () => ({ config: join(dataDir(), 'config.json'), credentials: join(dataDir(), 'credentials.json'), state: join(dataDir(), 'state.json'), server: join(dataDir(), 'server.json'), sessions: join(dataDir(), 'sessions.json') });
 
 export function defaultConfig(): TeamAIConfig {
   return { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, controlPort: 3556, clientToken: `tai-${randomBytes(24).toString('base64url')}` }, switchThreshold: 0.98, warmup: { enabled: true, claude: true, codex: true }, maxConcurrentPerAccount: 16, codexCapacityEnabled: true, codexCapacityRetryMs: 500, codexCapacityPreambleHoldMs: 500, codexCapacityRotation: false, accounts: [] };
@@ -44,7 +44,7 @@ async function staleLock(lock: string): Promise<boolean> {
     // Still being written by its owner: only its age can make it stale.
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
-  } catch { return false; }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 
 // `<file>.lock`, created exclusively, is held across processes (the server's
@@ -91,6 +91,144 @@ export async function loadCredentials(): Promise<Record<string, OAuthCredential>
 export async function saveCredentials(value: Record<string, OAuthCredential>): Promise<void> { const path = paths().credentials; await serialized(path, () => atomicWrite(path, value)); }
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
+
+type SessionLedger = Record<string, 'pending' | 'bound'>;
+
+function ledgerPathFor(sessionsPath: string): string {
+  return join(dirname(sessionsPath), '.sessions-ledger.json');
+}
+
+async function readOptional(path: string): Promise<string | null> {
+  try { return await readFile(path, 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+}
+
+function validateLedger(raw: unknown): SessionLedger {
+  // Older ledgers list bound IDs only; they never authorize a new binding.
+  if (Array.isArray(raw)) {
+    if (!raw.every((id) => typeof id === 'string' && id.trim() && !['__proto__', 'constructor', 'prototype'].includes(id))) throw new Error('Invalid session ledger');
+    return Object.assign(Object.create(null), Object.fromEntries(raw.map((id) => [id, 'bound'])));
+  }
+  if (!raw || typeof raw !== 'object') throw new Error('Invalid session ledger');
+  const ledger: SessionLedger = Object.create(null);
+  for (const [id, state] of Object.entries(raw)) {
+    if (!id.trim() || ['__proto__', 'constructor', 'prototype'].includes(id) || (state !== 'pending' && state !== 'bound')) throw new Error('Invalid session ledger entry');
+    ledger[id] = state;
+  }
+  return ledger;
+}
+
+// All three files are read under sessions.json.lock. Partial creation or a
+// partial commit is an error; it must never restore initial account selection.
+async function readSessionStore(): Promise<{ bindings: StoredSessionBindings; ledger: SessionLedger; fresh: boolean }> {
+  const path = paths().sessions;
+  const [marker, text, ledgerText] = await Promise.all([
+    readOptional(join(dirname(path), '.sessions-created')), readOptional(path), readOptional(ledgerPathFor(path)),
+  ]);
+  if (marker === null && text === null && ledgerText === null) return { bindings: Object.create(null), ledger: Object.create(null), fresh: true };
+  if (marker !== '1\n' || text === null || ledgerText === null) throw new Error('Session storage is missing or incomplete');
+  const bindings = validateSessionBindings(JSON.parse(text));
+  const ledger = validateLedger(JSON.parse(ledgerText));
+  for (const [id, state] of Object.entries(ledger)) {
+    if ((state === 'bound') !== Object.hasOwn(bindings, id)) throw new Error('Session ledger and bindings disagree');
+  }
+  for (const id of Object.keys(bindings)) {
+    if (ledger[id] !== 'bound') throw new Error('Session binding has no ledger record');
+  }
+  return { bindings, ledger, fresh: false };
+}
+
+async function initializeSessionStore(): Promise<void> {
+  // Write the marker first: interrupted creation remains closed on restart.
+  await writeFile(join(dirname(paths().sessions), '.sessions-created'), '1\n', { mode: 0o600, flag: 'wx' });
+  await atomicWrite(ledgerPathFor(paths().sessions), {});
+  await atomicWrite(paths().sessions, {});
+}
+
+// Only the authenticated relay control handler calls this for client launches.
+// Callers cannot register a chosen conversation ID.
+export function issueClaudeSession(): Promise<string> {
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { ledger, fresh } = await readSessionStore();
+    if (fresh) await initializeSessionStore();
+    let id: string;
+    do { id = randomUUID(); } while (Object.hasOwn(ledger, id));
+    ledger[id] = 'pending';
+    await atomicWrite(ledgerPathFor(path), ledger);
+    return id;
+  });
+}
+
+export function validateSessionBindings(raw: unknown): StoredSessionBindings {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Corrupt session bindings: root must be an object');
+  }
+  const result: StoredSessionBindings = Object.create(null);
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new Error(`Corrupt session binding: invalid prototype property name "${key}"`);
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`Corrupt session binding for "${key}": entry must be an object`);
+    }
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.sessionId !== 'string' || !entry.sessionId.trim()) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid sessionId`);
+    }
+    if (key !== entry.sessionId) {
+      throw new Error(`Corrupt session binding for "${key}": key does not match entry.sessionId "${entry.sessionId}"`);
+    }
+    if (entry.provider !== 'claude' && entry.provider !== 'codex') {
+      throw new Error(`Corrupt session binding for "${key}": invalid provider "${String(entry.provider)}"`);
+    }
+    if (typeof entry.accountId !== 'string' || !entry.accountId.trim()) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid accountId`);
+    }
+    if (typeof entry.credentialId !== 'string' || !entry.credentialId.trim()) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid credentialId`);
+    }
+    if (typeof entry.actualAccountId !== 'string' || !entry.actualAccountId.trim()) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid actualAccountId`);
+    }
+    if (typeof entry.boundAt !== 'number' || !Number.isFinite(entry.boundAt)) {
+      throw new Error(`Corrupt session binding for "${key}": invalid boundAt timestamp`);
+    }
+    result[key] = {
+      sessionId: entry.sessionId,
+      provider: entry.provider,
+      accountId: entry.accountId,
+      credentialId: entry.credentialId.trim(),
+      actualAccountId: entry.actualAccountId.trim(),
+      boundAt: entry.boundAt,
+    };
+  }
+  return result;
+}
+
+export function loadSessions(): Promise<StoredSessionBindings> {
+  return serialized(paths().sessions, async () => (await readSessionStore()).bindings);
+}
+
+export function updateSessions(change: (bindings: StoredSessionBindings, pending: ReadonlySet<string>) => void | false | Promise<void | false>): Promise<boolean> {
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { bindings, ledger, fresh } = await readSessionStore();
+    const pending = new Set(Object.keys(ledger).filter((id) => ledger[id] === 'pending'));
+    if (await change(bindings, pending) === false) return false;
+    const validated = validateSessionBindings(bindings);
+    for (const id of Object.keys(validated)) {
+      if (!Object.hasOwn(ledger, id)) throw new Error('Cannot bind an unregistered session');
+    }
+    if (fresh) throw new Error('Session registration required before binding');
+    for (const id of Object.keys(validated)) ledger[id] = 'bound';
+    // Consume registration before committing the binding. A crash between these
+    // writes leaves a missing bound entry and refuses every subsequent request.
+    await atomicWrite(ledgerPathFor(path), ledger);
+    await atomicWrite(path, validated);
+    return true;
+  });
+}
 
 // The key a stored account is known by: the account id, plus the user for a
 // Codex workspace that several members share.

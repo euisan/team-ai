@@ -4,9 +4,9 @@
 
 > **翻译滞后说明：** 本译文尚未反映英文 README 的近期变更（自进行中 Activity 显示起新增的功能和配置项）。行为与配置请以[英文 README](README.md) 为准。
 
-> **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置、以及 Claude keep-warm 与 `warmup.claude` / `warmup.codex` 设置尚未翻译，请参阅[英文版](README.md)。
+> **新增待译内容：** Codex 上游容量错误重试和 `codexCapacity*` 设置、Claude keep-warm 与 `warmup.claude` / `warmup.codex` 设置，以及 Claude 会话绑定和禁止自动交接策略尚未翻译，请参阅[英文版](README.md)。
 
-TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池，当所选订阅账号不可用或配额耗尽时，会自动换一个账号重试请求。
+TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中继。它为每个服务商维护独立的账号池。对于 Codex CLI，当所选订阅账号不可用或配额耗尽时，会换另一个账号重试请求。对于 Claude Code，每个会话永久固定到其初始账号（`sessions.json`），以保护对话历史，并在配额耗尽或出错时阻止自动交接到其他账号。
 
 ![TeamAI 仪表盘](docs/dashboard.png)
 
@@ -63,6 +63,18 @@ teamai session        # 交互式选择 [1] Claude 或 [2] Codex
 ```
 
 这些名称是有意取的，以免覆盖已有的 TeamClaude `tc` shell 函数。`tc` 可以继续指向 TeamClaude，而 `tac` 和 `tax` 指向 TeamAI。
+
+### Claude 会话绑定与恢复
+
+Claude Code 的每个会话都永久固定到记录在 `sessions.json` 及持久账本中的初始账号，以保护对话历史：
+
+- **新会话：** `tac` 和 `teamai claude` 在启动前从经过认证的本地控制端口获取并登记中继签发的 UUID。首次对话请求原子地消耗登记并绑定初始账号。未登记 ID 一律返回 `409`，不以消息数量、角色或账号元数据作为新会话证据。不支持用户指定 `--session-id` 或 `--fork-session`。
+- **轮次、压缩和子请求：** 保持相同规范 ID（`x-claude-code-session-id` 或一致的元数据）的请求在模型切换、压缩后仍使用初始绑定。子代理或会话内 `/resume`、`/clear`、fork 若使用未登记 ID 将被拒绝。中继不会根据正文推断父会话或登记 ID。兼容性要求客户端保持 ID；测试使用合成请求，未使用真实订阅会话。
+- **恢复 (`--resume`, `--continue`)：** 直接传递参数，不登记新 ID。只有已记录绑定的 ID 才能在原账号恢复。未经证明的会话返回 `409`，存储缺失或不一致返回 `500`。使用选择器或名称恢复时，最终 ID 也必须已有绑定。
+- **存储和迁移：** 登记、账本校验及绑定使用同一个跨进程文件锁。文件缺失、不可读、损坏、不一致、删除条目后重启及绑定写入中断均返回 `500`。完整旧绑定与一致的旧账本仍可使用；没有记录的对话不能迁入。修复时应恢复一致的备份，而不是删除文件。内部账号预热使用进程专用令牌，不能登记对话 ID。
+
+[Claude Code CLI 文档](https://code.claude.com/docs/en/cli-reference) 说明 UUID、恢复及 fork 创建新 ID 的行为。[钩子文档](https://code.claude.com/docs/en/hooks#common-input-fields) 区分会话 ID 与子代理 ID，但不保证所有功能及版本的 HTTP 头行为。
+
 
 ## Shell 配置
 

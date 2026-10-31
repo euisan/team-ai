@@ -326,3 +326,15 @@ export interface Shortfall {
   message: string;
   retryAfterMs: number | null;
 }
+
+// Durable binding metadata for pinning sessions to accounts.
+export interface StoredSessionBinding {
+  sessionId: string;
+  provider: ProviderId;
+  accountId: string;
+  credentialId: string;
+  actualAccountId: string;
+  boundAt: number;
+}
+export type StoredSessionBindings = Record<string, StoredSessionBinding>;
+

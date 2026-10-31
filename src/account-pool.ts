@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
+import { updateSessions } from './storage.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
-import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
+import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount, StoredSessionBinding } from './types.js';
 
 // A quota response that says "0 used, reset exactly one full window from the
 // reading" is the upstream shape for a window that has never started. A few
@@ -366,6 +367,119 @@ export class AccountPool {
   // can land elsewhere. null when nothing could take it (all spent or full).
   preview(wantsFable: boolean, route: Route | null = null): RuntimeAccount | null {
     return this.pick(this.scope(NO_EXCLUSIONS, route), wantsFable, route, this.lookOnly);
+  }
+
+  // Initial account selection for a brand-new Claude session.
+  pickClaudeInitial(wantsFable: boolean, route: Route | null = null): RuntimeAccount | null {
+    const excluded = this.scope(NO_EXCLUSIONS, route);
+    return this.pick(excluded, wantsFable, route, this.availableNow);
+  }
+
+  // Resolves or atomically binds a Claude session to an account, persisted durably.
+  async resolveOrBindClaudeSession(
+    sessionId: string,
+    wantsFable: boolean,
+    route: Route | null = null,
+  ): Promise<{
+    account: RuntimeAccount | null;
+    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error' | 'credential_mismatch';
+    cooldownUntil?: number | null;
+    cooldownReason?: string | null;
+    retryAfterMs?: number | null;
+  }> {
+    const state = {
+      boundId: null as string | null,
+      credentialId: undefined as string | undefined,
+      actualAccountId: undefined as string | undefined,
+      outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error',
+    };
+
+    try {
+      await updateSessions(async (bindings, pending) => {
+        const existing = bindings[sessionId];
+        if (existing && existing.provider === 'claude') {
+          state.boundId = existing.accountId;
+          state.credentialId = existing.credentialId;
+          state.actualAccountId = existing.actualAccountId;
+          return false;
+        }
+
+        if (!pending.has(sessionId)) {
+          state.outcome = 'unproven';
+          return false;
+        }
+
+        const initialSelected = this.pickClaudeInitial(wantsFable, route);
+        if (!initialSelected) {
+          state.outcome = 'no_account';
+          return false;
+        }
+
+        const actualAccountId = initialSelected.credential?.accountId;
+        if (!actualAccountId) {
+          state.outcome = 'no_account';
+          return false;
+        }
+
+        state.boundId = initialSelected.id;
+        state.credentialId = initialSelected.credentialId;
+        state.actualAccountId = actualAccountId;
+
+        const binding: StoredSessionBinding = {
+          sessionId,
+          provider: 'claude',
+          accountId: initialSelected.id,
+          credentialId: initialSelected.credentialId,
+          actualAccountId,
+          boundAt: Date.now(),
+        };
+        bindings[sessionId] = binding;
+      });
+    } catch {
+      return { account: null, status: 'storage_error' };
+    }
+
+    if (state.outcome === 'storage_error') return { account: null, status: 'storage_error' };
+    if (state.outcome === 'unproven') return { account: null, status: 'unproven' };
+    if (state.outcome === 'no_account' || !state.boundId) return { account: null, status: 'no_account' };
+
+    const boundId = state.boundId;
+    const bound = this.accounts.find((a) => a.id === boundId);
+    if (!bound || bound.retired) return { account: null, status: 'removed' };
+
+    // Strict credential identity check:
+    // Both credentialId and actualAccountId must be present and match the account's real credential!
+    if (!state.credentialId || bound.credentialId !== state.credentialId) {
+      return { account: null, status: 'credential_mismatch' };
+    }
+    if (!state.actualAccountId || !bound.credential?.accountId || bound.credential.accountId !== state.actualAccountId) {
+      return { account: null, status: 'credential_mismatch' };
+    }
+
+    if (!bound.enabled) return { account: null, status: 'disabled' };
+
+    const now = Date.now();
+    if (bound.cooldownUntil !== null && bound.cooldownUntil > now) {
+      return {
+        account: bound,
+        status: 'cooldown',
+        cooldownUntil: bound.cooldownUntil,
+        cooldownReason: bound.cooldownReason,
+        retryAfterMs: bound.cooldownUntil - now,
+      };
+    }
+
+    if (this.atConcurrencyCap(bound)) {
+      return { account: bound, status: 'busy' };
+    }
+
+    if (wantsFable && !this.servesFable(bound)) {
+      return { account: bound, status: 'model_unsupported' };
+    }
+
+    bound.inflight++;
+    bound.lastUsed = now;
+    return { account: bound, status: 'ok' };
   }
 
   // The preview targets the dashboard marks, by credential id.
