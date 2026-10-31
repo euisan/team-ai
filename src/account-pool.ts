@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
+import { updateSessions } from './storage.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount } from './types.js';
 
@@ -366,6 +367,99 @@ export class AccountPool {
   // can land elsewhere. null when nothing could take it (all spent or full).
   preview(wantsFable: boolean, route: Route | null = null): RuntimeAccount | null {
     return this.pick(this.scope(NO_EXCLUSIONS, route), wantsFable, route, this.lookOnly);
+  }
+
+  // Initial account selection for a brand-new Claude session.
+  pickClaudeInitial(wantsFable: boolean, route: Route | null = null): RuntimeAccount | null {
+    const excluded = this.scope(NO_EXCLUSIONS, route);
+    return this.pick(excluded, wantsFable, route, this.availableNow);
+  }
+
+  // Resolves or atomically binds a Claude session to an account, persisted durably.
+  async resolveOrBindClaudeSession(
+    sessionId: string,
+    isResumed: boolean,
+    provenAccountId: string | null,
+    wantsFable: boolean,
+    route: Route | null = null,
+  ): Promise<{
+    account: RuntimeAccount | null;
+    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error';
+    cooldownUntil?: number | null;
+    cooldownReason?: string | null;
+    retryAfterMs?: number | null;
+  }> {
+    const state = { boundId: null as string | null, outcome: 'ok' as 'ok' | 'unproven' | 'no_account' };
+
+    try {
+      await updateSessions(async (bindings) => {
+        const existing = bindings[sessionId];
+        if (existing && existing.provider === 'claude') {
+          state.boundId = existing.accountId;
+          return;
+        }
+        if (isResumed) {
+          if (provenAccountId) {
+            state.boundId = provenAccountId;
+            bindings[sessionId] = {
+              sessionId,
+              provider: 'claude',
+              accountId: provenAccountId,
+              boundAt: Date.now(),
+            };
+            return;
+          }
+          state.outcome = 'unproven';
+          return;
+        }
+        const initialSelected = this.pickClaudeInitial(wantsFable, route);
+        if (!initialSelected) {
+          state.outcome = 'no_account';
+          return;
+        }
+        state.boundId = initialSelected.id;
+        bindings[sessionId] = {
+          sessionId,
+          provider: 'claude',
+          accountId: initialSelected.id,
+          credentialId: initialSelected.credentialId,
+          boundAt: Date.now(),
+        };
+      });
+    } catch {
+      return { account: null, status: 'storage_error' };
+    }
+
+    if (state.outcome === 'unproven') return { account: null, status: 'unproven' };
+    if (state.outcome === 'no_account' || !state.boundId) return { account: null, status: 'no_account' };
+
+    const boundId = state.boundId;
+    const bound = this.accounts.find((a) => a.id === boundId || a.credentialId === boundId || a.credential.accountId === boundId);
+    if (!bound || bound.retired) return { account: null, status: 'removed' };
+    if (!bound.enabled) return { account: null, status: 'disabled' };
+
+    const now = Date.now();
+    if (bound.cooldownUntil !== null && bound.cooldownUntil > now) {
+      return {
+        account: bound,
+        status: 'cooldown',
+        cooldownUntil: bound.cooldownUntil,
+        cooldownReason: bound.cooldownReason,
+        retryAfterMs: bound.cooldownUntil - now,
+      };
+    }
+
+    if (this.atConcurrencyCap(bound)) {
+      return { account: bound, status: 'busy' };
+    }
+
+    if (wantsFable && !this.servesFable(bound)) {
+      return { account: bound, status: 'model_unsupported' };
+    }
+
+    bound.inflight++;
+    bound.lastUsed = now;
+    return { account: bound, status: 'ok' };
   }
 
   // The preview targets the dashboard marks, by credential id.

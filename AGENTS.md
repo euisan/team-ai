@@ -8,8 +8,11 @@ the two seem to differ, and report the discrepancy.
 ## What TeamAI is
 
 A local relay that fronts **Claude Code** and the official **Codex CLI** with a
-pool of the user's own subscription accounts, retrying on another account when
-one is out of quota. It is not an API gateway and holds no keys of its own.
+pool of the user's own subscription accounts. For Codex CLI, it retries on
+another account when one is out of quota. For Claude Code, each session is
+permanently pinned to its initial account (`sessions.json`) to preserve
+conversation history; automatic handover to other accounts on quota exhaustion
+or error is blocked. It is not an API gateway and holds no keys of its own.
 
 ## Install
 

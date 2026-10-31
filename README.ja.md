@@ -4,7 +4,7 @@
 
 > **翻訳の遅れについて:** この翻訳は英語版 README の最近の変更（進行中の Activity 表示以降に追加された機能と設定キー）をまだ反映していません。動作と設定は[英語版 README](README.md) を基準にしてください。
 
-> **追加の翻訳待ち:** Codex の上流容量エラー再試行と `codexCapacity*` 設定、および Claude keep-warm と `warmup.claude` / `warmup.codex` 設定は未翻訳です。[英語版](README.md)を参照してください。
+> **追加の翻訳待ち:** Codex の上流容量エラー再試行と `codexCapacity*` 設定、Claude keep-warm と `warmup.claude` / `warmup.codex` 設定、および Claude セッション固定・自動ハンドオーバー遮断ポリシーは未翻訳です。[英語版](README.md)を参照してください。
 
 TeamAI は **Claude Code** と公式 **Codex CLI** のためのローカル多アカウントリレーです。プロバイダーごとに独立したアカウントプールを保持し、選ばれたサブスクリプションが利用できない、またはクォータを使い切っている場合は別のアカウントでリクエストを再試行します。
 

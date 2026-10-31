@@ -4,7 +4,7 @@
 
 > **Traducción desactualizada:** esta traducción aún no refleja los cambios recientes del README en inglés (las funciones y claves de configuración añadidas desde la actividad en curso). Para el comportamiento y la configuración, consulta el [README en inglés](README.md).
 
-> **Pendiente de traducir:** los reintentos de capacidad de Codex, las opciones `codexCapacity*`, Claude keep-warm y las opciones `warmup.claude` / `warmup.codex` se describen en el [README en inglés](README.md).
+> **Pendiente de traducir:** los reintentos de capacidad de Codex, las opciones `codexCapacity*`, Claude keep-warm, las opciones `warmup.claude` / `warmup.codex`, y la política de fijación de sesiones de Claude sin traspaso automático se describen en el [README en inglés](README.md).
 
 TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **Codex**. Mantiene un grupo de cuentas independiente para cada proveedor y reintenta la solicitud con otra cuenta cuando la suscripción seleccionada no está disponible o se quedó sin cuota.
 

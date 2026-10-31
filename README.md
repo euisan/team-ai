@@ -2,7 +2,7 @@
 
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [中文](README.zh-CN.md) · [Español](README.es.md)
 
-TeamAI is a local multi-account relay for **Claude Code** and the official **Codex CLI**. It keeps a separate account pool for each provider and retries a request with another account when the selected subscription is unavailable or out of quota.
+TeamAI is a local multi-account relay for **Claude Code** and the official **Codex CLI**. It keeps a separate account pool for each provider. For Codex CLI, it retries a request with another account when the selected subscription is unavailable or out of quota. For Claude Code, each session is permanently pinned to its initial account (`sessions.json`) to preserve conversation history, blocking automatic handover to other accounts on quota exhaustion or error.
 
 ![TeamAI dashboard](docs/dashboard.png)
 

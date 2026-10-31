@@ -267,7 +267,11 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
         const model = (parsed as { model?: unknown } | null)?.model;
         const route = pool.routeFor(typeof model === 'string' ? model : null);
         if (route) safely(() => activity.update(id, { route: route.name }));
-        await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track, route, pinnedAccount);
+        if (pool.provider.id === 'claude') {
+          await dispatchClaude(req, res, body, path, pool, onChange, track, route, pinnedAccount);
+        } else {
+          await dispatch(req, res, body, path, pool, sessionKey(pool.provider, req, body), onChange, track, route, pinnedAccount);
+        }
       } finally { pool.inFlightProxied--; budget?.give(held); }
     } catch (error) { if (!res.headersSent) json(res, (error as { status?: number }).status || 502, { error: (error as Error).message }); else res.destroy(error as Error); }
     finally {
@@ -279,6 +283,274 @@ export function createProxy(pool: AccountPool, clientToken: string, onChange: (e
   // longer configured limit short, and silently; keep it just behind ours.
   server.requestTimeout = timeoutMs === 0 ? 0 : Math.max(timeoutMs + 5_000, DEFAULT_BODY_TIMEOUT_MS);
   return server;
+}
+
+async function dispatchClaude(
+  req: IncomingMessage,
+  res: ServerResponse,
+  body: Buffer,
+  path: string,
+  pool: AccountPool,
+  onChange: (event?: string) => void,
+  track: RequestTrack,
+  route: Route | null = null,
+  pinnedAccount: string | null = null
+): Promise<void> {
+  let account: RuntimeAccount | null = null;
+  const headers = incomingHeaders(req);
+
+  if (pinnedAccount) {
+    const pinned = pool.accounts.find((a) => a.id === pinnedAccount) || null;
+    if (!pinned) {
+      json(res, 404, { error: 'Unknown pinned account' });
+      return;
+    }
+    if (!pool.claim(pinned, new Set(), false)) {
+      json(res, 429, { error: 'Pinned account unavailable' }, { 'x-teamai-429-reason': 'pinned_unavailable' });
+      return;
+    }
+    account = pinned;
+  } else {
+    const headerId = headers.get('x-claude-code-session-id')?.trim() || headers.get('session-id')?.trim() || null;
+    let parsed: Record<string, unknown> | null = null;
+    try { parsed = body.length > 0 ? JSON.parse(body.toString('utf8')) : null; } catch { /* ignore non-JSON */ }
+    let bodyIdentity: Record<string, unknown> | null = null;
+    if (parsed && typeof parsed.metadata === 'object' && parsed.metadata !== null) {
+      const meta = parsed.metadata as Record<string, unknown>;
+      if (typeof meta.user_id === 'string') {
+        try { bodyIdentity = JSON.parse(meta.user_id) as Record<string, unknown>; } catch { /* ignore non-JSON */ }
+      }
+    }
+    const bodyId = typeof bodyIdentity?.session_id === 'string' && bodyIdentity.session_id.trim().length > 0
+      ? bodyIdentity.session_id.trim()
+      : null;
+
+    if (headerId && bodyId && headerId !== bodyId) {
+      json(res, 400, { error: 'Conflicting Claude session identifier between header and body' });
+      return;
+    }
+    const canonicalSessionId = headerId ?? bodyId;
+    if (!canonicalSessionId) {
+      json(res, 400, { error: 'Missing canonical Claude session identifier (x-claude-code-session-id or metadata.user_id.session_id)' });
+      return;
+    }
+
+    const messages = Array.isArray(parsed?.messages) ? parsed.messages : null;
+    const hasHistoryMessages = messages !== null && (
+      messages.length > 1 ||
+      (messages.length === 1 && (
+        (messages[0] as Record<string, unknown>)?.role !== 'user' ||
+        (Array.isArray((messages[0] as Record<string, unknown>)?.content) && ((messages[0] as Record<string, unknown>).content as Array<{ type?: string }>).some((c) => c?.type === 'tool_result'))
+      ))
+    );
+    const claimedUuid = typeof bodyIdentity?.account_uuid === 'string' && bodyIdentity.account_uuid.trim().length > 0
+      ? bodyIdentity.account_uuid.trim()
+      : null;
+    const isResumed = Boolean(hasHistoryMessages || claimedUuid !== null);
+    const provenAccount = claimedUuid
+      ? (pool.accounts.find((a) => a.credential.accountId === claimedUuid || a.id === claimedUuid)?.id ?? null)
+      : null;
+
+    const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? false;
+    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, isResumed, provenAccount, wantsFable, route);
+
+    if (resolution.status === 'storage_error') {
+      json(res, 500, { error: 'Session binding storage corrupted: fail-closed to protect session pinning' });
+      return;
+    }
+    if (resolution.status === 'unproven') {
+      json(res, 409, { error: 'Unproven existing Claude session: unable to verify initial account binding for resumed session with history' });
+      return;
+    }
+    if (resolution.status === 'removed') {
+      json(res, 503, { error: 'Claude session is bound to an account that has been removed' });
+      return;
+    }
+    if (resolution.status === 'disabled') {
+      json(res, 503, { error: 'Claude session is bound to an account that is disabled' });
+      return;
+    }
+    if (resolution.status === 'cooldown') {
+      const retryAfterSec = Math.max(1, Math.ceil((resolution.retryAfterMs ?? 1000) / 1000));
+      json(res, 429, { error: `Claude session bound account is in cooldown (${resolution.cooldownReason || 'quota'})` }, {
+        'retry-after': String(retryAfterSec),
+        'x-teamai-429-reason': resolution.cooldownReason || 'quota',
+      });
+      return;
+    }
+    if (resolution.status === 'busy') {
+      json(res, 429, { error: 'Claude session bound account is at concurrency capacity' }, {
+        'retry-after': '5',
+        'x-teamai-429-reason': 'concurrency_saturated',
+      });
+      return;
+    }
+    if (resolution.status === 'model_unsupported') {
+      json(res, 429, { error: 'Claude session bound account cannot serve requested model budget' }, {
+        'retry-after': '60',
+        'x-teamai-429-reason': 'model_unsupported',
+      });
+      return;
+    }
+    if (resolution.status === 'no_account' || !resolution.account) {
+      const shortfall = pool.explainShortfall(new Set(), wantsFable, route);
+      onChange(`${pool.provider.label} ${req.method} ${path} → 429 ${shortfall.reason}${wantsFable ? ' (fable)' : ''}${shortfall.retryAfterMs ? `, next reset ${AccountPool.formatDuration(shortfall.retryAfterMs)}` : ''}`);
+      const headers: Record<string, string> = { 'x-teamai-429-reason': shortfall.reason };
+      if (shortfall.retryAfterMs) headers['retry-after'] = String(Math.min(900, Math.ceil(shortfall.retryAfterMs / 1000)));
+      return json(res, 429, { error: shortfall.message }, headers);
+    }
+    account = resolution.account;
+  }
+
+  try {
+    track.setAccount(account.label, route ? !pool.isMember(route, account) : undefined);
+    let retryRounds = 0;
+    let retryWaitMs = 0;
+
+    while (!res.destroyed) {
+      let phase = 'token refresh';
+      let dispatchedAt = Date.now();
+      const headerGuard = new AbortController();
+      let cancelRefresh: ((reason: Error) => void) | null = null;
+      const onClientClose = (): void => {
+        const reason = new Error('client disconnected');
+        headerGuard.abort(reason);
+        cancelRefresh?.(reason);
+      };
+      res.once('close', onClientClose);
+      let response: Response;
+
+      try {
+        try {
+          await Promise.race([pool.refresh(account), new Promise<never>((_, reject) => { cancelRefresh = reject; })]);
+        } catch {
+          try {
+            await Promise.race([pool.refresh(account, true), new Promise<never>((_, reject) => { cancelRefresh = reject; })]);
+          } catch (forceErr) {
+            res.off('close', onClientClose);
+            pool.fail(account, (forceErr as Error).message);
+            onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} auth refresh failed`);
+            json(res, 401, { error: 'Authentication refresh failed for bound Claude account' });
+            return;
+          }
+        }
+        cancelRefresh = null;
+        if (res.destroyed) { res.off('close', onClientClose); return; }
+
+        phase = 'upstream';
+        const reqHeaders = pool.provider.buildHeaders(incomingHeaders(req), account);
+        const sendBody = pool.provider.rewriteBody(body, account);
+        reqHeaders.set('content-length', String(sendBody.length));
+        dispatchedAt = Date.now();
+        const headerTimer = setTimeout(() => headerGuard.abort(new Error('upstream sent no response headers within 300s')), HEADER_TIMEOUT_MS);
+        try {
+          response = await fetch(`${pool.provider.upstreamBase}${path}`, {
+            method: req.method,
+            headers: reqHeaders,
+            body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : sendBody as Uint8Array<ArrayBuffer>,
+            signal: headerGuard.signal,
+          });
+        } finally { clearTimeout(headerTimer); }
+      } catch (error) {
+        res.off('close', onClientClose);
+        if (res.destroyed) return;
+        if (res.headersSent) { track.cut = true; res.end(); return; }
+        const delay = 1000 * 2 ** retryRounds + Math.floor(Math.random() * 200);
+        if (retryRounds < 2 && retryWaitMs + delay <= 20_000) {
+          retryRounds++; retryWaitMs += delay;
+          onChange(`${pool.provider.label} ${account.label} network error (${phase}: ${describeError(error)}), retrying ${retryRounds}/2 after ${delay}ms`);
+          await waitForRetry(delay, res);
+          if (res.destroyed) return;
+          continue;
+        }
+        onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} network error (${phase}: ${describeError(error)})`);
+        json(res, 502, { error: 'Upstream connection failed' });
+        return;
+      }
+
+      pool.observeResponse(account, response.headers, dispatchedAt, response.status);
+      if (!response.ok) {
+        let errorBody: string;
+        try { errorBody = await response.text(); } catch (error) { if (res.destroyed) return; throw error; } finally { res.off('close', onClientClose); }
+        if (res.headersSent) { res.end(); return; }
+
+        const decision = pool.provider.classifyFailure(response.status, response.headers, errorBody);
+        if (decision.kind === 'quota' || decision.kind === 'model-quota') {
+          pool.commitProbeFromQuotaRejection(path, incomingHeaders(req), body, response.headers);
+          if (decision.kind === 'model-quota') {
+            pool.markFableSpent(account, decision.retryAfterMs);
+          } else {
+            pool.cooldown(account, decision.retryAfterMs, 'quota');
+          }
+          onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}`);
+          copyHeaders(response, res);
+          res.writeHead(response.status);
+          res.end(errorBody);
+          return;
+        }
+        if (decision.kind === 'transient') {
+          const delay = Math.max(1000 * 2 ** retryRounds, decision.retryAfterMs) + Math.floor(Math.random() * 200);
+          if (retryRounds < 2 && delay <= 10_000 && retryWaitMs + delay <= 20_000) {
+            retryRounds++; retryWaitMs += delay;
+            onChange(`${pool.provider.label} ${account.label} ${response.status} transient, retrying ${retryRounds}/2 after ${delay}ms`);
+            await waitForRetry(delay, res);
+            if (res.destroyed) return;
+            continue;
+          }
+          onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} transient preserved`);
+          copyHeaders(response, res);
+          res.writeHead(response.status);
+          res.end(errorBody);
+          return;
+        }
+        if (decision.kind === 'auth') {
+          try {
+            await pool.refresh(account, true);
+            if (retryRounds === 0) {
+              retryRounds++;
+              onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} auth refresh retry`);
+              continue;
+            }
+          } catch (refreshErr) {
+            pool.fail(account, (refreshErr as Error).message);
+          }
+          copyHeaders(response, res);
+          res.writeHead(response.status);
+          res.end(errorBody);
+          return;
+        }
+        onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} ${response.status} ${decision.kind}`);
+        copyHeaders(response, res);
+        res.writeHead(response.status);
+        res.end(errorBody);
+        return;
+      }
+
+      res.off('close', onClientClose);
+      pool.commitProbe(path, incomingHeaders(req), body, response.headers);
+      if (res.headersSent) { await response.body?.cancel().catch(() => {}); res.end(); return; }
+      copyHeaders(response, res);
+      res.writeHead(response.status);
+
+      const watcher = isEventStream(response.headers) ? new SseWatcher((end) => { track.finished = end; track.setEnd(end); }) : null;
+      try {
+        if (!response.body) res.end();
+        else {
+          await pipeStream(response.body, res, watcher);
+          if (pinnedAccount && watcher && !watcher.ended && !res.destroyed) {
+            track.cut = true;
+            onChange(`${pool.provider.label} ${req.method} ${path} → ${account.label} stream ended without terminal event`);
+          }
+        }
+      } catch (streamErr) {
+        track.cut = true;
+        throw streamErr;
+      }
+      return;
+    }
+  } finally {
+    pool.release(account);
+  }
 }
 
 async function dispatch(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string, pool: AccountPool, session: string, onChange: (event?: string) => void, track: RequestTrack, route: Route | null = null, pinnedAccount: string | null = null): Promise<void> {

@@ -4,12 +4,12 @@ import { dirname, join } from 'node:path';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { codexUserId } from './auth.js';
-import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, TeamAIConfig } from './types.js';
+import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, StoredSessionBindings, TeamAIConfig } from './types.js';
 
 export function dataDir(): string {
   return process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai');
 }
-export const paths = () => ({ config: join(dataDir(), 'config.json'), credentials: join(dataDir(), 'credentials.json'), state: join(dataDir(), 'state.json'), server: join(dataDir(), 'server.json') });
+export const paths = () => ({ config: join(dataDir(), 'config.json'), credentials: join(dataDir(), 'credentials.json'), state: join(dataDir(), 'state.json'), server: join(dataDir(), 'server.json'), sessions: join(dataDir(), 'sessions.json') });
 
 export function defaultConfig(): TeamAIConfig {
   return { version: 1, proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, controlPort: 3556, clientToken: `tai-${randomBytes(24).toString('base64url')}` }, switchThreshold: 0.98, warmup: { enabled: true, claude: true, codex: true }, maxConcurrentPerAccount: 16, codexCapacityEnabled: true, codexCapacityRetryMs: 500, codexCapacityPreambleHoldMs: 500, codexCapacityRotation: false, accounts: [] };
@@ -91,6 +91,69 @@ export async function loadCredentials(): Promise<Record<string, OAuthCredential>
 export async function saveCredentials(value: Record<string, OAuthCredential>): Promise<void> { const path = paths().credentials; await serialized(path, () => atomicWrite(path, value)); }
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
+
+export function validateSessionBindings(raw: unknown): StoredSessionBindings {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Corrupt session bindings: root must be an object');
+  }
+  const result: StoredSessionBindings = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`Corrupt session binding for "${key}": entry must be an object`);
+    }
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.sessionId !== 'string' || !entry.sessionId) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid sessionId`);
+    }
+    if (entry.provider !== 'claude' && entry.provider !== 'codex') {
+      throw new Error(`Corrupt session binding for "${key}": invalid provider "${String(entry.provider)}"`);
+    }
+    if (typeof entry.accountId !== 'string' || !entry.accountId) {
+      throw new Error(`Corrupt session binding for "${key}": missing or invalid accountId`);
+    }
+    if (typeof entry.boundAt !== 'number' || !Number.isFinite(entry.boundAt)) {
+      throw new Error(`Corrupt session binding for "${key}": invalid boundAt timestamp`);
+    }
+    result[key] = {
+      sessionId: entry.sessionId,
+      provider: entry.provider,
+      accountId: entry.accountId,
+      credentialId: typeof entry.credentialId === 'string' ? entry.credentialId : undefined,
+      boundAt: entry.boundAt,
+    };
+  }
+  return result;
+}
+
+export async function loadSessions(): Promise<StoredSessionBindings> {
+  const path = paths().sessions;
+  try {
+    const text = await readFile(path, 'utf8');
+    return validateSessionBindings(JSON.parse(text));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new Error(`Strict load failed on ${path}: ${(error as Error).message}`);
+  }
+}
+
+export function updateSessions(change: (bindings: StoredSessionBindings) => void | false | Promise<void | false>): Promise<boolean> {
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    let bindings: StoredSessionBindings = {};
+    try {
+      const text = await readFile(path, 'utf8');
+      bindings = validateSessionBindings(JSON.parse(text));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(`Strict load failed on ${path}: ${(error as Error).message}`);
+      }
+    }
+    if (await change(bindings) === false) return false;
+    await atomicWrite(path, validateSessionBindings(bindings));
+    return true;
+  });
+}
+
 
 // The key a stored account is known by: the account id, plus the user for a
 // Codex workspace that several members share.

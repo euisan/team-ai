@@ -127,7 +127,7 @@ test('acquire-null 429 for a Fable request names the spent Fable budgets, the ea
   pool.accounts[1]!.usage = 1; pool.accounts[1]!.resetsAt = now + 9 * 60_000;
   const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
-  const call = (model: string) => fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: JSON.stringify({ model }) });
+  const call = (model: string) => fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-fable' }, body: JSON.stringify({ model }) });
   try {
     const res = await call('claude-fable-5-1');
     assert.equal(res.status, 429);
@@ -139,9 +139,9 @@ test('acquire-null 429 for a Fable request names the spent Fable budgets, the ea
     assert.match(body.error, /Other models are still served/);
     assert.ok(events.some((e) => /429 quota_exhausted \(fable\), next reset 9m/.test(e)), `activity log should record the 429: ${events.join(' | ')}`);
     // A non-Fable request is still routed to account a: it reaches the (unreachable)
-    // upstream and fails over instead of being refused before dispatch.
+    // upstream and is handled without failing over to another account.
     const opus = await call('claude-opus-5'); await opus.text();
-    assert.ok(events.some((e) => /→ a@example\.com network error \(.*\); failover/.test(e)), `non-Fable request should have tried account a: ${events.join(' | ')}`);
+    assert.ok(events.some((e) => /→ a@example\.com network error/.test(e)), `non-Fable request should have tried account a: ${events.join(' | ')}`);
   } finally { proxy.close(); }
 });
 
@@ -275,7 +275,7 @@ test('an account over the switch threshold still serves when no other account ca
   const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
   try {
-    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-fable-5-1' }) });
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-switch' }, body: JSON.stringify({ model: 'claude-fable-5-1' }) });
     await res.text();
     assert.equal(res.status, 200, 'must not refuse while b still has 2% of its window');
     assert.ok(events.some((e) => /→ b@example\.com 200/.test(e)), `request should have gone upstream on b: ${events.join(' | ')}`);
