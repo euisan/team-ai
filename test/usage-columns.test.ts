@@ -164,7 +164,7 @@ test('the PNG capture keeps the same gauge columns as the text frame', () => {
   }
 });
 
-test('the tail fields — age, pace, RC / ~D-n — each start in one column across panels', () => {
+test('the tail fields — age, pace, Codex RC — each start in one column across panels', () => {
   for (const width of [120, 160, 200]) {
     const lines = frame(width);
     const ages = ['alice@', '김철수', 'carol@', 'dave@', 'Gemini 3 Pro', 'Gemini 4 Argon', '제미니', 'OpenCode Go (env)', 'Grok SuperGrok'].map((needle) => columnOf(row(lines, needle), '14m ago'));
@@ -172,7 +172,11 @@ test('the tail fields — age, pace, RC / ~D-n — each start in one column acro
     const paces = (['alice@', '김철수', 'carol@', 'dave@'] as const).map((needle) => columnOf(row(lines, needle), stripAnsi(row(lines, needle)).match(/[+-]\d+%p/)![0]));
     assert.equal(new Set(paces).size, 1, `width ${width}: pace columns ${paces}`);
     assert.ok(paces[0]! > ages[0]!);
-    assert.equal(columnOf(row(lines, 'carol@'), 'RC2'), columnOf(row(lines, 'alice@'), '~D-'), `width ${width}: RC and ~D-n share the extra column`);
+    assert.ok(columnOf(row(lines, 'carol@'), 'RC2') > paces[0]!);
+    assert.equal(columnOf(row(lines, 'alice@'), '~D-'), -1, `width ${width}: alice has no D-day`);
+    assert.equal(columnOf(row(lines, '김철수'), '~D-'), -1, `width ${width}: 김철수 has no D-day`);
+    assert.doesNotMatch(stripAnsi(row(lines, 'alice@')), /~?D-(?:\d+|DAY)/);
+    assert.doesNotMatch(stripAnsi(row(lines, '김철수')), /~?D-(?:\d+|DAY)/);
   }
 });
 
@@ -207,5 +211,61 @@ test('Claude and Codex selected rows show the cursor in the selection column', (
     assert.match(stripAnsi(claude), /^▸> {2}alice@/, `width ${width}: Claude cursor`);
     assert.match(stripAnsi(codexSelected), /^ > {2}carol@/, `width ${width}: Codex cursor`);
     assert.match(stripAnsi(codexUnselected), /^ {4}dave@/, `width ${width}: unselected Codex row`);
+  }
+});
+
+test('Claude rows completely omit D-day across normal/abnormal profiles, multibyte labels, and narrow/wide layouts without overflow', () => {
+  const fixedNow = new Date('2026-10-31T12:00:00Z').getTime();
+  const testConfig: TeamAIConfig = {
+    version: 1,
+    proxy: { host: '127.0.0.1', claudePort: 3456, codexPort: 3457, clientToken: 'tok' },
+    switchThreshold: 0.98,
+    maxConcurrentPerAccount: 3,
+    accounts: [
+      account('claude', 'alice@example.com'),
+      account('claude', '김철수.아주긴주소@example.com'),
+      account('claude', '田中太郎.long@example.com'),
+      account('claude', 'pastdue@example.com'),
+      account('claude', 'invalid.created@example.com'),
+      account('claude', 'null.profile@example.com'),
+      account('codex', 'carol@example.com'),
+      account('codex', 'dave@example.com'),
+    ],
+  };
+
+  const testState = {
+    version: 1,
+    accounts: {
+      'cred-alice@example.com': { ...measured, usage: 0.4, resetsAt: null, profile: { hasClaudeMax: true, status: 'active', createdAt: '2026-01-29T00:00:00Z' }, windows: { '5h': { usage: 0.42, resetsAt: fixedNow + 3 * h }, '7d': { usage: 0.61, resetsAt: fixedNow + 2 * d }, '7d_oi': { usage: 0.35, resetsAt: fixedNow + 2 * d } } },
+      'cred-김철수.아주긴주소@example.com': { ...measured, usage: 0.9, resetsAt: null, profile: { hasClaudePro: true, status: 'active', createdAt: '2026-01-05T00:00:00Z' }, windows: { '5h': { usage: 0.93, resetsAt: fixedNow + h }, '7d': { usage: 0.2, resetsAt: fixedNow + 5 * d }, '7d_oi': { usage: 0.1, resetsAt: fixedNow + 5 * d } } },
+      'cred-田中太郎.long@example.com': { ...measured, usage: 0.3, resetsAt: null, profile: { status: 'trialing', createdAt: '2026-03-01T00:00:00Z' }, windows: { '5h': { usage: 0.3, resetsAt: fixedNow + 2 * h }, '7d': { usage: 0.4, resetsAt: fixedNow + 3 * d } } },
+      'cred-pastdue@example.com': { ...measured, usage: 0.2, resetsAt: null, profile: { status: 'past_due', createdAt: '2026-02-15T00:00:00Z' }, windows: { '5h': { usage: 0.2, resetsAt: fixedNow + 4 * h }, '7d': { usage: 0.5, resetsAt: fixedNow + 3 * d } } },
+      'cred-invalid.created@example.com': { ...measured, usage: 0.1, resetsAt: null, profile: { status: 'active', createdAt: 'invalid-date-string' }, windows: { '5h': { usage: 0.1, resetsAt: fixedNow + 4 * h }, '7d': { usage: 0.1, resetsAt: fixedNow + 6 * d } } },
+      'cred-null.profile@example.com': { ...measured, usage: 0.05, resetsAt: null, profile: null, windows: { '5h': { usage: 0.05, resetsAt: fixedNow + 5 * h }, '7d': { usage: 0.05, resetsAt: fixedNow + 6 * d } } },
+      'cred-carol@example.com': { ...measured, usage: 0.3, resetsAt: null, resetCredits: 2, windows: { primary: { usage: 0.3, resetsAt: fixedNow + 2 * h, minutes: 300 }, secondary: { usage: 0.75, resetsAt: fixedNow + 4 * d, minutes: 10080 } } },
+      'cred-dave@example.com': { ...measured, usage: 0.1, resetsAt: null, windows: { primary: { usage: 0.1, resetsAt: fixedNow + 6 * d, minutes: 10080 } } },
+    },
+    routes: [{ provider: 'claude', name: 'fable', color: 'magenta', mode: 'prefer', members: [{ credentialId: 'cred-alice@example.com', usable: true }] }],
+    external: state.external,
+  } as unknown as PersistedState;
+
+  const allWidths = [40, 50, 60, 79, 80, 100, 120, 132, 160, 200];
+  for (const width of allWidths) {
+    const lines = buildFrame(testConfig, testState, { width, selectedId: 'cred-alice@example.com', mode: 'normal', message: '', sortByHeadroom: false });
+    for (const [index, line] of lines.entries()) {
+      const plain = stripAnsi(line);
+      assert.ok(cellWidth(plain) <= width, `width ${width} line ${index} exceeds width: ${cellWidth(plain)} > ${width}`);
+      assert.doesNotMatch(plain, /~?D-(?:\d+|DAY)/i, `width ${width} line ${index} contains D-day: ${plain}`);
+    }
+
+    if (width >= 120) {
+      for (const needle of ['alice@', '김철수', '田中太郎', 'pastdue@', 'invalid.created@', 'null.profile@']) {
+        const line = row(lines, needle);
+        const plain = stripAnsi(line);
+        assert.ok(plain.includes('14m ago'), `width ${width} row ${needle} keeps age`);
+        assert.doesNotMatch(plain, /~?D-(?:\d+|DAY)/, `width ${width} row ${needle} has no D-day`);
+      }
+      assert.ok(columnOf(row(lines, 'carol@'), 'RC2') > 0, `width ${width}: carol keeps RC2`);
+    }
   }
 });

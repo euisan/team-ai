@@ -88,7 +88,7 @@ export interface UsageLayout {
   slots: number[];
   tail: number;
   // Width of each tail field: measured age, pacing deviation, then the
-  // provider's extra (Claude's ~D-n, Codex's RC<n>).
+  // provider's extra (Codex's RC<n>).
   fields: number[];
 }
 
