@@ -71,7 +71,8 @@ Claude Code 的每个会话都永久固定到记录在 `sessions.json` 及持久
 - **新会话：** `tac` 和 `teamai claude` 在启动前从经过认证的本地控制端口获取并登记中继签发的 UUID。首次对话请求原子地消耗登记并绑定初始账号。未登记 ID 一律返回 `409`，不以消息数量、角色或账号元数据作为新会话证据。不支持用户指定 `--session-id` 或 `--fork-session`。
 - **轮次、压缩和子请求：** 保持相同规范 ID（`x-claude-code-session-id` 或一致的元数据）的请求在模型切换、压缩后仍使用初始绑定。子代理或会话内 `/resume`、`/clear`、fork 若使用未登记 ID 将被拒绝。中继不会根据正文推断父会话或登记 ID。兼容性要求客户端保持 ID；测试使用合成请求，未使用真实订阅会话。
 - **恢复 (`--resume`, `--continue`)：** 直接传递参数，不登记新 ID。只有已记录绑定的 ID 才能在原账号恢复。未经证明的会话返回 `409`，存储缺失或不一致返回 `500`。使用选择器或名称恢复时，最终 ID 也必须已有绑定。
-- **存储和迁移：** 登记、账本校验及绑定使用同一个跨进程文件锁。文件缺失、不可读、损坏、不一致、删除条目后重启及绑定写入中断均返回 `500`。完整旧绑定与一致的旧账本仍可使用；没有记录的对话不能迁入。修复时应恢复一致的备份，而不是删除文件。内部账号预热使用进程专用令牌，不能登记对话 ID。
+- **存储和迁移：** 登记、账本校验及绑定使用同一个跨进程文件锁。文件缺失、不可读、损坏、不一致、删除条目后重启及绑定写入中断均返回 `500`。完整旧绑定与一致的旧账本仍可使用；没有记录的对话不会自动迁入（见下文 adopt）。修复时应恢复一致的备份，而不是删除文件。内部账号预热使用进程专用令牌，不能登记对话 ID。
+- **接管登记前已在运行的会话（adopt）：** 升级后，在旧中继下启动的 Claude 会话没有登记，会返回 `409`。管理员可以显式记录：`teamai adopt claude <会话 ID> --account <账号>`（`<账号>` 为 `teamai accounts` 显示的标签或 id）通过运行中中继的认证控制端口（`POST /claude/sessions/adopt`，正文 `{"sessionId", "account"}`）发出请求。中继从自己的账号池取出凭据和实际账号 ID，在会话锁内一并写入绑定和账本记录；凭据既不发送也不返回。**所选账号即成为该会话的初始账号**：此后只使用该账号，配额耗尽、禁用或出错时也不会切换到其他账号，因此请选择会话实际使用的账号。用同一账号重复执行不做任何改变并直接成功；其他账号、仍为 `pending` 的中继签发 ID、已禁用/已删除/不存在的账号以及无效 ID 均被拒绝；存储损坏时不写入任何内容并返回 `500`。会话 ID 是 Claude Code 通过 `x-claude-code-session-id` 发送的完整值（即 `~/.claude/projects/` 下对话记录文件的文件名）。
 
 [Claude Code CLI 文档](https://code.claude.com/docs/en/cli-reference) 说明 UUID、恢复及 fork 创建新 ID 的行为。[钩子文档](https://code.claude.com/docs/en/hooks#common-input-fields) 区分会话 ID 与子代理 ID，但不保证所有功能及版本的 HTTP 头行为。
 
@@ -150,6 +151,7 @@ teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 或者：auto
 teamai capture [--redact partial|full|none] [--out DIR]   # 把仪表盘保存为 .txt 和 .png（无需 TTY）
+teamai adopt claude <会话 ID> --account user@example.com   # 旧中继下的会话：把该账号记为它的初始账号
 teamai route list                              # 模型路由（按尝试顺序）
 teamai route add luna --provider codex --match 'gpt-6-luna*' --accounts a@x.com,b@y.com --mode prefer --color blue
 teamai route rm luna

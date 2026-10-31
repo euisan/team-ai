@@ -71,7 +71,8 @@ Claude Code의 각 세션은 대화 기록 보존을 위해 `sessions.json` 및 
 - **신규 세션:** `tac`와 `teamai claude`는 Claude Code 실행 전에 인증된 로컬 제어 포트에서 relay가 발급한 UUID를 받아 등록합니다. 첫 대화 요청의 초기 계정 결합과 등록 소비는 원자적으로 처리됩니다. 미등록 ID는 메시지 수·역할·계정 메타데이터와 무관하게 `409`로 거부합니다. 사용자가 지정하는 `--session-id`와 `--fork-session`은 지원하지 않습니다.
 - **턴·압축·하위 요청:** 동일한 정규 ID(`x-claude-code-session-id` 또는 일치하는 메타데이터)를 유지하면 모델 전환·압축에도 최초 계정이 유지됩니다. 하위 에이전트나 세션 내 `/resume`, `/clear`, fork가 미등록 ID를 만들면 거부합니다. 본문으로 부모 세션을 추측하거나 ID를 등록하지 않습니다. 클라이언트가 ID를 유지해야 하며, 이 경계는 실계정 대신 합성 요청으로 검증했습니다.
 - **재개 (`--resume`, `--continue`):** 신규 등록 없이 인자를 전달합니다. 기존 결합이 기록된 ID만 최초 계정으로 재개할 수 있습니다. 미입증 세션은 `409`, 저장소 누락·불일치는 `500`입니다. 선택기·이름으로 재개해도 최종 ID에 기존 결합이 있어야 합니다.
-- **저장소·이전:** 등록·원장 확인·결합은 같은 프로세스 간 파일 잠금을 사용합니다. 파일 누락·읽기 오류·손상·기록 불일치, 항목 삭제 후 재시작, 결합 쓰기 중단은 `500`으로 안전하게 거부합니다. 완전한 기존 결합과 일치하는 구형 원장은 유지되지만 기록 없는 대화는 이전할 수 없습니다. 복구 시 파일 삭제 대신 일관된 백업을 복원해야 합니다. 내부 계정 예열은 프로세스 전용 토큰을 사용하며 대화 ID를 등록할 수 없습니다.
+- **저장소·이전:** 등록·원장 확인·결합은 같은 프로세스 간 파일 잠금을 사용합니다. 파일 누락·읽기 오류·손상·기록 불일치, 항목 삭제 후 재시작, 결합 쓰기 중단은 `500`으로 안전하게 거부합니다. 완전한 기존 결합과 일치하는 구형 원장은 유지되지만 기록 없는 대화는 자동으로 이전되지 않습니다(아래 adopt 참고). 복구 시 파일 삭제 대신 일관된 백업을 복원해야 합니다. 내부 계정 예열은 프로세스 전용 토큰을 사용하며 대화 ID를 등록할 수 없습니다.
+- **등록 전부터 돌던 세션 넘겨받기(adopt):** 업그레이드 뒤에는 옛 relay에서 시작한 Claude 세션에 등록이 없어 `409`가 됩니다. 관리자가 명시적으로 기록할 수 있습니다: `teamai adopt claude <세션-ID> --account <계정>`(`<계정>`은 `teamai accounts`가 보여 주는 라벨 또는 id)이 실행 중인 relay의 인증된 제어 포트(`POST /claude/sessions/adopt`, 본문 `{"sessionId", "account"}`)에 요청합니다. relay는 자기 계정 풀에서 자격 증명과 실제 계정 ID를 꺼내 결합과 원장 기록을 세션 잠금 안에서 함께 씁니다. 자격 증명은 보내지도 돌려받지도 않습니다. **고른 계정이 그 세션의 최초 계정이 됩니다**: 이후 그 계정으로만 가고 quota·비활성·오류에도 다른 계정으로 넘어가지 않으므로, 세션이 실제로 쓰던 계정을 고르십시오. 같은 계정으로 다시 하면 바뀌는 것 없이 성공하고, 다른 계정, 아직 `pending`인 relay 발급 ID, 비활성·삭제·없는 계정, 잘못된 ID는 거부하며, 손상된 저장소는 아무것도 쓰지 않고 `500`으로 거부합니다. 세션 ID는 Claude Code가 `x-claude-code-session-id`로 보내는 전체 값(`~/.claude/projects/` 아래 대화 기록 파일 이름)입니다.
 
 [Claude Code CLI 문서](https://code.claude.com/docs/en/cli-reference)는 UUID 지정·재개·fork의 신규 ID를 설명합니다. [훅 문서](https://code.claude.com/docs/en/hooks#common-input-fields)는 세션 ID와 하위 에이전트 ID를 구분하지만 모든 기능·버전의 HTTP 헤더 동작을 보장하지는 않습니다.
 
@@ -150,6 +151,7 @@ teamai disable codex user@example.com
 teamai enable codex user@example.com
 teamai priority claude user@example.com 1      # 또는: auto
 teamai capture [--redact partial|full|none] [--out DIR]   # 대시보드를 .txt + .png로 저장 (TTY 불필요)
+teamai adopt claude <세션-ID> --account user@example.com   # 옛 relay 시절 세션: 이 계정을 최초 계정으로 기록
 teamai route list                              # 모델 라우트 (시도되는 순서대로)
 teamai route add luna --provider codex --match 'gpt-6-luna*' --accounts a@x.com,b@y.com --mode prefer --color blue
 teamai route rm luna                           # 두 제공자에 같은 이름이 있으면 --provider

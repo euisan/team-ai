@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { prepareClaudeArgs } from './claude-session-control.js';
+import { prepareClaudeArgs, requestClaudeAdopt } from './claude-session-control.js';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -47,6 +47,7 @@ async function main(): Promise<void> {
     case 'run': await runClient(provider(args[0]), args.slice(args[0] ? 1 : 0).filter((x) => x !== '--')); break;
     case 'tui': await runTui(); break;
     case 'route': case 'routes': await route(); break;
+    case 'adopt': await adopt(); break;
     case 'capture': {
       const level = flag('--redact') ?? 'partial'; if (!isRedactLevel(level)) throw new Error('--redact must be partial, full or none');
       const result = await captureDashboard({ level, outDir: flag('--out'), width: process.stdout.columns });
@@ -134,6 +135,22 @@ async function route(): Promise<void> {
   throw new Error(`Unknown route action: ${action} (list, add or rm)`);
 }
 
+// `teamai adopt claude <session-id> --account <account>`: a conversation that
+// was running before this relay issued IDs (it started under an older relay)
+// is recorded as first bound to the named account, on the running relay, which
+// looks the account up in its own pool. Only Claude conversations are pinned.
+async function adopt(): Promise<void> {
+  const usage = 'Usage: teamai adopt claude <session-id> --account <account>';
+  const id = args[0]; if (id !== 'claude') throw new Error(id === 'codex' ? 'Only Claude sessions are pinned to an account; Codex needs no adoption' : usage);
+  const account = flag('--account'); const positional = args.slice(1).filter((arg, i, all) => arg !== '--account' && all[i - 1] !== '--account');
+  if (positional.length !== 1 || !account || account.startsWith('--')) throw new Error(usage);
+  if (!(await runningPid())) throw new Error('TeamAI server is not running; start the relay first (teamai server or teamai start), then adopt');
+  const { status, body } = await requestClaudeAdopt(await loadConfig(), positional[0]!, account);
+  if (status === 201) { console.log(`Adopted Claude session ${body.sessionId}: first account ${body.account}`); return; }
+  if (status === 200) { console.log(`Claude session ${body.sessionId} is already bound to ${body.account}`); return; }
+  throw new Error(`${body.error || 'adoption refused'} (control ${status})`);
+}
+
 // Codex reset credits per account, from what the server last recorded.
 async function resetCreditStatus(): Promise<void> {
   const config = await loadConfig(); const state = await loadState(); const settings = resetCreditSettings(config);
@@ -217,6 +234,10 @@ Usage:
   teamai route rm <name> [--provider claude|codex]
                                        Model routes; saved and applied to a
                                        running server without a restart
+  teamai adopt claude <session-id> --account <account>
+                                       Record a Claude session that started
+                                       under an older relay as first bound to
+                                       <account> (on the running relay)
   teamai capture [--redact partial|full|none] [--out DIR]
                                        Save the dashboard as .txt and .png,
                                        account addresses masked (no TTY needed)
