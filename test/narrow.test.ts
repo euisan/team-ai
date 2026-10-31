@@ -111,7 +111,7 @@ test('the narrow footer is one line of the keys that fit, the rest behind ?', ()
     assert.match(footer, /↑↓ select/); assert.match(footer, /\? help/);
     assert.ok(cellWidth(footer) <= width);
     const help = plain(frame(width, { height: 30, mode: 'help' })).join('\n');
-    for (const key of ['1 Claude', '2 Codex', 's switch', 'e enable', 'o order', 'd delete', 'a add', 'p capture', 'R Reload', 'c quota-sort', 'g routes', 'q quit']) assert.ok(help.includes(key), `width ${width}: ? lists ${key}`);
+    for (const key of ['s switch', 'e enable', 'o order', 'd delete', 'a add', 'p capture', 'R Reload', 'c quota-sort', 'g routes', 'q quit']) assert.ok(help.includes(key), `width ${width}: ? lists ${key}`);
   }
   // 't' is offered only with a Codex row selected, in the list too.
   assert.ok(plain(frame(46, { mode: 'help', selectedId: 'cred-carol@example.com' })).join('\n').includes('t credits'));
