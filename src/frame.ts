@@ -62,11 +62,6 @@ function tier(profile: SubscriptionProfile | null | undefined): string {
   if (!profile) return 'OAuth'; const match = /(\d+x)$/i.exec(profile.rateLimitTier || '');
   if (match) return `Max ${match[1]}`; if (profile.hasClaudeMax || profile.orgType === 'claude_max') return 'Max'; if (profile.hasClaudePro || profile.orgType === 'claude_pro') return 'Pro'; return 'OAuth';
 }
-function renewal(profile: SubscriptionProfile | null | undefined): string {
-  if (!profile?.createdAt || !healthy(profile)) return '—'; const created = new Date(profile.createdAt); if (!Number.isFinite(created.getTime())) return '—';
-  const now = new Date(); const day = created.getDate(); const build = (year: number, month: number): Date => new Date(year, month, Math.min(day, new Date(year, month + 1, 0).getDate())); let target = build(now.getFullYear(), now.getMonth()); if (target < new Date(now.getFullYear(), now.getMonth(), now.getDate())) target = build(now.getFullYear(), now.getMonth() + 1);
-  const left = Math.round((target.getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000); return left <= 0 ? 'D-DAY' : `D-${left}`;
-}
 
 // A quota window upstream is actually enforcing. ChatGPT sends both `primary`
 // and `secondary` on every response, but an account may have only one in play:
@@ -401,9 +396,9 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
       const pace = formatDeviation(pacingDeviation(saved?.windows || {}, false, Date.now()));
       const paceText = pace ? color(90, pace) : '';
       if (provider === 'claude') {
-        const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1]; const renew = renewal(profile); const renewColored = renew === 'D-DAY' || /^D-[0-3]$/.test(renew) ? color(31, renew) : /^D-[4-7]$/.test(renew) ? color(33, renew) : color(32, renew);
+        const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1];
         const gauges = [bar(session?.usage, session?.resetsAt, barWidth), bar(weekly?.usage, weekly?.resetsAt, barWidth), bar(fable?.usage, fable?.resetsAt, barWidth)];
-        lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText, `~${renewColored}`], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
+        lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
       } else {
         const shown = codexSlots(account);
         // Reset credits on hand, when the usage endpoint has counted some.
