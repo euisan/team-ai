@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { prepareClaudeArgs } from './claude-session-control.js';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -152,12 +152,7 @@ async function stop(quiet = false): Promise<void> { const pid = await runningPid
 async function runClient(id: ProviderId, clientArgs: string[]): Promise<void> {
   const config = await loadConfig(); if (!config.accounts.some((a) => a.provider === id && a.enabled)) throw new Error(`No enabled ${id} accounts`); await ensureServer();
   if (id === 'claude') {
-    const isResuming = clientArgs.some((arg) => arg === '-r' || arg === '--resume' || arg === '-c' || arg === '--continue');
-    const hasSessionId = clientArgs.some((arg) => arg === '--session-id' || (typeof arg === 'string' && arg.startsWith('--session-id=')));
-    const argsToPass = [...clientArgs];
-    if (!isResuming && !hasSessionId) {
-      argsToPass.unshift('--session-id', randomUUID());
-    }
+    const argsToPass = await prepareClaudeArgs(clientArgs, config);
     const result = spawnSync('claude', argsToPass, { stdio: 'inherit', env: { ...process.env, ANTHROPIC_BASE_URL: `http://${config.proxy.host}:${config.proxy.claudePort}`, ANTHROPIC_AUTH_TOKEN: config.proxy.clientToken } });
     if (result.error) throw result.error; process.exitCode = result.status ?? 1; return;
   }

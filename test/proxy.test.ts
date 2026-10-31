@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
 import test from 'node:test';
+import { issueClaudeSession } from '../src/storage.js';
 import { AccountPool } from '../src/account-pool.js';
 import { createProxy } from '../src/proxy.js';
 import { claudeProvider, codexProvider } from '../src/providers.js';
@@ -109,6 +110,7 @@ test('acquire-null 429 reports quota_exhausted when accounts are spent, not busy
 });
 
 test('acquire-null 429 for a Fable request names the spent Fable budgets, the earliest reset and that other models still work', async () => {
+  const sessionId = await issueClaudeSession();
   const provider: Provider = {
     id: 'claude', label: 'Claude', upstreamBase: 'http://127.0.0.1:1',
     normalizePath: () => '/v1/messages', rewriteBody: (b) => b, readQuota: () => null, refresh: async (c) => c,
@@ -127,7 +129,7 @@ test('acquire-null 429 for a Fable request names the spent Fable budgets, the ea
   pool.accounts[1]!.usage = 1; pool.accounts[1]!.resetsAt = now + 9 * 60_000;
   const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
-  const call = (model: string) => fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-fable' }, body: JSON.stringify({ model }) });
+  const call = (model: string) => fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'x-claude-code-session-id': sessionId }, body: JSON.stringify({ model }) });
   try {
     const res = await call('claude-fable-5-1');
     assert.equal(res.status, 429);
@@ -253,6 +255,7 @@ test('a client that disconnects mid-stream releases its account slot and tears d
 });
 
 test('an account over the switch threshold still serves when no other account can', async () => {
+  const sessionId = await issueClaudeSession();
   // 98% is where the pool prefers to switch, not a promise to strand the last
   // 2%. With every alternative spent, the request goes upstream on the account
   // over the threshold instead of being refused on a number we chose ourselves.
@@ -275,7 +278,7 @@ test('an account over the switch threshold still serves when no other account ca
   const proxy = createProxy(pool, 'local-secret', (e) => { if (e) events.push(e); });
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
   try {
-    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-switch' }, body: JSON.stringify({ model: 'claude-fable-5-1' }) });
+    const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', 'x-claude-code-session-id': sessionId }, body: JSON.stringify({ model: 'claude-fable-5-1' }) });
     await res.text();
     assert.equal(res.status, 200, 'must not refuse while b still has 2% of its window');
     assert.ok(events.some((e) => /→ b@example\.com 200/.test(e)), `request should have gone upstream on b: ${events.join(' | ')}`);
@@ -298,6 +301,7 @@ async function recordingUpstream(pick: (headers: Record<string, string | string[
 }
 
 test('a Claude Code session stays on one account across connections', async () => {
+  const sessionId = await issueClaudeSession();
   // Captured live: Claude Code names its session in an x-claude-code-session-id
   // header and again inside metadata.user_id. Node's fetch opens a fresh socket
   // per request here, so a relay keyed by connection would spread these four
@@ -311,9 +315,9 @@ test('a Claude Code session stays on one account across connections', async () =
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r)); const pa = proxy.address(); assert(pa && typeof pa !== 'string');
   const send = async (headers: Record<string, string>, body: string): Promise<void> => { const res = await fetch(`http://127.0.0.1:${pa.port}/v1/messages?beta=true`, { method: 'POST', headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json', ...headers }, body }); assert.equal(res.status, 200); await res.text(); };
   try {
-    for (let i = 0; i < 3; i++) await send({ 'x-claude-code-session-id': 'sess-1' }, '{}');
+    for (let i = 0; i < 3; i++) await send({ 'x-claude-code-session-id': sessionId }, '{}');
     // No header: the same id inside metadata.user_id must reach the same account.
-    await send({}, JSON.stringify({ metadata: { user_id: JSON.stringify({ device_id: 'd', account_uuid: '', session_id: 'sess-1' }) } }));
+    await send({}, JSON.stringify({ metadata: { user_id: JSON.stringify({ device_id: 'd', account_uuid: '', session_id: sessionId }) } }));
     assert.equal(up.seen.length, 4);
     assert.equal(new Set(up.seen).size, 1, `one session, one account — got ${up.seen.join(',')}`);
   } finally { proxy.close(); up.close(); }

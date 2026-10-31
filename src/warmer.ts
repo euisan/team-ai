@@ -50,6 +50,7 @@ export class Warmer {
       enabled?: boolean;
       port: number;
       clientToken?: string;
+      claudeWarmToken?: string;
       timeoutMs?: number;
       spawnFn?: (spec: SpawnSpec) => Promise<SpawnResult>;
       warmFn?: WarmFn;
@@ -85,7 +86,7 @@ export class Warmer {
       this.warmFn = (a, spec) => spawn({ ...buildCodexWarmCommand(spec.port, a.id, { token: spec.clientToken }), timeoutMs: spec.timeoutMs, signal: spec.signal });
     } else if (this.providerId === 'claude') {
       const getProbe = options.getProbeTemplate;
-      this.warmFn = (a, spec) => sendClaudeWarm({ ...buildClaudeWarmRequest(spec.port, a.id, { token: spec.clientToken, probeTemplate: getProbe?.() }), timeoutMs: spec.timeoutMs, signal: spec.signal });
+      this.warmFn = (a, spec) => sendClaudeWarm({ ...buildClaudeWarmRequest(spec.port, a.id, { token: spec.clientToken, warmToken: options.claudeWarmToken, probeTemplate: getProbe?.() }), timeoutMs: spec.timeoutMs, signal: spec.signal });
     } else {
       this.warmFn = (a, spec) => spawnCodexWarm({ ...buildCodexWarmCommand(spec.port, a.id, { token: spec.clientToken }), timeoutMs: spec.timeoutMs, signal: spec.signal });
     }

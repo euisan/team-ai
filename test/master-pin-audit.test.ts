@@ -5,7 +5,7 @@ import test from 'node:test';
 import { AccountPool } from '../src/account-pool.js';
 import { createProxy } from '../src/proxy.js';
 import { claudeProvider } from '../src/providers.js';
-import { paths } from '../src/storage.js';
+import { issueClaudeSession, paths } from '../src/storage.js';
 import type { Provider, StoredAccount } from '../src/types.js';
 
 async function listen(server: Server) {
@@ -38,22 +38,24 @@ async function rig() {
 }
 
 test('a lost binding must never route the same compact conversation to B', async () => {
+  const sessionId0 = await issueClaudeSession();
   const r = await rig();
   try {
-    assert.equal(await r.send('audit-lost'), 200);
+    assert.equal(await r.send(sessionId0), 200);
     assert.deepEqual(r.received, ['Bearer fake-a']);
     await rm(paths().sessions);
     r.pool.accounts[0]!.enabled = false;
-    await r.send('audit-lost');
+    await r.send(sessionId0);
     assert.deepEqual(r.received, ['Bearer fake-a'], 'lost binding must fail closed instead of rebinding to B');
   } finally { r.close(); }
 });
 
 test('an explicit account path cannot bypass an established conversation binding', async () => {
+  const sessionId0 = await issueClaudeSession();
   const r = await rig();
   try {
-    assert.equal(await r.send('audit-explicit'), 200);
-    await r.send('audit-explicit', '/tc-acct/b/claude/v1/messages');
+    assert.equal(await r.send(sessionId0), 200);
+    await r.send(sessionId0, '/tc-acct/b/claude/v1/messages');
     assert.deepEqual(r.received, ['Bearer fake-a'], 'B must receive zero requests even on account-specific path');
   } finally { r.close(); }
 });
@@ -75,31 +77,55 @@ test('a client account UUID is not evidence of the first upstream account for an
 });
 
 test('replacing credentials on a stored logical account cannot change the actual account of a bound conversation', async () => {
+  const sessionId0 = await issueClaudeSession();
   const r = await rig();
   try {
-    assert.equal(await r.send('audit-replaced-credential'), 200);
+    assert.equal(await r.send(sessionId0), 200);
     r.pool.accounts[0]!.credential = { ...r.pool.accounts[0]!.credential, accountId: 'uuid-b', accessToken: 'fake-b' };
-    await r.send('audit-replaced-credential');
+    await r.send(sessionId0);
     assert.deepEqual(r.received, ['Bearer fake-a'], 'logical id reuse must not change the actual bound account');
   } finally { r.close(); }
 });
 
 test('G123: restart plus deleted entry must not rebind a compact resumed conversation to B', async () => {
+  const sessionId0 = await issueClaudeSession();
+  const sessionId1 = await issueClaudeSession();
   const first = await rig();
   try {
-    assert.equal(await first.send('g123-keep'), 200);
-    assert.equal(await first.send('g123-lost'), 200);
+    assert.equal(await first.send(sessionId0), 200);
+    assert.equal(await first.send(sessionId1), 200);
     assert.deepEqual(first.received, ['Bearer fake-a', 'Bearer fake-a']);
   } finally { first.close(); }
   const { readFile, writeFile } = await import('node:fs/promises');
   const stored = JSON.parse(await readFile(paths().sessions, 'utf8'));
-  delete stored['g123-lost'];
+  delete stored[sessionId1];
   await writeFile(paths().sessions, JSON.stringify(stored));
   const second = await rig();
   try {
     second.pool.accounts[0]!.enabled = false;
-    await second.send('g123-lost');
+    await second.send(sessionId1);
     assert.deepEqual(second.received, [], 'restarted relay must not route a known-but-deleted conversation to B');
   } finally { second.close(); }
 });
 
+test('G123b: a corrupted session ledger plus a deleted entry must not rebind after restart', async () => {
+  const sessionId0 = await issueClaudeSession();
+  const sessionId1 = await issueClaudeSession();
+  const first = await rig();
+  try {
+    assert.equal(await first.send(sessionId0), 200);
+    assert.equal(await first.send(sessionId1), 200);
+  } finally { first.close(); }
+  const { readFile, writeFile } = await import('node:fs/promises');
+  const { dirname, join } = await import('node:path');
+  const stored = JSON.parse(await readFile(paths().sessions, 'utf8'));
+  delete stored[sessionId1];
+  await writeFile(paths().sessions, JSON.stringify(stored));
+  await writeFile(join(dirname(paths().sessions), '.sessions-ledger.json'), 'not json');
+  const second = await rig();
+  try {
+    second.pool.accounts[0]!.enabled = false;
+    await second.send(sessionId1);
+    assert.deepEqual(second.received, [], 'corrupt ledger must fail closed, not reopen selection');
+  } finally { second.close(); }
+});

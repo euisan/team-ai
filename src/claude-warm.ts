@@ -19,7 +19,7 @@ export type SpawnResult = number | { code: number; transient?: boolean; reason?:
 export function buildClaudeWarmRequest(
   port: number,
   accountId: string,
-  options: { host?: string; token?: string; probeTemplate?: ProbeTemplate | null } = {},
+  options: { host?: string; token?: string; warmToken?: string; probeTemplate?: ProbeTemplate | null } = {},
 ): ClaudeWarmRequest {
   const host = options.host || '127.0.0.1';
   const template = options.probeTemplate;
@@ -33,6 +33,7 @@ export function buildClaudeWarmRequest(
     'anthropic-beta': template?.beta || 'oauth-2025-04-20',
     'user-agent': template?.userAgent || 'claude-cli/2.1.260 (external, cli)',
   };
+  if (options.warmToken) headers['x-teamai-warm-token'] = options.warmToken;
   const payload: Record<string, unknown> = {
     model: CLAUDE_WARM_MODEL,
     max_tokens: 1,

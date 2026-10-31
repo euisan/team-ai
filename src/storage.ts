@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -44,7 +44,7 @@ async function staleLock(lock: string): Promise<boolean> {
     // Still being written by its owner: only its age can make it stale.
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
-  } catch { return false; }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 
 // `<file>.lock`, created exclusively, is held across processes (the server's
@@ -92,67 +92,73 @@ export async function saveCredentials(value: Record<string, OAuthCredential>): P
 export async function loadState(): Promise<PersistedState> { return readJson(paths().state, { version: 1, accounts: {}, events: [] }); }
 export async function saveState(value: PersistedState): Promise<void> { await atomicWrite(paths().state, value); }
 
-const initializedSessionsPaths = new Set<string>();
-
-async function isSessionStorageCreated(path: string): Promise<boolean> {
-  if (initializedSessionsPaths.has(path)) return true;
-  try {
-    await stat(join(dirname(path), '.sessions-created'));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function markSessionStorageCreated(path: string): Promise<void> {
-  initializedSessionsPaths.add(path);
-  const marker = join(dirname(path), '.sessions-created');
-  await writeFile(marker, '1\n', { mode: 0o600 });
-}
-
-export function resetSessionStorageForTest(): void {
-  initializedSessionsPaths.clear();
-}
+type SessionLedger = Record<string, 'pending' | 'bound'>;
 
 function ledgerPathFor(sessionsPath: string): string {
   return join(dirname(sessionsPath), '.sessions-ledger.json');
 }
 
-export async function loadSessionLedger(sessionsPath = paths().sessions): Promise<Set<string>> {
-  const file = ledgerPathFor(sessionsPath);
-  try {
-    const text = await readFile(file, 'utf8');
-    const list = JSON.parse(text);
-    if (Array.isArray(list)) return new Set(list.filter((x): x is string => typeof x === 'string'));
-  } catch {
-    // optional
+async function readOptional(path: string): Promise<string | null> {
+  try { return await readFile(path, 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+}
+
+function validateLedger(raw: unknown): SessionLedger {
+  // Older ledgers list bound IDs only; they never authorize a new binding.
+  if (Array.isArray(raw)) {
+    if (!raw.every((id) => typeof id === 'string' && id.trim() && !['__proto__', 'constructor', 'prototype'].includes(id))) throw new Error('Invalid session ledger');
+    return Object.assign(Object.create(null), Object.fromEntries(raw.map((id) => [id, 'bound'])));
   }
-  return new Set();
+  if (!raw || typeof raw !== 'object') throw new Error('Invalid session ledger');
+  const ledger: SessionLedger = Object.create(null);
+  for (const [id, state] of Object.entries(raw)) {
+    if (!id.trim() || ['__proto__', 'constructor', 'prototype'].includes(id) || (state !== 'pending' && state !== 'bound')) throw new Error('Invalid session ledger entry');
+    ledger[id] = state;
+  }
+  return ledger;
 }
 
-export async function isSessionInLedger(sessionId: string, sessionsPath = paths().sessions): Promise<boolean> {
-  const set = await loadSessionLedger(sessionsPath);
-  return set.has(sessionId);
+// All three files are read under sessions.json.lock. Partial creation or a
+// partial commit is an error; it must never restore initial account selection.
+async function readSessionStore(): Promise<{ bindings: StoredSessionBindings; ledger: SessionLedger; fresh: boolean }> {
+  const path = paths().sessions;
+  const [marker, text, ledgerText] = await Promise.all([
+    readOptional(join(dirname(path), '.sessions-created')), readOptional(path), readOptional(ledgerPathFor(path)),
+  ]);
+  if (marker === null && text === null && ledgerText === null) return { bindings: Object.create(null), ledger: Object.create(null), fresh: true };
+  if (marker !== '1\n' || text === null || ledgerText === null) throw new Error('Session storage is missing or incomplete');
+  const bindings = validateSessionBindings(JSON.parse(text));
+  const ledger = validateLedger(JSON.parse(ledgerText));
+  for (const [id, state] of Object.entries(ledger)) {
+    if ((state === 'bound') !== Object.hasOwn(bindings, id)) throw new Error('Session ledger and bindings disagree');
+  }
+  for (const id of Object.keys(bindings)) {
+    if (ledger[id] !== 'bound') throw new Error('Session binding has no ledger record');
+  }
+  return { bindings, ledger, fresh: false };
 }
 
-export async function recordSessionInLedger(sessionId: string, sessionsPath = paths().sessions): Promise<void> {
-  const file = ledgerPathFor(sessionsPath);
-  await serialized(file, async () => {
-    let list: string[] = [];
-    try {
-      const text = await readFile(file, 'utf8');
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) list = parsed.filter((x): x is string => typeof x === 'string');
-    } catch {
-      // fresh
-    }
-    if (!list.includes(sessionId)) {
-      list.push(sessionId);
-      await atomicWrite(file, list);
-    }
+async function initializeSessionStore(): Promise<void> {
+  // Write the marker first: interrupted creation remains closed on restart.
+  await writeFile(join(dirname(paths().sessions), '.sessions-created'), '1\n', { mode: 0o600, flag: 'wx' });
+  await atomicWrite(ledgerPathFor(paths().sessions), {});
+  await atomicWrite(paths().sessions, {});
+}
+
+// Only the authenticated relay control handler calls this for client launches.
+// Callers cannot register a chosen conversation ID.
+export function issueClaudeSession(): Promise<string> {
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { ledger, fresh } = await readSessionStore();
+    if (fresh) await initializeSessionStore();
+    let id: string;
+    do { id = randomUUID(); } while (Object.hasOwn(ledger, id));
+    ledger[id] = 'pending';
+    await atomicWrite(ledgerPathFor(path), ledger);
+    return id;
   });
 }
-
 
 export function validateSessionBindings(raw: unknown): StoredSessionBindings {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -200,71 +206,29 @@ export function validateSessionBindings(raw: unknown): StoredSessionBindings {
   return result;
 }
 
-export async function loadSessions(): Promise<StoredSessionBindings> {
-  const path = paths().sessions;
-  try {
-    const text = await readFile(path, 'utf8');
-    await markSessionStorageCreated(path);
-    return validateSessionBindings(JSON.parse(text));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      if (await isSessionStorageCreated(path)) {
-        throw new Error(`Strict load failed on ${path}: session bindings file was deleted after creation (ENOENT)`);
-      }
-      return Object.create(null);
-    }
-    throw new Error(`Strict load failed on ${path}: ${(error as Error).message}`);
-  }
+export function loadSessions(): Promise<StoredSessionBindings> {
+  return serialized(paths().sessions, async () => (await readSessionStore()).bindings);
 }
 
-export function updateSessions(change: (bindings: StoredSessionBindings) => void | false | Promise<void | false>): Promise<boolean> {
+export function updateSessions(change: (bindings: StoredSessionBindings, pending: ReadonlySet<string>) => void | false | Promise<void | false>): Promise<boolean> {
   const path = paths().sessions;
   return serialized(path, async () => {
-    let bindings: StoredSessionBindings = Object.create(null);
-    try {
-      const text = await readFile(path, 'utf8');
-      await markSessionStorageCreated(path);
-      bindings = validateSessionBindings(JSON.parse(text));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        if (await isSessionStorageCreated(path)) {
-          throw new Error(`Strict load failed on ${path}: session bindings file was deleted after creation (ENOENT)`);
-        }
-        bindings = Object.create(null);
-      } else {
-        throw new Error(`Strict load failed on ${path}: ${(error as Error).message}`);
-      }
-    }
-    if (await change(bindings) === false) return false;
+    const { bindings, ledger, fresh } = await readSessionStore();
+    const pending = new Set(Object.keys(ledger).filter((id) => ledger[id] === 'pending'));
+    if (await change(bindings, pending) === false) return false;
     const validated = validateSessionBindings(bindings);
+    for (const id of Object.keys(validated)) {
+      if (!Object.hasOwn(ledger, id)) throw new Error('Cannot bind an unregistered session');
+    }
+    if (fresh) throw new Error('Session registration required before binding');
+    for (const id of Object.keys(validated)) ledger[id] = 'bound';
+    // Consume registration before committing the binding. A crash between these
+    // writes leaves a missing bound entry and refuses every subsequent request.
+    await atomicWrite(ledgerPathFor(path), ledger);
     await atomicWrite(path, validated);
-    await markSessionStorageCreated(path);
-
-    const file = ledgerPathFor(path);
-    let ledgerList: string[] = [];
-    try {
-      const text = await readFile(file, 'utf8');
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) ledgerList = parsed.filter((x): x is string => typeof x === 'string');
-    } catch {
-      // fresh
-    }
-    const ledgerSet = new Set(ledgerList);
-    let ledgerChanged = false;
-    for (const key of Object.keys(validated)) {
-      if (!ledgerSet.has(key)) {
-        ledgerSet.add(key);
-        ledgerList.push(key);
-        ledgerChanged = true;
-      }
-    }
-    if (ledgerChanged) {
-      await atomicWrite(file, ledgerList);
-    }
     return true;
   });
 }
-
 
 // The key a stored account is known by: the account id, plus the user for a
 // Codex workspace that several members share.

@@ -72,10 +72,13 @@ Los nombres evitan deliberadamente reemplazar una función de shell `tc` existen
 ### Fijación de sesiones y reanudación en Claude
 
 Cada sesión de Claude Code queda fijada permanentemente a su cuenta inicial en `sessions.json` y en un libro mayor persistente para proteger el historial de conversación:
-- **Nuevas sesiones:** `tac` y `teamai claude` asignan un ID de sesión explícito (`--session-id`) para las sesiones nuevas y lo vinculan atómicamente a una cuenta inicial en el primer turno.
-- **Compactación y turnos:** Claude Code envía el mismo ID de sesión canónico (`x-claude-code-session-id`) a través de turnos normales, `/compact`, auto-compactación, cambios de modelo y subagentes. La vinculación inicial se mantiene inalterada.
-- **Sesiones reanudadas (`--resume`, `--continue`):** La reanudación de una sesión registrada en TeamAI continúa en su cuenta fijada. Reanudar una sesión no probada (sin registro previo en TeamAI) se rechaza con `409 Conflict` para evitar filtraciones de historial a otra cuenta.
-- **Protección contra pérdida de vinculación:** Si la entrada de una sesión es eliminada de `sessions.json`, el relé tras reiniciar detecta la pérdida mediante el libro mayor persistente y falla de forma cerrada (`500`) en lugar de revincular la conversación a otra cuenta.
+
+- **Nuevas sesiones:** Antes de iniciar Claude Code, `tac` y `teamai claude` obtienen y registran un UUID emitido por el relé a través del puerto de control local autenticado. La primera solicitud consume el registro y fija la cuenta de forma atómica. Los ID sin registro se rechazan con `409`, sin usar cantidad de mensajes, roles ni metadatos de cuenta como prueba. No se admiten `--session-id` ni `--fork-session` proporcionados por el usuario.
+- **Turnos, compactación y subsolicitudes:** El mismo ID canónico (`x-claude-code-session-id` o metadatos coincidentes) conserva la cuenta tras cambios de modelo o compactación. Se rechazan subagentes y operaciones `/resume`, `/clear` o fork dentro de la sesión que introduzcan un ID sin registro. No se deduce la sesión padre ni se registran ID desde el cuerpo. La compatibilidad depende de que el cliente conserve el ID; las pruebas usan solicitudes sintéticas, no suscripciones reales.
+- **Reanudación (`--resume`, `--continue`):** Los argumentos se transmiten sin crear registros. Solo un ID con una vinculación previa puede reanudarse en su cuenta original. Las sesiones sin prueba devuelven `409`; el almacenamiento ausente o incoherente devuelve `500`. Un selector o nombre también debe resolver a un ID previamente vinculado.
+- **Almacenamiento y migración:** El registro, la validación del libro y la vinculación comparten un bloqueo de archivo entre procesos. Archivos ausentes, ilegibles, dañados o incoherentes, entradas borradas tras reiniciar y escrituras interrumpidas devuelven `500`. Se conservan las vinculaciones completas con libros antiguos coherentes; las conversaciones sin registros no se pueden adoptar. Para reparar, restaure una copia coherente en vez de borrar archivos. El calentamiento interno usa un token privado del proceso y no registra ID de conversación.
+
+La [referencia de Claude Code CLI](https://code.claude.com/docs/en/cli-reference) documenta los UUID, la reanudación y el nuevo ID de fork. La [referencia de hooks](https://code.claude.com/docs/en/hooks#common-input-fields) distingue el ID de sesión del ID de subagente, pero no garantiza las cabeceras HTTP de todas las funciones o versiones.
 
 
 ## Configuración del shell

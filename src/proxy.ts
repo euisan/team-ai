@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
+import { claudeWarmToken } from './claude-warm-auth.js';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog, type ActivitySink } from './activity.js';
 import type { Route } from './routes.js';
@@ -385,7 +386,7 @@ async function dispatchClaude(
   let account: RuntimeAccount | null = null;
 
   if (!canonicalSessionId) {
-    if (pinnedAccount) {
+    if (pinnedAccount && secureEqual(String(req.headers['x-teamai-warm-token'] || ''), claudeWarmToken(pool))) {
       const pinned = pool.accounts.find((a) => a.id === pinnedAccount) || null;
       if (!pinned) {
         json(res, 404, { error: 'Unknown pinned account' });
@@ -401,19 +402,8 @@ async function dispatchClaude(
       return;
     }
   } else {
-    let parsed: Record<string, unknown> | null = null;
-    try { parsed = body.length > 0 ? JSON.parse(body.toString('utf8')) : null; } catch { /* ignore non-JSON */ }
-    const messages = Array.isArray(parsed?.messages) ? parsed.messages : null;
-    const hasHistoryMessages = messages !== null && (
-      messages.length > 1 ||
-      (messages.length === 1 && (
-        (messages[0] as Record<string, unknown>)?.role !== 'user' ||
-        (Array.isArray((messages[0] as Record<string, unknown>)?.content) && ((messages[0] as Record<string, unknown>).content as Array<{ type?: string }>).some((c) => c?.type === 'tool_result'))
-      ))
-    );
-    const isResumed = Boolean(hasHistoryMessages);
     const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? false;
-    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, isResumed, wantsFable, route);
+    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, wantsFable, route);
 
     if (resolution.status === 'storage_error') {
       json(res, 500, { error: 'Session binding storage corrupted: fail-closed to protect session pinning' });
@@ -424,7 +414,7 @@ async function dispatchClaude(
       return;
     }
     if (resolution.status === 'unproven') {
-      json(res, 409, { error: 'Unproven existing Claude session: unable to verify initial account binding for resumed session with history' });
+      json(res, 409, { error: 'Unregistered Claude session: start a new session with teamai claude; resume requires a previously recorded binding' });
       return;
     }
     if (resolution.status === 'removed') {
@@ -474,6 +464,9 @@ async function dispatchClaude(
     account = resolution.account;
   }
 
+  const boundCredentialId = account.credentialId;
+  const boundActualAccountId = account.credential.accountId;
+
   try {
     track.setAccount(account.label, route ? !pool.isMember(route, account) : undefined);
     let retryRounds = 0;
@@ -507,10 +500,16 @@ async function dispatchClaude(
           }
         }
         cancelRefresh = null;
+        if (account.credentialId !== boundCredentialId || account.credential.accountId !== boundActualAccountId) {
+          res.off('close', onClientClose);
+          json(res, 500, { error: 'Claude account identity changed during authentication refresh; refusing request' });
+          return;
+        }
         if (res.destroyed) { res.off('close', onClientClose); return; }
 
         phase = 'upstream';
         const reqHeaders = pool.provider.buildHeaders(incomingHeaders(req), account);
+        reqHeaders.delete('x-teamai-warm-token');
         const sendBody = pool.provider.rewriteBody(body, account);
         reqHeaders.set('content-length', String(sendBody.length));
         dispatchedAt = Date.now();

@@ -6,7 +6,7 @@ import { AccountPool } from '../src/account-pool.js';
 import { createProxy } from '../src/proxy.js';
 import { claudeProvider, codexProvider } from '../src/providers.js';
 import { parseRoutes } from '../src/routes.js';
-import { paths, updateSessions } from '../src/storage.js';
+import { issueClaudeSession, paths, updateSessions } from '../src/storage.js';
 import type { OAuthCredential, PersistedState, Provider, StoredAccount } from '../src/types.js';
 
 interface FakeUpstreamOptions {
@@ -90,6 +90,7 @@ test.afterEach(async () => {
 });
 
 test('1. quota 429: account A quota error is returned to client, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig({
     onA: (n, _req, res) => {
       if (n === 2) {
@@ -100,17 +101,17 @@ test('1. quota 429: account A quota error is returned to client, account B recei
     },
   });
   try {
-    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-quota' });
+    const res1 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res1.status, 200);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0);
 
-    const res2 = await rig.send({ 'x-claude-code-session-id': 'sess-quota' });
+    const res2 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res2.status, 429);
     assert.equal(rig.hitsA.length, 2);
     assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests on account A quota');
 
-    const res3 = await rig.send({ 'x-claude-code-session-id': 'sess-quota' });
+    const res3 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res3.status, 429);
     assert.equal(rig.hitsB.length, 0, 'subsequent requests for pinned session must not failover to B');
   } finally {
@@ -120,6 +121,7 @@ test('1. quota 429: account A quota error is returned to client, account B recei
 });
 
 test('2. initial request quota 429: first request on account A returns 429, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig({
     onA: (_n, _req, res) => {
       res.writeHead(429, { 'content-type': 'application/json', 'anthropic-ratelimit-unified-5h-status': 'rejected', 'retry-after': '30' });
@@ -128,7 +130,7 @@ test('2. initial request quota 429: first request on account A returns 429, acco
     },
   });
   try {
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-first-quota' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res.status, 429);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0, 'first turn quota rejection must never re-request on account B');
@@ -139,6 +141,7 @@ test('2. initial request quota 429: first request on account A returns 429, acco
 });
 
 test('3. auth refresh failure: refresh error on account A fails closed, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig({
     onA: (_n, _req, res) => {
       res.writeHead(401, { 'content-type': 'application/json' });
@@ -148,7 +151,7 @@ test('3. auth refresh failure: refresh error on account A fails closed, account 
   });
   rig.provider.refresh = async () => { throw new Error('OAuth token revoked'); };
   try {
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-auth-fail' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res.status, 401);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests when A auth refresh fails');
@@ -159,6 +162,7 @@ test('3. auth refresh failure: refresh error on account A fails closed, account 
 });
 
 test('4. 403 forbidden: upstream 403 on account A returns 403, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig({
     onA: (_n, _req, res) => {
       res.writeHead(403, { 'content-type': 'application/json' });
@@ -167,7 +171,7 @@ test('4. 403 forbidden: upstream 403 on account A returns 403, account B receive
     },
   });
   try {
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-forbidden' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res.status, 403);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests on 403');
@@ -178,6 +182,7 @@ test('4. 403 forbidden: upstream 403 on account A returns 403, account B receive
 });
 
 test('5. 5xx and network errors: retried on account A only, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   let attempts = 0;
   const rig = await createClaudeRig({
     onA: (_n, _req, res) => {
@@ -188,7 +193,7 @@ test('5. 5xx and network errors: retried on account A only, account B receives 0
     },
   });
   try {
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-500' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res.status, 500);
     assert.ok(attempts > 1, '500 error retried on account A');
     assert.equal(rig.hitsA.length, attempts);
@@ -200,6 +205,7 @@ test('5. 5xx and network errors: retried on account A only, account B receives 0
 });
 
 test('5b. upstream socket destruction and connection failure retried on account A only, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   let attempts = 0;
   const rig = await createClaudeRig({
     onA: (_n, req, res) => {
@@ -215,7 +221,7 @@ test('5b. upstream socket destruction and connection failure retried on account 
     },
   });
   try {
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-socket-cut' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res.status, 200);
     assert.ok(attempts > 1, 'socket error retried on account A');
     assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests on network socket errors');
@@ -226,15 +232,16 @@ test('5b. upstream socket destruction and connection failure retried on account 
 });
 
 test('6. busy concurrency cap: when account A is at max concurrent capacity, returns 429 without calling B', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig({}, { maxConcurrent: 1 });
   try {
     const accA = rig.pool.accounts.find((a) => a.id === 'a')!;
     accA.inflight = 1;
     await updateSessions(async (b) => {
-      b['sess-busy'] = { sessionId: 'sess-busy', provider: 'claude', accountId: 'a', credentialId: 'claude:a', actualAccountId: 'uuid-a', boundAt: Date.now() };
+      b[sessionId] = { sessionId, provider: 'claude', accountId: 'a', credentialId: 'claude:a', actualAccountId: 'uuid-a', boundAt: Date.now() };
     });
 
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-busy' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res.status, 429);
     assert.equal(res.headers.get('x-teamai-429-reason'), 'concurrency_saturated');
     assert.equal(rig.hitsA.length, 0);
@@ -246,9 +253,10 @@ test('6. busy concurrency cap: when account A is at max concurrent capacity, ret
 });
 
 test('7. disabled and removed account: bound session fails closed with 503, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig();
   try {
-    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-disable-test' });
+    const res1 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res1.status, 200);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0);
@@ -256,12 +264,12 @@ test('7. disabled and removed account: bound session fails closed with 503, acco
     const accA = rig.pool.accounts.find((a) => a.id === 'a')!;
     accA.enabled = false;
 
-    const res2 = await rig.send({ 'x-claude-code-session-id': 'sess-disable-test' });
+    const res2 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res2.status, 503);
     assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests when pinned account is disabled');
 
     accA.retired = true;
-    const res3 = await rig.send({ 'x-claude-code-session-id': 'sess-disable-test' });
+    const res3 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res3.status, 503);
     assert.equal(rig.hitsB.length, 0, 'account B must receive 0 requests when pinned account is retired/removed');
   } finally {
@@ -271,21 +279,22 @@ test('7. disabled and removed account: bound session fails closed with 503, acco
 });
 
 test('8. model and route changes do not divert session from account A, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig();
   try {
-    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-model-route' }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'step 1' }] });
+    const res1 = await rig.send({ 'x-claude-code-session-id': sessionId }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'step 1' }] });
     assert.equal(res1.status, 200);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0);
 
     rig.pool.setRoutes(parseRoutes([{ name: 'prefer-b', match: ['claude-opus-*'], accounts: ['b'], mode: 'prefer' }], 'claude'));
-    const res2 = await rig.send({ 'x-claude-code-session-id': 'sess-model-route' }, { model: 'claude-opus-4', messages: [{ role: 'user', content: 'step 2' }] });
+    const res2 = await rig.send({ 'x-claude-code-session-id': sessionId }, { model: 'claude-opus-4', messages: [{ role: 'user', content: 'step 2' }] });
     assert.equal(res2.status, 200);
     assert.equal(rig.hitsA.length, 2);
     assert.equal(rig.hitsB.length, 0, 'route preference for B must not divert existing pinned session');
 
     rig.pool.setRoutes(parseRoutes([{ name: 'exclusive-b', match: ['*'], accounts: ['b'], mode: 'exclusive' }], 'claude'));
-    const res3 = await rig.send({ 'x-claude-code-session-id': 'sess-model-route' }, { model: 'claude-haiku-4', messages: [{ role: 'user', content: 'step 3' }] });
+    const res3 = await rig.send({ 'x-claude-code-session-id': sessionId }, { model: 'claude-haiku-4', messages: [{ role: 'user', content: 'step 3' }] });
     assert.equal(res3.status, 200);
     assert.equal(rig.hitsA.length, 3);
     assert.equal(rig.hitsB.length, 0, 'route exclusive mode must not divert existing pinned session');
@@ -296,10 +305,11 @@ test('8. model and route changes do not divert session from account A, account B
 });
 
 test('9. concurrent initial requests for same session atomically bind to one account, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig();
   try {
     const requests = Array.from({ length: 6 }, (_, i) =>
-      rig.send({ 'x-claude-code-session-id': 'sess-concurrent-init' }, { messages: [{ role: 'user', content: `concurrent ${i}` }] })
+      rig.send({ 'x-claude-code-session-id': sessionId }, { messages: [{ role: 'user', content: `concurrent ${i}` }] })
     );
     const results = await Promise.all(requests);
     for (const r of results) assert.equal(r.status, 200);
@@ -313,6 +323,7 @@ test('9. concurrent initial requests for same session atomically bind to one acc
 });
 
 test('10. stream cut mid-response releases slot and is not retried on account B', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig({
     onA: (n, _req, res) => {
       if (n === 1) {
@@ -324,7 +335,7 @@ test('10. stream cut mid-response releases slot and is not retried on account B'
     },
   });
   try {
-    const res = await rig.send({ 'x-claude-code-session-id': 'sess-stream-cut' });
+    const res = await rig.send({ 'x-claude-code-session-id': sessionId });
     await res.text().catch(() => {});
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0, 'mid-stream break must never replay on account B');
@@ -336,9 +347,10 @@ test('10. stream cut mid-response releases slot and is not retried on account B'
 });
 
 test('11. reconnect and relay restart restores persistent binding from disk, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig();
   try {
-    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-restart-test' });
+    const res1 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res1.status, 200);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0);
@@ -374,7 +386,7 @@ test('11. reconnect and relay restart restores persistent binding from disk, acc
     try {
       const res2 = await fetch(`http://127.0.0.1:${p2Addr.port}/v1/messages?beta=true`, {
         method: 'POST',
-        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-restart-test' },
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': sessionId },
         body: JSON.stringify({ messages: [{ role: 'user', content: 'turn 2' }] }),
       });
       assert.equal(res2.status, 200);
@@ -455,6 +467,12 @@ test('15. session ID longer than 200 chars is not truncated and avoids collision
     const id1 = `${prefix}-one`;
     const id2 = `${prefix}-two`;
 
+    // Existing full-length bindings remain distinct when resumed.
+    await issueClaudeSession();
+    const { dirname, join } = await import('node:path');
+    await writeFile(paths().sessions, JSON.stringify(Object.fromEntries([id1, id2].map((id) => [id, { sessionId: id, provider: 'claude', accountId: 'a', credentialId: 'claude:a', actualAccountId: 'uuid-a', boundAt: Date.now() }]))));
+    await writeFile(join(dirname(paths().sessions), '.sessions-ledger.json'), JSON.stringify([id1, id2]));
+
     const res1 = await rig.send({ 'x-claude-code-session-id': id1 });
     assert.equal(res1.status, 200);
 
@@ -490,6 +508,8 @@ test('16. corrupt session bindings file triggers strict fail-closed with 500, ac
 });
 
 test('17. new sessions are distributed to different accounts and each remains pinned', async () => {
+  const sessionA = await issueClaudeSession();
+  const sessionB = await issueClaudeSession();
   // Account A and B have equal priority; A takes session 1, B takes session 2
   const rig = await createClaudeRig({}, { priorityA: null, priorityB: null });
   const accA = rig.pool.accounts.find((a) => a.id === 'a')!;
@@ -497,26 +517,26 @@ test('17. new sessions are distributed to different accounts and each remains pi
   accA.usage = 0.1;
   accB.usage = 0.1;
   try {
-    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-alpha' }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'first alpha' }] });
+    const res1 = await rig.send({ 'x-claude-code-session-id': sessionA }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'first alpha' }] });
     assert.equal(res1.status, 200);
 
     // Give account A 50% usage and account B 10% usage so B wins the next initial pick
     accA.usage = 0.5;
     accB.usage = 0.1;
 
-    const res2 = await rig.send({ 'x-claude-code-session-id': 'sess-beta' }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'first beta' }] });
+    const res2 = await rig.send({ 'x-claude-code-session-id': sessionB }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'first beta' }] });
     assert.equal(res2.status, 200);
 
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 1);
 
     // Turn 2 of session alpha goes to A
-    await rig.send({ 'x-claude-code-session-id': 'sess-alpha' }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'second alpha' }] });
+    await rig.send({ 'x-claude-code-session-id': sessionA }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'second alpha' }] });
     assert.equal(rig.hitsA.length, 2);
     assert.equal(rig.hitsB.length, 1);
 
     // Turn 2 of session beta goes to B
-    await rig.send({ 'x-claude-code-session-id': 'sess-beta' }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'second beta' }] });
+    await rig.send({ 'x-claude-code-session-id': sessionB }, { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'second beta' }] });
     assert.equal(rig.hitsA.length, 2);
     assert.equal(rig.hitsB.length, 2);
   } finally {
@@ -602,6 +622,7 @@ test('19. legacy/corrupt binding missing credentialId or actualAccountId fails c
 });
 
 test('20. concurrent initial session requests across independent AccountPool instances bind to account A under lock, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig();
   try {
     // Create a second pool and proxy sharing the same underlying disk storage (TEAMAI_HOME)
@@ -614,10 +635,10 @@ test('20. concurrent initial session requests across independent AccountPool ins
     assert(p2Addr && typeof p2Addr !== 'string');
 
     try {
-      const sendPool1 = () => rig.send({ 'x-claude-code-session-id': 'sess-multi-instance' }, { messages: [{ role: 'user', content: 'req-pool1' }] });
+      const sendPool1 = () => rig.send({ 'x-claude-code-session-id': sessionId }, { messages: [{ role: 'user', content: 'req-pool1' }] });
       const sendPool2 = () => fetch(`http://127.0.0.1:${p2Addr.port}/v1/messages?beta=true`, {
         method: 'POST',
-        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-multi-instance' },
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': sessionId },
         body: JSON.stringify({ messages: [{ role: 'user', content: 'req-pool2' }] }),
       });
 
@@ -637,9 +658,10 @@ test('20. concurrent initial session requests across independent AccountPool ins
 });
 
 test('21. deleted sessions.json before a fresh relay restart is recognized as lost file and fails closed, account B receives 0 requests', async () => {
+  const sessionId = await issueClaudeSession();
   const rig = await createClaudeRig();
   try {
-    const res1 = await rig.send({ 'x-claude-code-session-id': 'sess-restart-deleted' });
+    const res1 = await rig.send({ 'x-claude-code-session-id': sessionId });
     assert.equal(res1.status, 200);
     assert.equal(rig.hitsA.length, 1);
     assert.equal(rig.hitsB.length, 0);
@@ -661,7 +683,7 @@ test('21. deleted sessions.json before a fresh relay restart is recognized as lo
     try {
       const res2 = await fetch(`http://127.0.0.1:${pAddr.port}/v1/messages?beta=true`, {
         method: 'POST',
-        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-restart-deleted' },
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json', 'x-claude-code-session-id': sessionId },
         body: JSON.stringify({ messages: [{ role: 'user', content: 'turn 2 after deleted sessions' }] }),
       });
       assert.equal(res2.status, 500);

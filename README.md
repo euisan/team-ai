@@ -67,11 +67,13 @@ The names intentionally avoid replacing an existing TeamClaude `tc` shell functi
 ### Claude session pinning and resumption
 
 Each Claude Code session is permanently pinned to its initial account in `sessions.json` and a persistent ledger to protect conversation history:
-- **New sessions:** `tac` and `teamai claude` assign an explicit session ID (`--session-id`) for new sessions and bind it to an initial account on the first turn.
-- **Compaction & turns:** Claude Code sends the same canonical session ID (`x-claude-code-session-id`) across turns, `/compact`, auto-compaction, model switches, and subagent requests. The initial binding is preserved throughout.
-- **Resumed sessions (`--resume`, `--continue`):** Resuming an established session continues on its pinned account. Resuming an unproven session (conversation history not recorded in TeamAI) is rejected with `409 Conflict` rather than risking a history leak to a different account.
-- **Lost binding protection:** If a session's binding is removed or deleted from `sessions.json`, the relay fails closed with `500` rather than rebinding the conversation to another account after restart.
 
+- **New sessions:** Before launching Claude Code, `tac` and `teamai claude` request a UUID from the relay's authenticated local control port. The relay persists its registration and atomically consumes it when binding the first conversation request. An unregistered ID is rejected with `409`, regardless of message count, role or client account metadata. User-supplied `--session-id` and `--fork-session` are rejected.
+- **Turns, compaction and sub-requests:** Requests using the same canonical ID (`x-claude-code-session-id` or matching metadata) retain the initial binding across model changes and compaction. A subagent or in-session `/resume`, `/clear` or fork that introduces an unregistered ID is rejected; TeamAI does not infer parentage or register IDs from conversation bodies. Compatibility depends on the client preserving that ID; these boundaries are tested with synthetic requests, not live subscription sessions.
+- **Resumed sessions (`--resume`, `--continue`):** These flags pass through without registering anything. Only a previously recorded binding can resume on its original account. Unproven sessions return `409`; missing or inconsistent storage returns `500`. Resume pickers and names work only if the resulting ID already has a binding.
+- **Storage and migration:** Registration, ledger checks and binding use one cross-process file lock. Missing, unreadable, corrupt or inconsistent session files fail closed with `500`, including deletion of an entry followed by restart. An interrupted binding write also fails closed. Existing complete bindings with a consistent older ledger remain usable; conversations without those records cannot be adopted. Restore a consistent backup rather than deleting files to repair storage. Internal account warmups use a private process token and cannot register conversation IDs.
+
+The [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) documents UUID `--session-id`, resume/continue, and the new ID created by `--fork-session`. Its [hooks reference](https://code.claude.com/docs/en/hooks#common-input-fields) distinguishes the session ID from subagent IDs; it does not guarantee HTTP header behavior for every client feature or version.
 
 ## Shell setup
 

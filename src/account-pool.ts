@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
-import { isSessionInLedger, updateSessions } from './storage.js';
+import { updateSessions } from './storage.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount, StoredSessionBinding } from './types.js';
 
@@ -54,7 +54,6 @@ export class AccountPool {
   resetCredits: ResetCreditSettings = RESET_CREDIT_DEFAULTS;
   saveNow: () => Promise<void> = async () => {};
   log: (message: string) => void = () => {};
-  private sessionBindings = new Map<string, StoredSessionBinding>();
   private changeListener: ((account: RuntimeAccount) => void) | null = null;
   private deadEndLoggedAt = 0;
   // How accounts of the same priority are ordered: 'pacing' by weekly
@@ -379,7 +378,6 @@ export class AccountPool {
   // Resolves or atomically binds a Claude session to an account, persisted durably.
   async resolveOrBindClaudeSession(
     sessionId: string,
-    isResumed: boolean,
     wantsFable: boolean,
     route: Route | null = null,
   ): Promise<{
@@ -397,31 +395,16 @@ export class AccountPool {
     };
 
     try {
-      await updateSessions(async (bindings) => {
+      await updateSessions(async (bindings, pending) => {
         const existing = bindings[sessionId];
         if (existing && existing.provider === 'claude') {
           state.boundId = existing.accountId;
           state.credentialId = existing.credentialId;
           state.actualAccountId = existing.actualAccountId;
-          this.sessionBindings.set(sessionId, existing);
-          return;
-        }
-
-        // If the pool previously knew this session in memory, but it's missing from disk:
-        // this is entry deletion ("항목 삭제") or disk loss! Fail closed!
-        if (this.sessionBindings.has(sessionId)) {
-          state.outcome = 'storage_error';
           return false;
         }
 
-        // If this session was previously bound in the persistent ledger on disk:
-        // this is entry deletion ("항목 삭제") across restart or disk loss! Fail closed!
-        if (await isSessionInLedger(sessionId)) {
-          state.outcome = 'storage_error';
-          return false;
-        }
-
-        if (isResumed) {
+        if (!pending.has(sessionId)) {
           state.outcome = 'unproven';
           return false;
         }
@@ -451,7 +434,6 @@ export class AccountPool {
           boundAt: Date.now(),
         };
         bindings[sessionId] = binding;
-        this.sessionBindings.set(sessionId, binding);
       });
     } catch {
       return { account: null, status: 'storage_error' };
