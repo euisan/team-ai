@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
-import { updateSessions } from './storage.js';
+import { adoptClaudeSession, updateSessions, type AdoptOutcome } from './storage.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount, StoredSessionBinding } from './types.js';
 
@@ -32,6 +32,11 @@ export type Ranked = Pick<RuntimeAccount, 'usage' | 'resetsAt' | 'windows' | 'in
 const NO_EXCLUSIONS = new Set<string>();
 
 type Judge = (account: RuntimeAccount, excluded: Set<string>, wantsFable: boolean, lastResort: boolean) => boolean;
+
+// Why an adoption named an account that cannot take the conversation.
+class AdoptRefusal extends Error {
+  constructor(readonly status: 'unknown_account' | 'ambiguous_account' | 'unusable_account', readonly reason?: string) { super(status); }
+}
 export interface NextTargets { general: string | null; fable?: string | null; routes?: Record<string, string | null> }
 
 export class AccountPool {
@@ -480,6 +485,40 @@ export class AccountPool {
     bound.inflight++;
     bound.lastUsed = now;
     return { account: bound, status: 'ok' };
+  }
+
+  // An administrator's adoption of a conversation this relay never registered
+  // (one started before it issued IDs): record the named account as that
+  // conversation's first account, from this pool's own accounts and
+  // credentials. From then on dispatch treats it like any other binding.
+  async adoptClaudeSession(sessionId: string, ref: string): Promise<{
+    status: AdoptOutcome | 'unknown_account' | 'ambiguous_account' | 'unusable_account' | 'storage_error';
+    account?: RuntimeAccount;
+    reason?: string;
+  }> {
+    // Judged inside the session lock, right before the write.
+    const find = (): RuntimeAccount => {
+      const exact = this.accounts.filter((a) => a.credentialId === ref || a.id === ref);
+      const matches = exact.length ? exact : this.accounts.filter((a) => a.label === ref);
+      if (!matches.length) throw new AdoptRefusal('unknown_account');
+      if (matches.length > 1) throw new AdoptRefusal('ambiguous_account');
+      const account = matches[0]!;
+      if (account.retired) throw new AdoptRefusal('unusable_account', 'removed');
+      if (!account.enabled) throw new AdoptRefusal('unusable_account', 'disabled');
+      if (typeof account.credential?.accountId !== 'string' || !account.credential.accountId.trim()) throw new AdoptRefusal('unusable_account', 'its credential has no account id');
+      return account;
+    };
+    let chosen: RuntimeAccount | undefined;
+    try {
+      const status = await adoptClaudeSession(sessionId, () => {
+        const account = find(); chosen = account;
+        return { sessionId, provider: 'claude', accountId: account.id, credentialId: account.credentialId, actualAccountId: account.credential.accountId.trim(), boundAt: Date.now() };
+      });
+      return { status, account: chosen };
+    } catch (error) {
+      if (error instanceof AdoptRefusal) return { status: error.status, ...(error.reason ? { reason: error.reason } : {}) };
+      return { status: 'storage_error' };
+    }
   }
 
   // The preview targets the dashboard marks, by credential id.

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
 import { claudeWarmToken } from './claude-warm-auth.js';
-import { handleClaudeSessionControl } from './claude-session-control.js';
+import { handleClaudeSessionAdopt, handleClaudeSessionControl } from './claude-session-control.js';
 import { AccountPool } from './account-pool.js';
 import { ActivityLog } from './activity.js';
 import { BodyBudget, bodyTimeoutMs, createProxy, maxBodyBytes, maxInflightBodyBytes, secureEqual, type BodyOptions } from './proxy.js';
@@ -172,6 +172,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
       if (await handleResetCreditControl(req, res, pools.find((p) => p.provider.id === 'codex'), config.proxy.clientToken)) return;
       if (await handleClaudeSessionControl(req, res, config.proxy.clientToken)) return;
+      if (await handleClaudeSessionAdopt(req, res, pools.find((p) => p.provider.id === 'claude'), config.proxy.clientToken, (message) => { console.log(`${new Date().toISOString()} [TeamAI] ${message}`); persist(message); })) return;
       if (await reload(req, res)) return;
       // Routes edited in the dashboard or with `teamai route`, applied in place.
       if (await handleRouteControl(req, res, pools, config.proxy.clientToken, (warnings, counts) => { persist(`Routes reloaded: claude ${counts.claude ?? 0}, codex ${counts.codex ?? 0}`); for (const warning of warnings) persist(warning); })) return;

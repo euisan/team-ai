@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { codexUserId } from './auth.js';
-import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, StoredSessionBindings, TeamAIConfig } from './types.js';
+import type { OAuthCredential, PersistedState, ProviderId, StoredAccount, StoredSessionBinding, StoredSessionBindings, TeamAIConfig } from './types.js';
 
 export function dataDir(): string {
   return process.env.TEAMAI_HOME || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'teamai');
@@ -157,6 +157,56 @@ export function issueClaudeSession(): Promise<string> {
     ledger[id] = 'pending';
     await atomicWrite(ledgerPathFor(path), ledger);
     return id;
+  });
+}
+
+// The longest conversation ID an administrator can adopt. Claude Code's own IDs
+// are 36-character UUIDs.
+export const ADOPT_SESSION_ID_MAX = 256;
+
+// A conversation ID the relay can see again exactly as stored: dispatch trims
+// the header and splits it on commas, and refuses prototype property names.
+// Visible ASCII only, so no whitespace or control characters either.
+export function adoptableSessionId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const id = raw.trim();
+  if (!id || id.length > ADOPT_SESSION_ID_MAX || !/^[\x21-\x7e]+$/.test(id) || id.includes(',')) return null;
+  if (id === '__proto__' || id === 'constructor' || id === 'prototype') return null;
+  return id;
+}
+
+export type AdoptOutcome = 'adopted' | 'already_bound' | 'conflict' | 'pending';
+
+// Records an existing conversation, named by an administrator, as first bound
+// to one account: the conversation started before this relay issued IDs, so
+// it has no registration. The binding and its ledger record are written under
+// the same lock as registration and dispatch, and every refusal writes
+// nothing. pick() runs inside that lock and returns the binding to record (it
+// throws when the account cannot take one). A conversation that is already
+// bound keeps its binding: the same account again is a no-op, any other is a
+// conflict. A registration still pending belongs to a relay-started session.
+export function adoptClaudeSession(sessionId: string, pick: () => StoredSessionBinding): Promise<AdoptOutcome> {
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { bindings, ledger, fresh } = await readSessionStore();
+    const binding = pick();
+    if (binding.sessionId !== sessionId || binding.provider !== 'claude') throw new Error('Adopted binding does not match the request');
+    if (ledger[sessionId] === 'pending') return 'pending';
+    const existing = bindings[sessionId];
+    if (existing) {
+      const same = existing.provider === 'claude' && existing.accountId === binding.accountId
+        && existing.credentialId === binding.credentialId && existing.actualAccountId === binding.actualAccountId;
+      return same ? 'already_bound' : 'conflict';
+    }
+    bindings[sessionId] = binding;
+    const validated = validateSessionBindings(bindings);
+    if (fresh) await initializeSessionStore();
+    ledger[sessionId] = 'bound';
+    // The ledger first, as for a dispatch binding: an interrupted write leaves
+    // a ledger record with no binding, which fails closed on the next read.
+    await atomicWrite(ledgerPathFor(path), ledger);
+    await atomicWrite(path, validated);
+    return 'adopted';
   });
 }
 
