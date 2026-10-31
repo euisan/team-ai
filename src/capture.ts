@@ -21,6 +21,9 @@ export interface CaptureOptions {
   mode?: FrameMode;
   message?: string;
   sortByHeadroom?: boolean;
+  // The order priority mode is holding, so a capture taken from that screen
+  // shows the same rows in the same places.
+  frozen?: readonly string[];
 }
 
 export interface CaptureResult { text: string; png: string }
@@ -44,7 +47,7 @@ export async function captureDashboard(options: CaptureOptions): Promise<Capture
   // The host's own load is no account data, so it needs no mask; a quarter
   // second between two snapshots gives the header a measured CPU%.
   const host = await measureHost();
-  const lines = buildFrame(config, state, { width, selectedId, mode: options.mode ?? 'normal', message, sortByHeadroom, host });
+  const lines = buildFrame(config, state, { width, selectedId, mode: options.mode ?? 'normal', message, sortByHeadroom, frozen: options.frozen, host });
   const dir = options.outDir ?? join(dataDir(), 'captures');
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const name = `teamai-${stamp(new Date())}`; const body = `${lines.join('\n')}\n`; const image = renderFrame(lines);

@@ -67,7 +67,7 @@ test('buildFrame draws both sections, the column titles and the footer within th
   assert.ok(lines.some((line) => line.includes('5h session') && line.includes(' 7d ') && line.includes('7d Fable')));
   assert.ok(lines.some((line) => line.startsWith('>  c@example.com')), 'cursor on the selected row (then the next-account column)');
   const footer = lines.at(-1)!;
-  assert.match(footer, /p capture/); assert.match(footer, /c quota-sort/); assert.match(footer, /hello$/);
+  assert.match(footer, /p capture/); assert.match(footer, /c quota-sort/); assert.match(footer, /hello\s*$/);
   assert.equal(lines.join('\n').includes('tai-secret'), false);
 });
 

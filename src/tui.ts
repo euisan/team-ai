@@ -1,10 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { loginClaude, loginCodex } from './auth.js';
 import { captureDashboard } from './capture.js';
 import { applyConfig, describeApply } from './config-apply.js';
 import { copyImageToClipboard, revealInFolder } from './desktop.js';
-import { buildFrame, displayOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
+import { buildFrame, displayOrder, frozenOrder, orderOptions, ESC, type CreditPicker, type FrameMode } from './frame.js';
 import { createHostTracker } from './host-metrics.js';
 import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
@@ -21,15 +19,19 @@ export async function runTui(): Promise<void> {
   let sortByHeadroom = true;
   let credits: CreditPicker | undefined; let creditList: ResetCredit[] = []; let creditAccount: string | null = null;
   let routeEditor: RouteEditor | undefined;
-  const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); return displayOrder(config.accounts, await loadState(), sortByHeadroom, orderOptions(config)); };
+  // The roster captured when priority mode opened. While it is set, rows are
+  // drawn and walked in that order, so saving a rank does not move the row
+  // under the cursor; leaving the mode clears it and the next frame sorts again.
+  let frozen: string[] | null = null;
+  const rows = async (): Promise<StoredAccount[]> => { const config = await loadConfig(); const state = await loadState(); return frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config)); };
   const selected = (accounts: StoredAccount[]): StoredAccount | null => accounts.find((account) => account.credentialId === selectedId) || accounts[0] || null;
 
   // This PC's CPU/RAM for the header, re-sampled on every redraw (the 500 ms
   // tick), so the CPU% is the load over the last half second.
   const host = createHostTracker();
   const screen = startScreen(process.stdout, async ({ width, height }) => {
-    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
-    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, credits, routes: routeEditor, host: host.sample() });
+    const config = await loadConfig(); const state = await liveState(await loadState()); const current = selected(frozen ? frozenOrder(config.accounts, frozen) : displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))); if (current && !selectedId) selectedId = current.credentialId;
+    return buildFrame(config, state, { width, height, selectedId, mode, message, sortByHeadroom, frozen: frozen ?? undefined, credits, routes: routeEditor, host: host.sample() });
   });
   const render = (): Promise<void> => screen.render();
 
@@ -64,7 +66,7 @@ export async function runTui(): Promise<void> {
   const capture = async (): Promise<void> => {
     busy = true;
     try {
-      const result = await captureDashboard({ level: 'partial', width: terminalSize(process.stdout).width, selectedId, mode, sortByHeadroom });
+      const result = await captureDashboard({ level: 'partial', width: terminalSize(process.stdout).width, selectedId, mode, sortByHeadroom, frozen: frozen ?? undefined });
       const [copied, revealed] = await Promise.all([copyImageToClipboard(result.png), revealInFolder(result.png)]);
       const extras = [copied ? 'copied to clipboard' : 'clipboard unavailable', revealed ? 'opened folder' : ''].filter(Boolean).join(', ');
       message = `Captured ${result.png.slice(result.png.lastIndexOf('/') + 1)} — ${extras}`;
@@ -120,18 +122,13 @@ export async function runTui(): Promise<void> {
   };
 
   const add = async (provider: 'claude' | 'codex'): Promise<void> => { busy = true; message = `Logging into ${provider}...`; process.stdin.setRawMode(false); await render(); try { const result = provider === 'claude' ? await loginClaude({ interactive: false }) : await loginCodex(); const account = await upsertAccount(provider, result.label, result.credential); selectedId = account.credentialId; await apply(`Added ${account.label}`); } catch (error) { message = (error as Error).message; } finally { process.stdin.setRawMode(true); busy = false; mode = 'normal'; } };
-  const launch = async (provider: 'claude' | 'codex'): Promise<void> => {
-    busy = true; process.stdin.setRawMode(false); process.stdout.write(`${ESC}?25h${ESC}?1049l`);
-    const cli = fileURLToPath(new URL('./cli.js', import.meta.url)); const result = spawnSync(process.execPath, [cli, 'run', provider], { stdio: 'inherit', env: process.env });
-    process.stdout.write(`${ESC}?1049h${ESC}?25l`); process.stdin.setRawMode(true); busy = false; message = result.status === 0 ? `${provider} session closed` : `${provider} exited (${result.status ?? 'error'})`;
-  };
 
   process.stdout.write(`${ESC}?1049h${ESC}?25l`); process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.setEncoding('utf8'); await render(); const timer = setInterval(() => void render(), 500);
   await new Promise<void>((resolve) => process.stdin.on('data', async (key: string) => {
     if (busy) return; message = '';
     if (key === '' || (mode === 'normal' && key === 'q')) { closed = true; resolve(); return; }
     if (mode === 'routes' && routeEditor) await routeKey(key);
-    else if (key === '\x1b' || mode === 'help') { mode = 'normal'; credits = undefined; }
+    else if (key === '\x1b' || mode === 'help') { if (mode === 'order') frozen = null; mode = 'normal'; credits = undefined; }
     else if (mode === 'credits' && credits) {
       if (credits.phase === 'pick' && credits.items.length) {
         if (key === '\x1b[A' || key === 'k') credits = { ...credits, index: Math.max(0, credits.index - 1) };
@@ -145,13 +142,12 @@ export async function runTui(): Promise<void> {
     else if (mode === 'delete') { if (key === 'y' || key === '\r') { const account = selected(await rows()); if (account) { await removeAccount(account.credentialId); selectedId = null; await apply(`Deleted ${account.label}`); } mode = 'normal'; } }
     else if (mode === 'order') {
       const step = await pressOrderKey(selectedId, key);
-      if (step.saved) await apply(); else if (step.move) await move(step.move); else if (step.done) mode = 'normal';
+      if (step.saved) await apply(); else if (step.move) await move(step.move); else if (step.done) { mode = 'normal'; frozen = null; }
     } else {
       if (key === '\x1b[A' || key === 'k') await move(-1); else if (key === '\x1b[B' || key === 'j') await move(1);
       else if (key === 'e') await mutate((account) => { account.enabled = !account.enabled; });
       else if (key === 's') await mutate((account, accounts) => { for (const other of accounts.filter((x) => x.provider === account.provider && x.priority === 0)) other.priority = null; account.priority = 0; });
-      else if (key === '1' || key === 'C') await launch('claude'); else if (key === '2' || key === 'X') await launch('codex');
-      else if (key === 'o') mode = 'order'; else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
+      else if (key === 'o') { frozen = (await rows()).map((account) => account.credentialId); mode = 'order'; } else if (key === 'd') mode = 'delete'; else if (key === 'a') mode = 'add'; else if (key === 'R') { await remeasure(); } else if (key === 't') { await openCredits(); } else if (key === 'g') { await openRoutes(); } else if (key === 'p') { await capture(); } else if (key === '?') mode = 'help';
       else if (key === 'c') { sortByHeadroom = !sortByHeadroom; message = sortByHeadroom ? 'Sorted by remaining quota' : 'Sorted by configured order'; }
     }
     await render();

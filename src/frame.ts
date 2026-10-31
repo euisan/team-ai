@@ -146,6 +146,22 @@ export function displayOrder(accounts: StoredAccount[], state: PersistedState, b
   return ordered;
 }
 
+// A roster held in the order it had when the priority editor opened, so a
+// priority change does not make the row being edited jump elsewhere on the
+// next redraw. An account added since then joins at the end; one removed since
+// then is gone, as it would be anywhere else on the dashboard.
+export function frozenOrder(accounts: StoredAccount[], ids: readonly string[]): StoredAccount[] {
+  const remaining = new Map(accounts.map((account) => [account.credentialId, account]));
+  const ordered: StoredAccount[] = [];
+  for (const id of ids) {
+    const account = remaining.get(id);
+    if (!account) continue;
+    ordered.push(account); remaining.delete(id);
+  }
+  for (const account of accounts) if (remaining.delete(account.credentialId)) ordered.push(account);
+  return ordered;
+}
+
 // Braille spinner for requests still in flight. The frame is derived from the
 // clock, so the 500ms redraw animates it with no state of its own.
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
@@ -277,6 +293,16 @@ export interface FrameView {
   // This PC's CPU and RAM load, sampled by the caller on each redraw. Absent:
   // the header has no host field at all.
   host?: HostSample | null;
+  // The account order to hold while the priority editor is open, captured when
+  // it opened. Ignored in every other mode, so leaving the editor returns to
+  // the live display order.
+  frozen?: readonly string[];
+}
+
+// The order one frame draws: the frozen roster while priority mode holds it,
+// else the live display order.
+function frameOrder(config: TeamAIConfig, state: PersistedState, view: FrameView): StoredAccount[] {
+  return view.mode === 'order' && view.frozen ? frozenOrder(config.accounts, view.frozen) : displayOrder(config.accounts, state, view.sortByHeadroom, orderOptions(config));
 }
 
 // The header's right side: the first candidate that fits beside the title
@@ -293,8 +319,8 @@ const withHost = (host: HostSample | null | undefined, rest: string, amounts: bo
 // Every key the normal screen takes, as the footer names them. The wide footer
 // spells them out in one line; a narrow one shows what fits and leaves the
 // rest to the '?' list.
-function normalKeys(codexSelected: boolean, sortByHeadroom: boolean): string[] {
-  return ['1 Claude', '2 Codex', '↑↓ select', 's switch', 'e enable', 'o order', 'd delete', 'a add', ...(codexSelected ? ['t credits'] : []), 'p capture', 'R Reload', `c ${sortByHeadroom ? 'quota' : 'config'}-sort`, 'g routes', 'q quit'];
+export function normalKeys(codexSelected: boolean, sortByHeadroom: boolean): string[] {
+  return ['↑↓ select', 's switch', 'e enable', 'o order', 'd delete', 'a add', ...(codexSelected ? ['t credits'] : []), 'p capture', 'R Reload', `c ${sortByHeadroom ? 'quota' : 'config'}-sort`, 'g routes', 'q quit'];
 }
 
 // Hints packed into as few lines of `width` as they fit, two spaces apart.
@@ -322,7 +348,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   // route count, so both account boxes keep their gauges in line.
   const markWidth = Math.max(0, ...(['claude', 'codex'] as const).map((provider) => (state.routes || []).filter((route) => route.provider === provider).length));
   if (isNarrow(width, markWidth)) return buildNarrowFrame(config, state, view);
-  const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, orderOptions(config));
+  const accounts = config.accounts; const ordered = frameOrder(config, state, view);
   const lines: Array<string | GridRow> = [];
   // One column layout for every panel below (see columns.ts): the account
   // boxes and the other agents' boxes are collected as grid rows and laid out
@@ -532,7 +558,7 @@ interface Ranked { text: string | NarrowRow; rank: number }
 
 function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
   const { width, height, selectedId, mode, message, sortByHeadroom } = view;
-  const accounts = config.accounts; const ordered = displayOrder(accounts, state, sortByHeadroom, orderOptions(config));
+  const accounts = config.accounts; const ordered = frameOrder(config, state, view);
   const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow>): void => { for (const text of texts) lines.push({ text, rank }); };
   push(RANK.header, headerLine(color(1, ' TeamAI'), [...withHost(view.host, '', false), ''], width));
 
