@@ -300,3 +300,29 @@ test('dashboard renders commandCode box with identity and gauges', () => {
   assert.ok(lines.some((l) => l.startsWith('┌─ Command Code ')));
   assert.ok(lines.some((l) => l.includes('Command Code GOAT ja•••••e@ex•••••.com')));
 });
+
+test('ExternalUsageMonitor default wiring reads commandCode via collectCommandCode', async () => {
+  const http = await fakeHttp((req) => {
+    if (req.url === '/alpha/billing/credits') return { status: 200, body: JSON.stringify(CMD_CREDITS_FIXTURE) };
+    if (req.url === '/alpha/billing/subscriptions') return { status: 200, body: JSON.stringify(CMD_SUB_FIXTURE) };
+    if (req.url === '/alpha/whoami?limits=1') return { status: 200, body: JSON.stringify(CMD_WHOAMI_FIXTURE) };
+    return { status: 404, body: '{}' };
+  });
+
+  const authFile = { '/h/.commandcode/auth.json': JSON.stringify({ apiKey: CMD_KEY, userName: 'janedoe' }) };
+  const deps = { home: '/h', readFile: files(authFile), commandCodeUrl: http.base, env: {} };
+  const settings = {
+    ...externalUsageSettings({}),
+    providers: { antigravity: false, opencodeGo: false, grok: false, commandCode: true },
+  };
+
+  try {
+    const monitor = new ExternalUsageMonitor(settings, deps);
+    await monitor.tick(true);
+    assert.equal(monitor.usage.commandCode?.status, 'ok');
+    assert.equal(monitor.usage.commandCode?.identity, 'GOAT ja•••••e@ex•••••.com');
+    assert.equal(monitor.usage.commandCode?.groups[0]?.windows.length, 3);
+  } finally {
+    http.close();
+  }
+});
