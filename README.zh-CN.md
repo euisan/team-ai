@@ -14,6 +14,15 @@ TeamAI 是面向 **Claude Code** 和官方 **Codex CLI** 的本地多账号中�
 
 > TeamAI 是一个独立的开源项目，与 Anthropic、OpenAI 以及与之无关的 teamai.com 服务均无任何关联。
 
+## Claude 账号组
+
+在现有 `config.json` 中添加 `"groups": {"master": ["lead@example.test", "backup@example.test"], "worker": ["worker@example.test", "backup@example.test"]}`。成员使用 `teamai accounts claude` 显示的标签或 id，同一账号可以属于多个组。使用 `teamai claude --group master` 或 `TEAMAI_GROUP=worker tac`，显式参数优先。该参数不会传给 Claude，Codex 会拒绝它。未知组在启动客户端前报错；未知或有歧义的账号引用会使启动或整个配置重载失败。组名以英文字母或数字开头，最多64个英文字母、数字、`_`、`.`、`-`，成员列表不能为空。
+
+新会话只在组内按现有优先级和配额规则选择首个账号，跳过冷却中的成员；全部不可用时返回429，不会使用组外账号。模型路由也不能越过组边界。未指定组时行为不变。组保存在待绑定注册记录和持久绑定中，重启、`--resume`、`--continue` 都会保留。**Claude 仍永久固定到首个账号，已绑定会话在冷却或出错时也不会切换到组内其他账号。** 恢复时省略组参数即可使用已存组，指定不同组会返回409。删除组或移除绑定账号的成员资格会返回503，绑定保持不变。修改账号名称或删除账号时请保持引用有效。
+
+编辑后重启中继，或通过账号命令、仪表盘进行配置重载；无效配置会使整个重载被拒绝。`teamai status` 显示组剩余额度及已存会话的组；仪表盘显示组剩余额度及 Activity 中的 `[group:name]`。剩余额度按启用成员各自使用率最高的已知配额窗口计算，以账号份额相加，未测量成员单独显示。成员可能重叠，请勿把不同组的总量相加。详情以[英文 README](README.md#claude-account-groups)为准。
+
+
 ## 环境要求
 
 - Node.js 20 及以上

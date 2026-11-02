@@ -14,6 +14,15 @@ TeamAI es un relé local multicuenta para **Claude Code** y la CLI oficial de **
 
 > TeamAI es un proyecto de código abierto independiente. No está afiliado a Anthropic, a OpenAI ni al servicio no relacionado de teamai.com.
 
+## Grupos de cuentas de Claude
+
+Añada `"groups": {"master": ["lead@example.test", "backup@example.test"], "worker": ["worker@example.test", "backup@example.test"]}` al `config.json` existente. Los miembros son etiquetas o ids de `teamai accounts claude`; una cuenta puede pertenecer a varios grupos. Use `teamai claude --group master` o `TEAMAI_GROUP=worker tac`; la opción explícita tiene prioridad. TeamAI consume la opción antes de ejecutar Claude y Codex la rechaza. Un grupo desconocido falla antes del lanzamiento; referencias desconocidas o ambiguas a cuentas impiden el inicio o la recarga completa. Los nombres empiezan por una letra ASCII o un dígito y contienen hasta 64 letras, dígitos, `_`, `.` o `-`; las listas no pueden estar vacías.
+
+Una sesión nueva elige su primera cuenta dentro del grupo con las reglas existentes de prioridad y cuota. Omite miembros en enfriamiento; si ninguno está disponible, devuelve 429 sin salir del grupo. Las rutas de modelos tampoco pueden salir del grupo. Sin grupo, el comportamiento no cambia. El grupo se guarda en el registro pendiente y en la vinculación persistente, conservándose tras reiniciar, `--resume` y `--continue`. **Claude mantiene la vinculación permanente a la primera cuenta: una sesión vinculada no cambia a otra cuenta del grupo ante enfriamiento o errores.** Al reanudar, omita el grupo para usar el guardado; especificar otro devuelve 409. Eliminar el grupo o la pertenencia de la cuenta vinculada devuelve 503 sin cambiar la vinculación. Mantenga las referencias válidas al renombrar o eliminar cuentas.
+
+Tras editar, reinicie el relay o recargue la configuración mediante un comando de cuentas o el panel. Los cambios inválidos rechazan toda la recarga. `teamai status` muestra la capacidad restante por grupo y los grupos de sesiones guardadas; el panel muestra esa capacidad y `[group:name]` en Activity. La capacidad suma, en unidades de cuenta, lo restante de la ventana conocida más usada de cada miembro habilitado; las cuentas sin medir se muestran por separado. No sume totales de grupos con miembros compartidos. Consulte el [README inglés](README.md#claude-account-groups) para los detalles.
+
+
 ## Requisitos
 
 - Node.js 20 o superior

@@ -8,6 +8,7 @@ import { hostText, type HostSample } from './host-metrics.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage, type ExternalWindow } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, parseBalance, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
+import { groupStatusLines } from './groups.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
@@ -189,7 +190,7 @@ function activityLines(active: ActiveRequest[], events: ActivityEvent[], rows: n
   const tagged = show.sessionIds && [...shownActive, ...shownEvents.map((e) => e.request)].some((r) => r?.sessionId);
   const tag = (id: string | null | undefined): string => tagged ? `${id ? sessionTag(id) : ' '.repeat(6)} ` : '';
   const model = (r: { model?: string | null; effort?: string | null }, dim: boolean): string => show.models ? modelText(r.model, r.effort, dim) : '';
-  const routed = (r: { provider: string; route?: string | null; routeFallback?: boolean }): string => r.route ? ` ${color(tint(r.provider, r.route), `[route:${r.route}${r.routeFallback ? '→fallback' : ''}]`)}` : '';
+  const routed = (r: { provider: string; route?: string | null; routeFallback?: boolean; group?: string | null }): string => (r.group ? ` [group:${r.group}]` : '') + (r.route ? ` ${color(tint(r.provider, r.route), `[route:${r.route}${r.routeFallback ? '→fallback' : ''}]`)}` : '');
   const out = shownActive.map((entry) => {
     const account = entry.account ? ` → ${entry.account}` : '';
     return `${color(36, spin)} ${clock(entry.startedAt)}  ${tag(entry.sessionId)}${entry.providerLabel} ${entry.method} ${entry.path}${model(entry, true)}${account}${routed(entry)}${entry.capacityRetries ? color(33, ` capacity retry x${entry.capacityRetries}`) : ''} ${color(2, `(${(Math.max(0, now - entry.startedAt) / 1000).toFixed(1)}s...)`)}`;
@@ -420,6 +421,7 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     lines.push(...box);
   }
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
+  lines.push(...groupStatusLines(config, state).map((line) => fit(line, width)));
   if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
@@ -529,14 +531,14 @@ function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: 
   const out = shownActive.map((entry) => {
     const seconds = Math.max(0, Math.round((now - entry.startedAt) / 1000));
     const elapsed = (seconds < 100 ? `${seconds}s` : `${Math.round(seconds / 60)}m`).padStart(3);
-    return fit(`${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.capacityRetries ? color(33, `retry x${entry.capacityRetries} `) : ''}${entry.account ?? ''}`, width);
+    return fit(`${color(36, spin)}${hhmm(entry.startedAt)} ${tag(entry.sessionId)}${who(entry.provider)} ${color(2, elapsed)} ${entry.capacityRetries ? color(33, `retry x${entry.capacityRetries} `) : ''}${entry.group ? `[group:${entry.group}] ` : ''}${entry.account ?? ''}`, width);
   });
   for (const event of shownEvents) {
     const request = event.request;
     if (!request) { out.push(fit(` ${hhmm(event.at)} ${event.message}`, width)); continue; }
     const failed = typeof request.status !== 'number' || request.status >= 400 || Boolean(request.streamEnd);
     const status = String(request.status).padStart(3);
-    out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.capacityRetries ? color(33, `retry x${request.capacityRetries} `) : ''}${request.account ?? ''}`, width));
+    out.push(fit(` ${hhmm(event.at)} ${tag(request.sessionId)}${who(request.provider)} ${failed ? color(31, status) : status} ${request.capacityRetries ? color(33, `retry x${request.capacityRetries} `) : ''}${request.group ? `[group:${request.group}] ` : ''}${request.account ?? ''}`, width));
   }
   return out;
 }
@@ -582,6 +584,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
   if (mode === 'credits' && view.credits) push(RANK.overlay, ...pickerLines(view.credits, width));
+  for (const line of groupStatusLines(config, state)) push(RANK.account, fit(line, width));
   if (mode === 'routes' && view.routes) push(RANK.overlay, ...routeEditorLines(view.routes, width));
   if (mode === 'help') push(RANK.overlay, ...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
 
