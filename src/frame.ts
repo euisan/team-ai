@@ -8,7 +8,7 @@ import { hostText, type HostSample } from './host-metrics.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage, type ExternalWindow } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, parseBalance, type Balance } from './pacing.js';
 import { routeEditorFooter, routeEditorLines, type RouteEditor } from './route-editor.js';
-import { groupStatusLines } from './groups.js';
+import { groupStatuses, parseGroups } from './groups.js';
 import { routeColor } from './routes.js';
 import type { ActiveRequest, ActivityEvent, PersistedState, StoredAccount, SubscriptionProfile, TeamAIConfig } from './types.js';
 
@@ -100,11 +100,9 @@ export function orderOptions(config: Pick<TeamAIConfig, 'routing'>): OrderOption
   return { balance };
 }
 
-// The accounts in the order the screen draws them: grouped by provider, and
-// within a group in the pool's own order unless the roster was switched back
-// to configured order. Everything that walks rows — rendering, ↑↓ movement, the
-// initial cursor — goes through this one function, so the cursor always lands
-// on the adjacent visible row rather than the adjacent entry in config.json.
+// The base roster: providers together, then the pool's order or configured
+// order inside each provider. Group sections preserve this order internally;
+// navigationOrder turns those sections into the unique selection sequence.
 export function displayOrder(accounts: StoredAccount[], state: PersistedState, byHeadroom: boolean, options: OrderOptions = { balance: 'pacing' }): StoredAccount[] {
   // The same order the pool gives a new non-Fable request: priority, then the
   // balance's own comparison — comparePacing, or with 'level' the pool's
@@ -156,6 +154,47 @@ export function frozenOrder(accounts: StoredAccount[], ids: readonly string[]): 
   }
   for (const account of accounts) if (remaining.delete(account.credentialId)) ordered.push(account);
   return ordered;
+}
+
+interface AccountSection { name?: string; accounts: StoredAccount[] }
+
+// Keep the pool's order inside each configured group. Shared accounts are
+// repeated in the sections, but remain one account for selection and actions.
+function claudeSections(config: TeamAIConfig, ordered: StoredAccount[]): AccountSection[] {
+  const accounts = ordered.filter((account) => account.provider === 'claude');
+  const groups = Object.entries(parseGroups(config.groups, config.accounts));
+  if (!groups.length) return [{ accounts }];
+  const assigned = new Set(groups.flatMap(([, ids]) => ids));
+  const sections: AccountSection[] = groups.map(([name, ids]) => ({ name, accounts: accounts.filter((account) => ids.includes(account.id)) }));
+  const ungrouped = accounts.filter((account) => !assigned.has(account.id));
+  if (ungrouped.length) sections.push({ name: '그룹 없음', accounts: ungrouped });
+  return sections;
+}
+
+// Walk each identity once, at its first visible occurrence. Every copy of a
+// shared identity shows the cursor and receives the same account action.
+export function navigationOrder(config: TeamAIConfig, ordered: StoredAccount[]): StoredAccount[] {
+  const seen = new Set<string>();
+  return [...claudeSections(config, ordered).flatMap((section) => section.accounts), ...ordered.filter((account) => account.provider === 'codex')]
+    .filter((account) => {
+      if (seen.has(account.credentialId)) return false;
+      seen.add(account.credentialId); return true;
+    });
+}
+
+function groupSectionTitle(section: AccountSection, summaries: ReturnType<typeof groupStatuses>): string | undefined {
+  if (section.name === undefined) return undefined;
+  const summary = summaries.find((group) => group.name === section.name);
+  return summary ? `${summary.name} · ${summary.ready}/${summary.ids.length} ready · headroom ${summary.headroom.toFixed(2)}${summary.unknown ? ` + ${summary.unknown} unknown` : ''}` : section.name;
+}
+
+function sharedAccounts(sections: AccountSection[]): Set<string> {
+  const seen = new Set<string>(); const shared = new Set<string>();
+  for (const account of sections.flatMap((section) => section.accounts)) {
+    if (seen.has(account.credentialId)) shared.add(account.credentialId);
+    seen.add(account.credentialId);
+  }
+  return shared;
 }
 
 // Braille spinner for requests still in flight. The frame is derived from the
@@ -345,6 +384,8 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
   const markWidth = Math.max(0, ...(['claude', 'codex'] as const).map((provider) => (state.routes || []).filter((route) => route.provider === provider).length));
   if (isNarrow(width, markWidth)) return buildNarrowFrame(config, state, view);
   const accounts = config.accounts; const ordered = frameOrder(config, state, view);
+  const sections = claudeSections(config, ordered); const shared = sharedAccounts(sections);
+  const summaries = groupStatuses(config, state);
   const lines: Array<string | GridRow> = [];
   // One column layout for every panel below (see columns.ts): the account
   // boxes and the other agents' boxes are collected as grid rows and laid out
@@ -388,25 +429,29 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     }).join('');
     const arrow = (account: StoredAccount): string => next?.general === account.credentialId ? color(32, '►') : ' ';
     lines.push({ identity: { lead: '', account: 'account', plan: 'plan', state: 'state', order: 'order' }, cells: usageTitles, dim: true });
-    for (const account of group) {
-      const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
-      const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
-      const head = { lead: `${marks(account)}${cursor}${arrow(account)}`, account: account.label, plan, state: enabled, order: rank };
-      // Weekly progress against the straight line: -30%p is behind (goes
-      // first), +12%p ahead. Blank without a weekly window that resets later.
-      const pace = formatDeviation(pacingDeviation(saved?.windows || {}, false, Date.now()));
-      const paceText = pace ? color(90, pace) : '';
-      if (provider === 'claude') {
-        const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1];
-        const gauges = [bar(session?.usage, session?.resetsAt, barWidth), bar(weekly?.usage, weekly?.resetsAt, barWidth), bar(fable?.usage, fable?.resetsAt, barWidth)];
-        lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
-      } else {
-        const shown = codexSlots(account);
-        // Reset credits on hand, when the usage endpoint has counted some.
-        const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? color(36, `RC${saved.resetCredits}`) : '';
-        lines.push(shown.some(Boolean)
-          ? { identity: head, cells: shown.map((window) => window && bar(window.usage, window.resetsAt, barWidth)), tail: [age(saved?.measuredAt), paceText, credits] }
-          : { identity: head, cells: color(90, 'no quota data yet'), tail: ['', '', credits] });
+    for (const section of provider === 'claude' ? sections : [{ accounts: group }]) {
+      const title = groupSectionTitle(section, summaries);
+      if (title) lines.push(color(36, fit(`  ${title}`, width)));
+      for (const account of section.accounts) {
+        const saved = state.accounts[account.credentialId]; const profile = saved?.profile; const cursor = account.credentialId === selectedId ? color(36, '>') : ' '; const enabled = account.enabled ? (saved?.error ? color(31, 'error') : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? color(33, 'cooldown') : color(32, 'active')) : color(90, 'disabled'); const rank = account.priority == null ? 'auto' : `#${account.priority}`;
+        const plan = provider === 'claude' && profile && !healthy(profile) ? color(31, profile.status || 'inactive') : provider === 'claude' ? tier(profile) : codexPlan(profile);
+        const head = { lead: `${marks(account)}${cursor}${arrow(account)}`, account: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, plan, state: enabled, order: rank };
+        // Weekly progress against the straight line: -30%p is behind (goes
+        // first), +12%p ahead. Blank without a weekly window that resets later.
+        const pace = formatDeviation(pacingDeviation(saved?.windows || {}, false, Date.now()));
+        const paceText = pace ? color(90, pace) : '';
+        if (provider === 'claude') {
+          const session = saved?.windows?.['5h']; const weekly = saved?.windows?.['7d']; const fable = saved?.windows?.['7d_oi'] || Object.entries(saved?.windows || {}).find(([name]) => name.startsWith('7d_'))?.[1];
+          const gauges = [bar(session?.usage, session?.resetsAt, barWidth), bar(weekly?.usage, weekly?.resetsAt, barWidth), bar(fable?.usage, fable?.resetsAt, barWidth)];
+          lines.push({ identity: head, cells: gauges, tail: [age(saved?.measuredAt), paceText], gaps: ['', '', next?.fable === account.credentialId ? color(35, '►') : ''] });
+        } else {
+          const shown = codexSlots(account);
+          // Reset credits on hand, when the usage endpoint has counted some.
+          const credits = typeof saved?.resetCredits === 'number' && saved.resetCredits > 0 ? color(36, `RC${saved.resetCredits}`) : '';
+          lines.push(shown.some(Boolean)
+            ? { identity: head, cells: shown.map((window) => window && bar(window.usage, window.resetsAt, barWidth)), tail: [age(saved?.measuredAt), paceText, credits] }
+            : { identity: head, cells: color(90, 'no quota data yet'), tail: ['', '', credits] });
+        }
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
@@ -421,7 +466,6 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     lines.push(...box);
   }
   if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
-  lines.push(...groupStatusLines(config, state).map((line) => fit(line, width)));
   if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
@@ -551,11 +595,13 @@ function narrowActivity(active: ActiveRequest[], events: ActivityEvent[], rows: 
 // (then the Activity rule over them, which says nothing on its own), the
 // other agents, and last the rest of the activity log.
 const RANK = { current: 100, provider: 90, message: 80, footer: 70, overlay: 60, account: 50, header: 45, activity: 40, activityTitle: 39, external: 30, log: 20 } as const;
-interface Ranked { text: string | NarrowRow; rank: number }
+interface Ranked { text: string | NarrowRow; rank: number; section?: AccountSection; heading?: boolean }
 
 function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: FrameView): string[] {
   const { width, height, selectedId, mode, message, sortByHeadroom } = view;
   const accounts = config.accounts; const ordered = frameOrder(config, state, view);
+  const sections = claudeSections(config, ordered); const shared = sharedAccounts(sections);
+  const summaries = groupStatuses(config, state);
   const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow>): void => { for (const text of texts) lines.push({ text, rank }); };
   push(RANK.header, headerLine(color(1, ' TeamAI'), [...withHost(view.host, '', false), ''], width));
 
@@ -565,26 +611,32 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
     // The ► account is always drawn; with no preview yet, the top row is the
     // best guess. The selected row stays too, so s/e/d act on something seen.
     const current = group.find((account) => account.credentialId === next?.general) ?? group[0]!;
-    const rows = group.map((account): Ranked => {
-      const saved = state.accounts[account.credentialId]; const windows = saved?.windows || {};
-      const cursor = account.credentialId === selectedId ? color(36, '>') : ' ';
-      const arrow = next?.general === account.credentialId ? color(32, '►') : next?.fable === account.credentialId ? color(35, '►') : ' ';
-      const tint = !account.enabled ? 90 : saved?.error ? 31 : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? 33 : undefined;
-      const fable = windows['7d_oi'] || Object.entries(windows).find(([name]) => name.startsWith('7d_'))?.[1];
-      const cells: Array<Reading | undefined> = provider === 'claude'
-        ? [{ label: '5h', ...pick(windows['5h']) }, { label: '7d', ...pick(windows['7d']) }, { label: 'F', ...pick(fable) }]
-        : codexWindows(state, account).map((window, slot) => window && { label: windowLabel(window.minutes, ['5h', '7d', '+'][slot]!), usage: window.usage, resetsAt: window.resetsAt });
-      const row: NarrowRow = provider === 'codex' && !cells.some(Boolean) ? { lead: `${cursor}${arrow}`, name: account.label, tint, cells, note: 'no quota data yet' } : { lead: `${cursor}${arrow}`, name: account.label, tint, cells };
-      return { text: row, rank: account === current || account.credentialId === selectedId ? RANK.current : RANK.account };
-    });
     push(RANK.provider, rule(`${provider === 'claude' ? 'Claude' : 'Codex'} ${group.length}`, width));
-    lines.push(...rows);
+    const important = new Set<string>();
+    for (const section of provider === 'claude' ? sections : [{ accounts: group }]) {
+      const title = groupSectionTitle(section, summaries);
+      if (title) lines.push({ text: color(36, `  ${title}`), rank: RANK.account, section, heading: true });
+      const rows = section.accounts.map((account): Ranked => {
+        const saved = state.accounts[account.credentialId]; const windows = saved?.windows || {};
+        const cursor = account.credentialId === selectedId ? color(36, '>') : ' ';
+        const arrow = next?.general === account.credentialId ? color(32, '►') : next?.fable === account.credentialId ? color(35, '►') : ' ';
+        const tint = !account.enabled ? 90 : saved?.error ? 31 : saved?.cooldownUntil && saved.cooldownUntil > Date.now() ? 33 : undefined;
+        const fable = windows['7d_oi'] || Object.entries(windows).find(([name]) => name.startsWith('7d_'))?.[1];
+        const cells: Array<Reading | undefined> = provider === 'claude'
+          ? [{ label: '5h', ...pick(windows['5h']) }, { label: '7d', ...pick(windows['7d']) }, { label: 'F', ...pick(fable) }]
+          : codexWindows(state, account).map((window, slot) => window && { label: windowLabel(window.minutes, ['5h', '7d', '+'][slot]!), usage: window.usage, resetsAt: window.resetsAt });
+        const row: NarrowRow = provider === 'codex' && !cells.some(Boolean) ? { lead: `${cursor}${arrow}`, name: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, tint, cells, note: 'no quota data yet' } : { lead: `${cursor}${arrow}`, name: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, tint, cells };
+        const keep = (account === current || account.credentialId === selectedId) && !important.has(account.credentialId);
+        if (keep) important.add(account.credentialId);
+        return { text: row, rank: keep ? RANK.current : RANK.account, section };
+      });
+      lines.push(...rows);
+    }
   }
 
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
   if (mode === 'credits' && view.credits) push(RANK.overlay, ...pickerLines(view.credits, width));
-  for (const line of groupStatusLines(config, state)) push(RANK.account, fit(line, width));
   if (mode === 'routes' && view.routes) push(RANK.overlay, ...routeEditorLines(view.routes, width));
   if (mode === 'help') push(RANK.overlay, ...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
 
@@ -641,8 +693,15 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   // Drop what the height cannot hold, then pad below the activity log.
   if (height !== undefined) {
     while (lines.length > height) {
-      const lowest = Math.min(...lines.map((line) => line.rank));
-      lines.splice(lines.map((line) => line.rank).lastIndexOf(lowest), 1);
+      // A section heading travels with its surviving account rows.
+      const candidates = lines.filter((line) => !line.heading);
+      const lowest = Math.min(...candidates.map((line) => line.rank));
+      const candidate = candidates.filter((line) => line.rank === lowest).at(-1)!;
+      lines.splice(lines.indexOf(candidate), 1);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i]!;
+        if (line.heading && !lines.some((row) => !row.heading && row.section === line.section)) lines.splice(i, 1);
+      }
     }
   }
   // The other-agents rule has no meaning without at least one group below it.
@@ -654,6 +713,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   }
   if (height !== undefined && lines.includes(pad)) lines.splice(lines.indexOf(pad), 1, ...Array.from({ length: height - lines.length + 1 }, () => ({ text: '', rank: 0 })));
   else if (lines.includes(pad)) lines.splice(lines.indexOf(pad), 1);
+  if (height !== undefined) while (lines.length < height) lines.splice(Math.max(0, lines.length - 1), 0, { text: '', rank: 0 });
   const rows = lines.map((line) => line.text);
   const readings = rows.filter((row): row is NarrowRow => typeof row !== 'string' && !row.note);
   const label = Math.max(2, ...readings.flatMap((row) => row.cells.map((cell) => cell ? Math.min(3, visible(cell.label)) : 0)));

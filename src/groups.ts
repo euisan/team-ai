@@ -45,7 +45,7 @@ export function claudeGroupArgs(args: string[], config: TeamAIConfig, envGroup =
 
 // Headroom is remaining account-equivalents across all known quota windows.
 // Unknown usage stays explicit instead of being counted as an empty account.
-export function groupStatusLines(config: TeamAIConfig, state: PersistedState): string[] {
+export function groupStatuses(config: TeamAIConfig, state: PersistedState) {
   const groups = parseGroups(config.groups, config.accounts);
   return Object.entries(groups).map(([name, ids]) => {
     let ready = 0; let headroom = 0; let unknown = 0;
@@ -59,6 +59,11 @@ export function groupStatusLines(config: TeamAIConfig, state: PersistedState): s
       if (remaining === null) unknown++; else if (account.enabled) headroom += remaining;
       return `${account.label} ${remaining === null ? '?' : `${Math.round(remaining * 100)}%`}${usable ? '' : ' unavailable'}`;
     });
-    return `Group ${name}: ${ready}/${ids.length} ready, headroom ${headroom.toFixed(2)} accounts${unknown ? ` + ${unknown} unknown` : ''} — ${members.join(', ')}`;
+    return { name, ids, ready, headroom, unknown, members };
   });
+}
+
+export function groupStatusLines(config: TeamAIConfig, state: PersistedState): string[] {
+  return groupStatuses(config, state).map(({ name, ids, ready, headroom, unknown, members }) =>
+    `Group ${name}: ${ready}/${ids.length} ready, headroom ${headroom.toFixed(2)} accounts${unknown ? ` + ${unknown} unknown` : ''} — ${members.join(', ')}`);
 }

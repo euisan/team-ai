@@ -291,6 +291,8 @@ The group is stored with the relay-issued session registration and durable accou
 
 After editing groups, restart the relay or apply a config reload through an account command or the dashboard. Valid group changes reload atomically with account settings. `teamai status` lists group headroom and stored session groups; dashboard Activity lines show `[group:name]`, and both dashboard layouts show per-group remaining quota. Headroom sums known remaining quota as account-equivalents across enabled members, using each member's fullest known quota window; unmeasured members are counted separately as unknown. Membership can overlap, so group totals must not be added together.
 
+In both dashboard layouts, configured groups divide the Claude account box into sections in configuration order, with ready counts and headroom in each heading. Accounts keep the current quota/config sort within each section; accounts outside every group appear last under `그룹 없음` (Ungrouped). A shared account appears in every group with `↔` before its name. Selection highlights all copies, while ↑/↓ visits each account once in order of its first appearance; actions affect that single account. Priority mode freezes the order within each section until it closes. Without groups, the dashboard is unchanged.
+
 ## Configuration
 
 Configuration and credentials live in `$TEAMAI_HOME`, falling back to

@@ -184,7 +184,7 @@ test('status headroom and wide/narrow activity show groups with redacted account
   for (const width of [72, 120]) {
     const masked = redactSnapshot(r.config, state, 'full');
     const frame = buildFrame(masked.config, masked.state, { width, selectedId: null, mode: 'normal', message: '', sortByHeadroom: false }).join('\n');
-    assert.match(frame, /Group master/); assert.match(frame, /\[group:master\]/); assert.doesNotMatch(frame, /a@example.test/);
+    assert.match(frame, /master ·/); assert.match(frame, /\[group:master\]/); assert.doesNotMatch(frame, /a@example.test/);
   }
   const events: import('../src/types.js').ActivityEvent[] = [];
   const log = new ActivityLog((event) => events.push(event)); log.start(state.active![0]!); log.update('request', { group: 'master' }); log.end('request', 200);

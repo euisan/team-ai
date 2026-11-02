@@ -22,6 +22,8 @@ Una sesión nueva elige su primera cuenta dentro del grupo con las reglas existe
 
 Tras editar, reinicie el relay o recargue la configuración mediante un comando de cuentas o el panel. Los cambios inválidos rechazan toda la recarga. `teamai status` muestra la capacidad restante por grupo y los grupos de sesiones guardadas; el panel muestra esa capacidad y `[group:name]` en Activity. La capacidad suma, en unidades de cuenta, lo restante de la ventana conocida más usada de cada miembro habilitado; las cuentas sin medir se muestran por separado. No sume totales de grupos con miembros compartidos. Consulte el [README inglés](README.md#claude-account-groups) para los detalles.
 
+En ambos diseños del panel, el recuadro de cuentas Claude se divide en grupos según el orden de configuración, con cuentas disponibles y capacidad restante en cada encabezado. Cada sección conserva el orden actual por cuota/configuración; las cuentas sin grupo aparecen al final bajo `그룹 없음`. Una cuenta compartida aparece en todos sus grupos con `↔` delante del nombre. La selección resalta todas las copias; ↑/↓ visita cada cuenta una sola vez según su primera aparición y las acciones afectan a esa misma cuenta. La edición de prioridad mantiene fijo el orden dentro de cada sección. Sin grupos, el panel no cambia.
+
 
 ## Requisitos
 
