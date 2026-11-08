@@ -8,7 +8,7 @@ import { applyRoutes, describeReload } from './route-config.js';
 import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-editor.js';
 import { groupEditorKey, openGroupEditor, type GroupEditor } from './group-editor.js';
 import { liveState } from './runtime.js';
-import { loadConfig, loadState, removeAccount, updateConfig, upsertAccount } from './storage.js';
+import { clearSessionGroups, loadConfig, loadSessions, loadState, removeAccount, renameSessionGroup, updateConfig, upsertAccount } from './storage.js';
 import type { ResetCredit, StoredAccount } from './types.js';
 
 export async function runTui(): Promise<void> {
@@ -220,7 +220,14 @@ export async function pressGroupKey(editor: GroupEditor, key: string, onSaving: 
   if (result.close) return undefined;
   if (!result.save) return result.editor;
   const save = result.save; await onSaving(result.editor);
+  if (save.session?.type === 'remove-members') {
+    const sessions = await loadSessions();
+    const blocked = save.session.removals.find((removal) => Object.values(sessions).some((binding) => binding.provider === 'claude' && binding.group === removal.group && binding.accountId === removal.accountId));
+    if (blocked) return { ...editor, error: `Cannot remove ${blocked.accountId} from ${blocked.group}: a bound Claude session still uses this account` };
+  }
   await updateConfig((config) => { config.groups = Object.keys(save.groups).length ? save.groups : {}; });
+  if (save.session?.type === 'delete') await clearSessionGroups(new Set([save.session.name]));
+  if (save.session?.type === 'rename') await renameSessionGroup(save.session.from, save.session.to);
   await applyChange(save.notice);
   return openGroupEditor(await loadConfig(), save.focus, save.notice);
 }

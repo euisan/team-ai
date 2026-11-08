@@ -13,9 +13,15 @@ export interface GroupEditor {
   rename?: string;
   error?: string;
   notice?: string;
+  pendingRemovals?: Array<{ group: string; accountId: string }>;
 }
 
-export interface GroupSave { groups: AccountGroups; focus: string | null; notice: string }
+export interface GroupSave {
+  groups: AccountGroups;
+  focus: string | null;
+  notice: string;
+  session?: { type: 'delete'; name: string } | { type: 'rename'; from: string; to: string } | { type: 'remove-members'; removals: Array<{ group: string; accountId: string }> };
+}
 
 const UP = new Set(['\x1b[A', 'k']);
 const DOWN = new Set(['\x1b[B', 'j']);
@@ -48,12 +54,12 @@ function validate(editor: GroupEditor, groups: AccountGroups): string | undefine
   try { parseGroups(groups, editor.accounts); return undefined; } catch (error) { return (error as Error).message; }
 }
 
-function saveEditor(editor: GroupEditor, groups: AccountGroups, notice: string, focus: string | null = currentGroup(editor)): { editor: GroupEditor; save?: GroupSave } {
+function saveEditor(editor: GroupEditor, groups: AccountGroups, notice: string, focus: string | null = currentGroup(editor), session?: GroupSave['session']): { editor: GroupEditor; save?: GroupSave } {
   const stored: AccountGroups = Object.fromEntries(Object.entries(groups).map(([name, members]) => [name, [...members]]));
   const error = validate(editor, stored);
   if (error) return { editor: { ...editor, error } };
   const next = openGroupEditor({ accounts: editor.accounts, groups: stored }, focus, notice);
-  return { editor: next, save: { groups: stored, focus, notice } };
+  return { editor: next, save: { groups: stored, focus, notice, ...(session ? { session } : {}) } };
 }
 
 export function groupEditorKey(editor: GroupEditor, key: string): { editor: GroupEditor; save?: GroupSave; close?: boolean } {
@@ -62,7 +68,7 @@ export function groupEditorKey(editor: GroupEditor, key: string): { editor: Grou
     if ((key === 'y' || key === '\r') && name) {
       const groups: AccountGroups = Object.fromEntries(Object.entries(editor.groups).filter(([group]) => group !== name).map(([group, members]) => [group, [...members]]));
       const list = Object.keys(groups); const focus = list[Math.min(editor.index, list.length - 1)] ?? null;
-      return saveEditor(editor, groups, `Deleted group ${name}`, focus);
+      return saveEditor(editor, groups, `Deleted group ${name}`, focus, { type: 'delete', name });
     }
     if (key === 'n' || key === '\x1b') return { editor: { ...editor, phase: 'list', notice: 'Delete cancelled', error: undefined } };
     return { editor };
@@ -76,6 +82,7 @@ export function groupEditorKey(editor: GroupEditor, key: string): { editor: Grou
     }
     const name = (editor.draft ?? '').trim();
     const old = editor.rename;
+    if (old && name !== old && Object.hasOwn(editor.groups, name)) return { editor: { ...editor, error: `Group ${name} already exists` } };
     const groups: AccountGroups = Object.create(null);
     for (const [group, members] of Object.entries(editor.groups)) groups[group === old ? name : group] = [...members];
     if (!old) {
@@ -85,7 +92,7 @@ export function groupEditorKey(editor: GroupEditor, key: string): { editor: Grou
     }
     const error = !name ? 'Group name is required' : validate(editor, groups);
     if (error) return { editor: { ...editor, error } };
-    return saveEditor(editor, groups, `${old ? 'Renamed' : 'Created'} group ${name}`, name);
+    return saveEditor(editor, groups, `${old ? 'Renamed' : 'Created'} group ${name}`, name, old && old !== name ? { type: 'rename', from: old, to: name } : undefined);
   }
 
   if (editor.phase === 'members') {
@@ -100,12 +107,17 @@ export function groupEditorKey(editor: GroupEditor, key: string): { editor: Grou
       const groups: AccountGroups = Object.fromEntries(Object.entries(editor.groups).map(([group, members]) => [group, [...members]]));
       const list = groups[name] ?? []; const existing = accountMember(editor, name, account);
       if (existing && list.length <= 1) return { editor: { ...editor, error: `Group ${name} must keep at least one account; delete the group instead` } };
-      groups[name] = existing ? list.filter((ref) => ref !== account.id && ref !== account.label) : [...list, account.label];
-      return { editor: { ...editor, groups, error: undefined } };
+      const removing = existing;
+      groups[name] = removing ? list.filter((ref) => ref !== account.id && ref !== account.label) : [...list, account.label];
+      const previous = editor.pendingRemovals ?? [];
+      const pendingRemovals = removing
+        ? [...previous.filter((entry) => !(entry.group === name && entry.accountId === account.id)), { group: name, accountId: account.id }]
+        : previous.filter((entry) => !(entry.group === name && entry.accountId === account.id));
+      return { editor: { ...editor, groups, error: undefined, pendingRemovals: pendingRemovals.length ? pendingRemovals : undefined } };
     }
     if (key === '\r') {
       const name = currentGroup(editor); if (!name) return { editor: { ...editor, phase: 'list' } };
-      return saveEditor(editor, editor.groups, `Updated group ${name}`);
+      return saveEditor(editor, editor.groups, `Updated group ${name}`, name, editor.pendingRemovals?.length ? { type: 'remove-members', removals: editor.pendingRemovals } : undefined);
     }
     return { editor };
   }
@@ -118,7 +130,7 @@ export function groupEditorKey(editor: GroupEditor, key: string): { editor: Grou
   if (key === 'a') return { editor: { ...editor, phase: 'name', draft: '', rename: undefined, error: undefined, notice: undefined } };
   if ((key === 'e' || key === '\r') && list[editor.index]) return { editor: { ...editor, phase: 'name', draft: list[editor.index]!, rename: list[editor.index], error: undefined, notice: undefined } };
   if (key === 'd' && list[editor.index]) return { editor: { ...editor, phase: 'delete', error: undefined, notice: undefined } };
-  if ((key === 'm' || key === ' ') && list[editor.index]) return { editor: { ...editor, phase: 'members', accountIndex: Math.max(0, editor.accounts.findIndex((account) => account.provider === 'claude')), error: undefined, notice: undefined } };
+  if ((key === 'm' || key === ' ') && list[editor.index]) return { editor: { ...editor, phase: 'members', accountIndex: editor.accountIndex < editor.accounts.length ? editor.accountIndex : Math.max(0, editor.accounts.findIndex((account) => account.provider === 'claude')), error: undefined, notice: undefined } };
   return { editor };
 }
 
