@@ -516,31 +516,38 @@ interface NarrowRow { lead: string; name: string; tint?: number; cells: Array<Re
 // A section rule that doubles as the column header: the window names sit on
 // the right of the rule, over the figures, so the section costs no extra row.
 interface NarrowRule { title: string; short?: string; labels: string[] }
-interface NarrowLayout { name: number; gauge: number; cells: number; reset: boolean }
+// `stacked` is the two-line account row: the figures on the first line and
+// each window's reset time on a second one, directly below its own column. A
+// terminal too short for that keeps the older one-line row with a single
+// reset column on the right (`reset`).
+interface NarrowLayout { name: number; gauge: number; cells: number; reset: boolean; stacked: boolean }
 const RESET_WIDTH = 5;
-// A reset time in at most five columns: 59m, 2h10m, 23h, 3d8h, 13d.
-function shortDuration(reset: number | null | undefined): string {
-  const text = duration(reset); return text.length <= RESET_WIDTH ? text : text.replace(/^(\d+[hd]).*$/, '$1');
+// A reset time in at most `width` columns (five by default): 59m, 2h10m, 23h,
+// 3d8h, 13d. A narrow gauge field takes the leading span only ("2h").
+function shortDuration(reset: number | null | undefined, width = RESET_WIDTH): string {
+  const text = duration(reset); return text.length <= width ? text : text.replace(/^(\d+[hd]).*$/, '$1').slice(0, width);
 }
 
 // The richest row that still leaves the name 14 columns. The old table spent
 // 1+label+1 on every cell; with the names moved to the section rule that
 // width goes to the gauges and the name instead, so 40 columns now draws three
 // bars where the repeated labels used to force two bare percentages, and the
-// account label keeps more of itself at the same time. The third window
-// (Claude's Fable week, a 30-day limit) goes before the reset time, then the
-// name takes what is left. One layout for the whole frame, so every panel's
-// numbers line up.
-function narrowLayout(width: number, needed: number): NarrowLayout {
+// account label keeps more of itself at the same time. The two-line layout
+// needs no reset column: its width goes to the gauges and the name. The third
+// window (Claude's Fable week, a 30-day limit) goes before the name. One
+// layout for the whole frame, so every panel's numbers line up.
+function narrowLayout(width: number, needed: number, stacked: boolean): NarrowLayout {
   const cellWidth = (gauge: number): number => 1 + Math.max(4, gauge);
-  const tries: Array<[number, number, boolean]> = [[10, 3, true], [8, 3, true], [6, 3, true], [4, 3, true], [0, 3, true], [0, 2, true], [0, 2, false]];
+  const tries: Array<[number, number, boolean]> = stacked
+    ? [[10, 3, false], [8, 3, false], [6, 3, false], [4, 3, false], [0, 3, false], [0, 2, false]]
+    : [[10, 3, true], [8, 3, true], [6, 3, true], [4, 3, true], [0, 3, true], [0, 2, true], [0, 2, false]];
   for (const [gauge, cells, reset] of tries) {
     const shown = Math.min(cells, needed);
     const name = width - 2 - shown * cellWidth(gauge) - (reset ? 1 + RESET_WIDTH : 0);
-    if (name >= 14) return { name, gauge, cells: shown, reset };
+    if (name >= 14) return { name, gauge, cells: shown, reset, stacked };
   }
   const cells = Math.min(2, needed);
-  return { name: Math.max(1, width - 2 - cells * cellWidth(0)), gauge: 0, cells, reset: false };
+  return { name: Math.max(1, width - 2 - cells * cellWidth(0)), gauge: 0, cells, reset: false, stacked };
 }
 
 function narrowValue(reading: Reading, gauge: number): string {
@@ -567,6 +574,29 @@ function narrowRow(layout: NarrowLayout, row: NarrowRow): string {
     out += ` ${fit(color(90, binding ? shortDuration(binding.resetsAt) : ''), RESET_WIDTH)}`;
   }
   return out;
+}
+
+// A row gets the second line only when at least one of its windows still has
+// a reset ahead; a row with no figures, or with figures whose windows have
+// already reset, keeps its single line.
+function hasReset(row: NarrowRow): boolean {
+  return !row.note && row.cells.some((cell) => cell?.resetsAt != null && cell.resetsAt > Date.now());
+}
+
+// The second line of a stacked row: each window's reset time under its own
+// gauge, in the same columns, so the bar above and the time below read as one
+// cell. A window without a reset leaves its field blank. The whole line is
+// dim: it belongs to the account row above it, not to a row of its own.
+function narrowResetRow(layout: NarrowLayout, row: NarrowRow): string | null {
+  if (!layout.stacked || !hasReset(row)) return null;
+  const field = Math.max(4, layout.gauge);
+  let out = ' '.repeat(2 + layout.name);
+  for (let i = 0; i < layout.cells; i++) {
+    const cell = row.cells[i];
+    const time = cell ? shortDuration(cell.resetsAt, field) : '';
+    out += ` ${' '.repeat(Math.max(0, field - time.length))}${time}`;
+  }
+  return color(90, out);
 }
 
 const rule = (title: string, width: number): string => { const head = visible(`─ ${title} `) > width ? fit(`─ ${title} `, width) : `─ ${title} `; return color(36, `${head}${'─'.repeat(Math.max(0, width - visible(head)))}`); };
@@ -646,6 +676,9 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   const sections = claudeSections(config, ordered); const shared = sharedAccounts(sections);
   const summaries = groupStatuses(config, state);
   const lines: Ranked[] = []; const push = (rank: number, ...texts: Array<string | NarrowRow | NarrowRule>): void => { for (const text of texts) lines.push({ text, rank }); };
+  // How many rows the account list itself would take with the second lines,
+  // used to decide whether this terminal is tall enough for them.
+  let accountPhysical = 0;
   push(RANK.header, headerLine(color(1, ' TeamAI'), [...withHost(view.host, '', false), ''], width));
 
   for (const provider of ['claude', 'codex'] as const) {
@@ -666,10 +699,11 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
     // best guess. The selected row stays too, so s/e/d act on something seen.
     const current = group.find((account) => account.credentialId === next?.general) ?? group[0]!;
     push(RANK.provider, { title: `${provider === 'claude' ? 'Claude' : 'Codex'} ${group.length}`, labels });
+    accountPhysical += 1;
     const important = new Set<string>();
     for (const section of provider === 'claude' ? sections : [{ accounts: group }]) {
       const title = groupSectionTitle(section, summaries);
-      if (title) lines.push({ text: color(36, `  ${title}`), rank: RANK.account, section, heading: true });
+      if (title) { lines.push({ text: color(36, `  ${title}`), rank: RANK.account, section, heading: true }); accountPhysical += 1; }
       const rows = section.accounts.map((account): Ranked => {
         const saved = state.accounts[account.credentialId]; const windows = saved?.windows || {};
         const cursor = account.credentialId === selectedId ? color(36, '>') : ' ';
@@ -682,6 +716,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
         const row: NarrowRow = provider === 'codex' && !cells.some(Boolean) ? { lead: `${cursor}${arrow}`, name: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, tint, cells, note: 'no quota data yet' } : { lead: `${cursor}${arrow}`, name: `${shared.has(account.credentialId) ? '↔ ' : ''}${account.label}`, tint, cells };
         const keep = (account === current || account.credentialId === selectedId) && !important.has(account.credentialId);
         if (keep) important.add(account.credentialId);
+        accountPhysical += hasReset(row) ? 2 : 1;
         return { text: row, rank: keep ? RANK.current : RANK.account, section };
       });
       lines.push(...rows);
@@ -690,10 +725,12 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
 
   // 't' only does something on a Codex row, so it is only offered there.
   const codexSelected = accounts.some((account) => account.credentialId === selectedId && account.provider === 'codex');
-  if (mode === 'credits' && view.credits) push(RANK.overlay, ...pickerLines(view.credits, width));
-  if (mode === 'routes' && view.routes) push(RANK.overlay, ...routeEditorLines(view.routes, width));
-  if (mode === 'groups' && view.groups) push(RANK.overlay, ...groupEditorLines(view.groups, width));
-  if (mode === 'help') push(RANK.overlay, ...helpLines(normalKeys(codexSelected, sortByHeadroom), width));
+  let overlayPhysical = 0;
+  const overlay = (texts: string[]): void => { overlayPhysical += texts.length; push(RANK.overlay, ...texts); };
+  if (mode === 'credits' && view.credits) overlay(pickerLines(view.credits, width));
+  if (mode === 'routes' && view.routes) overlay(routeEditorLines(view.routes, width));
+  if (mode === 'groups' && view.groups) overlay(groupEditorLines(view.groups, width));
+  if (mode === 'help') overlay(helpLines(normalKeys(codexSelected, sortByHeadroom), width));
 
   // Other agents: one line per usage group under one rule, a provider's
   // groups kept or dropped together. The group names (Gemini …, OpenCode Go,
@@ -729,8 +766,6 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   push(RANK.activityTitle, rule(`Activity${active.length ? ` ${active.length} active` : ''}`, width));
   const log = narrowActivity(active, state.events || [], height === undefined ? 8 : Math.max(0, height), width, config.activity?.sessionIds !== false);
   log.forEach((line, i) => push(i < 2 ? RANK.activity : RANK.log, line));
-  // Where blank lines go when the log is shorter than the screen.
-  const pad: Ranked = { text: '', rank: 0 }; lines.push(pad);
 
   // Keys: in the normal screen what fits, with '?' for the rest; in any
   // other mode the hints that fit, the rest above the footer.
@@ -755,9 +790,24 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   if (message) push(RANK.message, ` ${message}`);
   push(RANK.footer, footer);
 
-  // Drop what the height cannot hold, then pad below the activity log.
+  // The second line is taken only when the terminal can hold the whole
+  // account list with it: the provider rules, group headings and one or two
+  // lines per account, plus the header, the Activity rule, the footer, and
+  // anything open above them (an editor, a footer message). A shorter screen
+  // falls back to one line per account with the single reset column, so the
+  // list still fits. A capture has no height and always takes two lines.
+  const stacked = height === undefined || accountPhysical + 3 + overlayPhysical + (message ? 1 : 0) <= height;
+
+  const isRule = (row: string | NarrowRow | NarrowRule): row is NarrowRule => typeof row !== 'string' && 'labels' in row;
+  const isRow = (line: Ranked): line is Ranked & { text: NarrowRow } => typeof line.text !== 'string' && !isRule(line.text);
+  // A stacked account row with a reset time is two lines on screen; every
+  // other entry is one. Trimming and padding work on these counts, so a row
+  // and the reset line under it are always kept or dropped together.
+  const physical = (items: Ranked[]): number => items.reduce((count, line) => count + (stacked && isRow(line) && hasReset(line.text) ? 2 : 1), 0);
+
+  // Drop what the height cannot hold.
   if (height !== undefined) {
-    while (lines.length > height) {
+    while (physical(lines) > height) {
       // A section heading travels with its surviving account rows.
       const candidates = lines.filter((line) => !line.heading);
       const lowest = Math.min(...candidates.map((line) => line.rank));
@@ -776,15 +826,22 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
     const index = lines.indexOf(otherAgentsRule);
     if (index >= 0) lines.splice(index, 1);
   }
-  if (height !== undefined && lines.includes(pad)) lines.splice(lines.indexOf(pad), 1, ...Array.from({ length: height - lines.length + 1 }, () => ({ text: '', rank: 0 })));
-  else if (lines.includes(pad)) lines.splice(lines.indexOf(pad), 1);
-  if (height !== undefined) while (lines.length < height) lines.splice(Math.max(0, lines.length - 1), 0, { text: '', rank: 0 });
+  // Blank rows below the activity log fill the rest of the screen, above the
+  // footer.
+  if (height !== undefined) while (physical(lines) < height) lines.splice(Math.max(0, lines.length - 1), 0, { text: '', rank: 0 });
+
   const rows = lines.map((line) => line.text);
-  const isRule = (row: string | NarrowRow | NarrowRule): row is NarrowRule => typeof row !== 'string' && 'labels' in row;
   const readings = rows.filter((row): row is NarrowRow => typeof row !== 'string' && !isRule(row) && !row.note);
   const needed = Math.max(1, ...readings.map((row) => row.cells.reduce((last, cell, i) => cell ? i + 1 : last, 0)));
-  const layout = narrowLayout(width, needed);
-  const drawn = rows.map((row) => typeof row === 'string' ? row : isRule(row) ? narrowRule(layout, row, width) : narrowRow(layout, row));
+  const layout = narrowLayout(width, needed, stacked);
+  const drawn: string[] = [];
+  for (const row of rows) {
+    if (typeof row === 'string') { drawn.push(row); continue; }
+    if (isRule(row)) { drawn.push(narrowRule(layout, row, width)); continue; }
+    drawn.push(narrowRow(layout, row));
+    const resetLine = narrowResetRow(layout, row);
+    if (resetLine) drawn.push(resetLine);
+  }
   return drawn.map((line) => fit(line, width));
 }
 
