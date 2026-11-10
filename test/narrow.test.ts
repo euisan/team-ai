@@ -71,25 +71,37 @@ test('the narrow layout gives each account its figures, with every window\'s res
   }
 });
 
-test('each reset time starts under its own window column', () => {
+test('each reset time ends in the same column as its window figure and the header name', () => {
   for (const width of [40, 46, 56, 72]) {
     const text = plain(frame(width, { height: 40 }));
-    const end = (row: string, needle: string): number => cellWidth(row.slice(0, row.indexOf(needle) + needle.length));
-    const at = (needle: string): number => text.findIndex((row) => row.includes(needle));
-    const aliceReset = text[at('alice') + 1]!; const carolReset = text[at('carol@') + 1]!;
-    const d1Reset = text[at('d1fp9a@') + 1]!; const grokReset = text[at('Grok') + 1]!;
-    // Different-length reset times end at the same column of the same gauge:
-    // 2h10m/2h in the session gauge, 3d/4d/6d/3d8h in the weekly one.
-    assert.equal(end(aliceReset, '2h10m'), end(carolReset, '2h'), `${width}: session resets in one column`);
-    assert.equal(end(aliceReset, '3d'), end(carolReset, '4d'), `${width}: weekly resets in one column`);
-    assert.equal(end(aliceReset, '3d'), end(d1Reset, '6d'), `${width}: a lone weekly reset keeps the weekly column`);
-    assert.equal(end(aliceReset, '3d'), end(grokReset, '3d8h'), `${width}: other agents share the same cell columns`);
-    // The second line is under the gapless figure area, not under the name,
-    // and its last field ends at the terminal edge exactly like the gauges
-    // above: shifted left or right it would be short or cut with an ellipsis.
-    assert.ok(aliceReset.indexOf('2h10m') > 19, `${width}: the reset time is below a gauge, not the account name`);
-    assert.equal(cellWidth(aliceReset.trimEnd()), width, `${width}: the last window's reset ends at the frame edge`);
-    assert.doesNotMatch(aliceReset.trimEnd(), /…$/, `${width}: the reset line is not cut`);
+    // End columns (1-based, terminal cells) of a list of strings, found in
+    // order. A wide (two-cell) Korean name before them must not shift these.
+    const ends = (line: string, needles: string[]): number[] => {
+      let from = 0;
+      return needles.map((needle) => { const at = line.indexOf(needle, from); from = at + needle.length; return cellWidth(line.slice(0, at + needle.length)); });
+    };
+    const at = (needle: string): number => text.findIndex((line) => line.includes(needle));
+    // The fixture keeps every reset under the window it belongs to. The
+    // header names are compared too, so a figure and its reset must end in the
+    // same column as the window name above them.
+    const rows: Array<{ name: string; header: string; labels: string[]; figures: string[]; resets: string[] }> = [
+      { name: '김철수', header: '─ Claude', labels: ['5h', '7d', 'F'], figures: ['93%', '20%', '10%'], resets: ['1h', '5d', '5d'] },
+      { name: 'alice', header: '─ Claude', labels: ['5h', '7d', 'F'], figures: ['62%', '84%', '35%'], resets: ['2h10m', '3d', '3d'] },
+      { name: 'carol@', header: '─ Codex', labels: ['5h', '7d'], figures: ['30%', '75%'], resets: ['2h', '4d'] },
+      { name: 'd1fp9a', header: '─ Codex', labels: ['5h', '7d'], figures: ['10%'], resets: ['6d'] },
+      { name: 'Gemini', header: '─ Other', labels: ['5h', '7d'], figures: ['20%', '55%'], resets: ['3d8h', '3d8h'] },
+      { name: 'Grok', header: '─ Other', labels: ['5h', '7d'], figures: ['25%'], resets: ['3d8h'] },
+      { name: 'OpenCode', header: '─ Other', labels: ['5h', '7d', '30d'], figures: ['5%', '33%', '71%'], resets: ['3d8h', '3d8h', '3d8h'] },
+    ];
+    for (const row of rows) {
+      const index = at(row.name);
+      const figureEnds = ends(text[index]!, row.figures);
+      const resetEnds = ends(text[index + 1]!, row.resets);
+      const headerEnds = ends(text[at(row.header)]!, row.labels);
+      assert.deepEqual(resetEnds, figureEnds, `${width} ${row.name}: each reset ends under its figure`);
+      for (const end of figureEnds) assert.ok(headerEnds.includes(end), `${width} ${row.name}: the figure ends under its header name (${end} not in ${headerEnds})`);
+      assert.doesNotMatch(text[index + 1]!, /…/, `${width} ${row.name}: no reset time is cut`);
+    }
   }
 });
 

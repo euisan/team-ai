@@ -24,10 +24,13 @@ function duration(reset: number | null | undefined): string {
   return `${Math.floor(hours / 24)}d${hours % 24 ? `${hours % 24}h` : ''}`;
 }
 
-function bar(usage: number | null | undefined, reset: number | null | undefined, width: number): string {
+// `align` is how the label sits inside the bar. The wide layout centres it in
+// the gauge; the narrow layout right-aligns it so the figure, the window name
+// above it and the reset time below it all end in one column.
+function bar(usage: number | null | undefined, reset: number | null | undefined, width: number, align: 'center' | 'right' = 'center'): string {
   const remaining = duration(reset); const ratio = usage == null ? null : Math.max(0, Math.min(1, usage));
   const label = ratio == null ? (remaining || '-') : `${Math.round(ratio * 100)}%${remaining && `${Math.round(ratio * 100)}% ${remaining}`.length <= width ? ` ${remaining}` : ''}`;
-  const text = label.slice(0, width).padStart(Math.floor((width + label.length) / 2)).padEnd(width);
+  const text = align === 'right' ? label.slice(0, width).padStart(width) : label.slice(0, width).padStart(Math.floor((width + label.length) / 2)).padEnd(width);
   if (ratio == null) return `${ESC}100;37m${text}${RESET}`;
   const filled = Math.round(ratio * width); const bg = ratio >= 0.9 ? 41 : ratio >= 0.7 ? 43 : 42;
   return `${ESC}${bg};97m${text.slice(0, filled)}${ESC}100;37m${text.slice(filled)}${RESET}`;
@@ -551,7 +554,7 @@ function narrowLayout(width: number, needed: number, stacked: boolean): NarrowLa
 }
 
 function narrowValue(reading: Reading, gauge: number): string {
-  if (gauge) return bar(reading.usage, null, gauge);
+  if (gauge) return bar(reading.usage, null, gauge, 'right');
   if (reading.usage == null) return color(90, '   -');
   const ratio = Math.max(0, Math.min(1, reading.usage));
   return color(ratio >= 0.9 ? 31 : ratio >= 0.7 ? 33 : 32, `${Math.round(ratio * 100)}%`.padStart(4));
@@ -601,9 +604,11 @@ function narrowResetRow(layout: NarrowLayout, row: NarrowRow): string | null {
 
 const rule = (title: string, width: number): string => { const head = visible(`─ ${title} `) > width ? fit(`─ ${title} `, width) : `─ ${title} `; return color(36, `${head}${'─'.repeat(Math.max(0, width - visible(head)))}`); };
 
-function center(text: string, width: number): string {
-  const label = text.slice(0, width); const pad = Math.max(0, Math.floor((width - visible(label)) / 2));
-  return fit(`${' '.repeat(pad)}${label}`, width);
+// Right-align a window name in its gauge field, so its last column is the
+// same one the figure and the reset time end in.
+function right(text: string, width: number): string {
+  const label = text.slice(0, width);
+  return fit(`${' '.repeat(Math.max(0, width - visible(label)))}${label}`, width);
 }
 
 // The section rule doubles as the column header. Its left side stays the name
@@ -619,7 +624,7 @@ function narrowRule(layout: NarrowLayout, marker: NarrowRule, width: number): st
   if (visible(head(title)) > prefix) title = marker.short ?? title;
   if (visible(head(title)) > prefix) return rule(marker.title, width);
   let out = color(36, `${head(title)}${'─'.repeat(Math.max(0, prefix - visible(head(title))))}`);
-  for (let i = 0; i < layout.cells; i++) out += color(90, ` ${center(labels[i] ?? '', field)}`);
+  for (let i = 0; i < layout.cells; i++) out += color(90, ` ${right(labels[i] ?? '', field)}`);
   if (layout.reset) out += color(90, ` ${fit('reset', RESET_WIDTH)}`);
   return fit(out, width);
 }
