@@ -102,6 +102,23 @@ test('an activity entry is one line: time, session, provider, status, account', 
   }
 });
 
+test('the activity log shortens an address that does not fit to its local part, and leaves a fitting one whole', () => {
+  const event = (account: string) => ({ at: Date.now() - 60_000, message: '', request: {
+    provider: 'claude' as const, providerLabel: 'Claude', method: 'POST', path: '/v1/messages',
+    account, status: 200, durationMs: 4200, sessionId: 'ac88d9e1',
+  } });
+  // Time, session and status take 20 columns before the account at these
+  // widths: 49 leaves room for the 18-column local part but not the 30-column
+  // address, 50 fits the whole address exactly. The unfitted local part keeps
+  // the account name instead of cutting the address at the terminal edge.
+  const draw = (account: string, width: number): string => plain(buildFrame(config, { ...state, active: [], events: [event(account)] }, view(width))).find((text) => text.includes('ac88d9'))!;
+  assert.match(draw('alice.long.address@example.com', 49), /ac88d9 C 200 alice\.long\.address\s*$/);
+  assert.doesNotMatch(draw('alice.long.address@example.com', 49), /@/);
+  assert.match(draw('alice.long.address@example.com', 50), /ac88d9 C 200 alice\.long\.address@example\.com\s*$/);
+  // No address to shorten: the label is drawn as it is.
+  assert.match(draw('plainaccount', 49), /ac88d9 C 200 plainaccount\s*$/);
+});
+
 test('the activity log takes the rows that are left', () => {
   const count = (lines: string[]): number => lines.filter((text) => /^.\d\d:\d\d /.test(text)).length;
   assert.equal(count(plain(frame(46, { height: 24 }))), 5, 'all five entries in 24 rows');
