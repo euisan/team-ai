@@ -112,6 +112,12 @@ export function usageLayout(width: number, marks = 0, fields: number[] = []): Us
 // `marks + 2` columns; then account, plan, state and order.
 export interface AccountIdentity { lead: string; account: string; plan: string; state: string; order: string }
 
+// The lead field's width, and the zero-based column where the account name
+// starts after it. Lines drawn under a row (the reset-credit sublist) align
+// against that column, so they read as belonging to the row above.
+export const identityLeadWidth = (layout: UsageLayout): number => layout.marks + 2;
+export const identityNameColumn = (layout: UsageLayout): number => identityLeadWidth(layout) + 1;
+
 // One row of the grid, kept as parts until every panel is collected, because
 // the account column's width depends on the widest tail in the whole frame.
 // `cells` holds a gauge (or a column title) per slot, or nothing for a blank
@@ -131,7 +137,7 @@ export interface GridRow {
 export function renderRow(layout: UsageLayout, row: GridRow): string {
   const { identity, cells } = row;
   let out = typeof identity === 'string' ? fit(identity, layout.id)
-    : `${fit(identity.lead, layout.marks + 2)} ${fit(identity.account, layout.account)} ${fit(identity.plan, PLAN_WIDTH)} ${fit(identity.state, STATE_WIDTH)} ${fit(identity.order, ORDER_WIDTH)}`;
+    : `${fit(identity.lead, identityLeadWidth(layout))} ${fit(identity.account, layout.account)} ${fit(identity.plan, PLAN_WIDTH)} ${fit(identity.state, STATE_WIDTH)} ${fit(identity.order, ORDER_WIDTH)}`;
   if (typeof cells === 'string') out += ` ${fit(cells, SLOTS * (layout.gauge + 1) - 1)}`;
   else for (let i = 0; i < SLOTS; i++) out += `${row.gaps?.[i] || ' '}${fit(cells[i] ?? '', layout.gauge)}`;
   const tail = layout.fields.flatMap((field, i) => field > 0 ? [fit(row.tail?.[i] ?? '', field)] : []).join(' ');

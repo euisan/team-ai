@@ -63,6 +63,21 @@ test('none keeps labels for a private capture', async () => {
   } finally { delete process.env.TEAMAI_HOME; }
 });
 
+test('a capture from the credit picker keeps the ticket sublist under its account', async () => {
+  const root = await seedHome(); process.env.TEAMAI_HOME = root;
+  try {
+    const result = await captureDashboard({
+      level: 'partial', width: 120, mode: 'credits', selectedId: 'cred-alice.long.address@example.com',
+      credits: { account: 'alice.long.address@example.com', phase: 'confirm', index: 0, items: [{ title: 'Ticket Alpha', grantedAt: null, expiresAt: null }] },
+    });
+    const text = await readFile(result.text, 'utf8');
+    const plain = text.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '');
+    assert.match(plain, /^ {6}>Ticket Alpha/m, 'the ticket sits four columns inside the masked account name');
+    assert.equal(plain.includes('alice.long.address'), false);
+    assert.match(plain, /Reset al•+s@ex•+\.com's usage with this credit\?/);
+  } finally { delete process.env.TEAMAI_HOME; }
+});
+
 test('a capture taken at a narrow width is the narrow layout the terminal shows', async () => {
   const root = await seedHome(); process.env.TEAMAI_HOME = root;
   try {

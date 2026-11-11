@@ -1,0 +1,2 @@
+>  c1@example.com           OAuth      active   auto        20%              10%               -         unmeasured
+       Failed to load credits: connection refused

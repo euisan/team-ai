@@ -4,7 +4,7 @@
 // frame builder — so a script can take a capture as easily as a keypress can.
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { buildFrame, displayOrder, orderOptions, type FrameMode } from './frame.js';
+import { buildFrame, displayOrder, orderOptions, type CreditPicker, type FrameMode } from './frame.js';
 import { measureHost } from './host-metrics.js';
 import { renderFrame } from './png.js';
 import { liveState } from './runtime.js';
@@ -19,6 +19,9 @@ export interface CaptureOptions {
   // the image shows the same cursor, mode and footer message as the screen.
   selectedId?: string | null;
   mode?: FrameMode;
+  // An open reset-credit picker, so a capture taken from that screen shows the
+  // ticket sublist under the selected row.
+  credits?: CreditPicker;
   message?: string;
   sortByHeadroom?: boolean;
   // The order priority mode is holding, so a capture taken from that screen
@@ -42,12 +45,21 @@ export async function captureDashboard(options: CaptureOptions): Promise<Capture
   const width = Math.max(40, options.width ?? 120);
   const selectedId = options.selectedId ?? displayOrder(config.accounts, state, sortByHeadroom, orderOptions(config))[0]?.credentialId ?? null;
   // The footer message may name an account ("Added …"), so it goes through
-  // the same mask as everything else.
-  const message = redactor(rawConfig.accounts, options.level)(options.message ?? '');
+  // the same mask as everything else. The picker's own free text (its account
+  // name, ticket titles, errors) is masked for the same reason.
+  const mask = redactor(rawConfig.accounts, options.level);
+  const message = mask(options.message ?? '');
+  const credits = options.credits && {
+    ...options.credits,
+    account: mask(options.credits.account),
+    items: options.credits.items.map((item) => ({ ...item, title: item.title === null ? null : mask(item.title), unavailableReason: item.unavailableReason ? mask(item.unavailableReason) : item.unavailableReason })),
+    ...(options.credits.result !== undefined ? { result: mask(options.credits.result) } : {}),
+    ...(options.credits.error !== undefined ? { error: mask(options.credits.error) } : {}),
+  };
   // The host's own load is no account data, so it needs no mask; a quarter
   // second between two snapshots gives the header a measured CPU%.
   const host = await measureHost();
-  const lines = buildFrame(config, state, { width, selectedId, mode: options.mode ?? 'normal', message, sortByHeadroom, frozen: options.frozen, host });
+  const lines = buildFrame(config, state, { width, selectedId, mode: options.mode ?? 'normal', message, sortByHeadroom, frozen: options.frozen, credits, host });
   const dir = options.outDir ?? join(dataDir(), 'captures');
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const name = `teamai-${stamp(new Date())}`; const body = `${lines.join('\n')}\n`; const image = renderFrame(lines);

@@ -1,0 +1,2 @@
+> c1@example.com                   20%        10%          -
+      Failed to load credits: connection refused
