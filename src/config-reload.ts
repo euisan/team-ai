@@ -94,7 +94,7 @@ export async function reloadPools(pools: AccountPool[], running: TeamAIConfig, h
     pool.setGroups(groups);
     pool.balance = balance;
     pool.codexCapacity = capacity;
-    pool.resetCredits = resetCreditSettings(config);
+    if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);
     result.routes[pool.provider.id] = routes[index]!.length;
     result.warnings.push(...pool.setRoutes(routes[index]!).map((warning) => `${pool.provider.label} ${warning}`));
   });

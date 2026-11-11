@@ -71,15 +71,6 @@ export interface TeamAIConfig {
   codexResetCreditsListRefreshMs?: number;
   // Also spend a ticket when only the short (5-hour) window is used up.
   codexResetCreditsSessionWindow?: boolean;
-  // Claude reset credits (cedar_ember grants). Off by default;
-  // automatic use requires explicit claudeResetCredits: true.
-  claudeResetCredits?: boolean;
-  claudeResetCreditsPolicy?: 'fleet' | 'account';
-  claudeResetCreditsCooldownMs?: number;
-  claudeResetCreditsReserve?: number;
-  claudeResetCreditsTimeoutMs?: number;
-  claudeResetCreditsListRefreshMs?: number;
-  claudeResetCreditsSessionWindow?: boolean;
   // Codex upstream model-capacity retry (enabled by default). Retries keep the
   // selected account unless rotation is explicitly enabled.
   codexCapacityEnabled?: boolean;

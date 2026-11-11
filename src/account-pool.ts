@@ -797,7 +797,12 @@ export class AccountPool {
       // With reset credits on, an account whose ticket count has gone stale is
       // read too: busy accounts stay fresh through headers, which never carry
       // the count, and would otherwise never have one.
-      const countsDue = (a: RuntimeAccount) => (this.provider.id === 'codex' ? this.resetCredits.enabled : this.resetCredits.claudeEnabled) && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff;
+      // For Claude, reset credits are strictly manual-only, but ticket counts
+      // are refreshed periodically for operator visibility regardless of auto settings.
+      const countsDue = (a: RuntimeAccount) =>
+        (this.provider.id === 'codex'
+          ? this.resetCredits.enabled && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff
+          : Boolean(this.provider.fetchResetCredits) && typeof a.resetCreditsAt === 'number' && a.resetCreditsAt <= cutoff);
       const due = this.accounts.filter((a) => a.enabled && !a.retired && !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a) || (a.cooldownReason === 'quota' && (a.cooldownUntil ?? 0) > this.now())));
       await Promise.all(due.map(async (account) => {
         try {
@@ -1148,7 +1153,7 @@ export class AccountPool {
           timeoutMs: this.resetCredits.timeoutMs,
           organizationUuid: account.profile?.organizationUuid ?? account.credential.organizationUuid,
         });
-        outcome = classifyConsume(answer.status, answer.body);
+        outcome = classifyConsume(answer.status, answer.body, this.provider.id as 'codex' | 'claude');
       } catch (error) {
         const timedOut = (error as Error).name === 'TimeoutError' || (error as Error).name === 'AbortError';
         outcome = { kind: 'indeterminate', code: timedOut ? 'timeout' : 'network', windowsReset: null, error: (error as Error).message.slice(0, 200) };

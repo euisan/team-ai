@@ -163,19 +163,26 @@ async function adopt(): Promise<void> {
 // Reset credits per account, from what the server last recorded.
 async function resetCreditStatus(): Promise<void> {
   const config = await loadConfig(); const state = await loadState(); const settings = resetCreditSettings(config);
-  const providers: ProviderId[] = ['codex', 'claude'];
-  for (const prov of providers) {
-    const list = config.accounts.filter((a) => a.provider === prov);
-    if (!list.length) continue;
-    const autoOn = prov === 'codex' ? settings.enabled : settings.claudeEnabled;
-    const prefix = prov === 'codex' ? 'Reset credits' : 'Claude reset credits';
-    console.log(`${prefix}: auto-redeem ${autoOn ? `on (policy ${settings.policy}, cooldown ${Math.round(settings.cooldownMs / 60_000)}m, reserve ${settings.reserve}${settings.sessionWindow ? ', 5h window too' : ''})` : 'off'}`);
-    for (const account of list) {
+  const codex = config.accounts.filter((a) => a.provider === 'codex');
+  if (codex.length) {
+    console.log(`Reset credits: auto-redeem ${settings.enabled ? `on (policy ${settings.policy}, cooldown ${Math.round(settings.cooldownMs / 60_000)}m, reserve ${settings.reserve}${settings.sessionWindow ? ', 5h window too' : ''})` : 'off'}`);
+    for (const account of codex) {
       const saved = state.accounts[account.credentialId];
       const count = typeof saved?.resetCredits === 'number' ? saved.resetCredits : null;
       const used = saved?.resetCreditsConsumed ? `, ${saved.resetCreditsConsumed} redeemed` : '';
       const last = saved?.resetCreditLastOutcome ? ` (last: ${saved.resetCreditLastOutcome})` : '';
-      console.log(`  ${account.label}: ${count === null ? (autoOn ? 'unknown (no usage read has reported a count yet)' : 'unknown') : `${count} available${used}${last}`}`);
+      console.log(`  ${account.label}: ${count === null ? (settings.enabled ? 'unknown (no usage read has reported a count yet)' : 'unknown') : `${count} available${used}${last}`}`);
+    }
+  }
+  const claude = config.accounts.filter((a) => a.provider === 'claude');
+  if (claude.length) {
+    console.log('Claude reset credits: manual only');
+    for (const account of claude) {
+      const saved = state.accounts[account.credentialId];
+      const count = typeof saved?.resetCredits === 'number' ? saved.resetCredits : null;
+      const used = saved?.resetCreditsConsumed ? `, ${saved.resetCreditsConsumed} redeemed` : '';
+      const last = saved?.resetCreditLastOutcome ? ` (last: ${saved.resetCreditLastOutcome})` : '';
+      console.log(`  ${account.label}: ${count === null ? 'unknown' : `${count} available${used}${last}`}`);
     }
   }
 }

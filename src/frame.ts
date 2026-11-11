@@ -287,14 +287,25 @@ function externalBox(usage: ExternalUsage, width: number, gauge: number): Array<
 
 export type FrameMode = 'normal' | 'order' | 'delete' | 'add' | 'credits' | 'routes' | 'groups' | 'help';
 
-// The reset-credit picker ('t' on a Codex row): the tickets on one account and
-// where the operator is in choosing and confirming one.
+// The reset-credit picker ('t' on a Codex or Claude row): the tickets on one
+// account and where the operator is in choosing and confirming one.
 export interface CreditPicker {
   account: string;
-  phase: 'loading' | 'pick' | 'confirm' | 'applying' | 'done';
-  items: Array<{ title: string | null; grantedAt: number | null; expiresAt: number | null }>;
+  phase: 'loading' | 'pick' | 'confirm' | 'applying' | 'done' | 'failed';
+  items: Array<{
+    id?: string;
+    title: string | null;
+    grantedAt: number | null;
+    expiresAt: number | null;
+    clears?: string[];
+    usableNow?: boolean;
+    givesBackWeekly?: boolean;
+    unavailableReason?: string | null;
+    resetsLeft?: number;
+  }>;
   index: number;
   result?: string;
+  error?: string;
 }
 
 function stamp(at: number | null): string {
@@ -302,18 +313,38 @@ function stamp(at: number | null): string {
   return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function pickerLines(picker: CreditPicker, width: number): string[] {
-  const title = ` Reset credits — ${picker.account} `;
-  const out = [color(36, `┌─${title}${'─'.repeat(Math.max(0, width - visible(title) - 3))}┐`)];
-  if (picker.phase === 'loading') out.push(color(90, '  Loading…'));
-  else if (!picker.items.length) out.push(color(90, '  No reset credits available'));
-  // Narrower than the wide layout, a ticket is its title and when it expires.
-  else picker.items.forEach((item, i) => out.push(width < NARROW_WIDTH
-    ? `${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', Math.max(4, width - 18))} exp ${stamp(item.expiresAt)}`
-    : `${i === picker.index ? color(36, '>') : ' '} ${fit(item.title ?? '(untitled)', 28)} granted ${stamp(item.grantedAt)}  expires ${stamp(item.expiresAt)}`));
-  if (picker.phase === 'applying') out.push(color(33, '  Applying…'));
-  if (picker.phase === 'done') out.push(`  Result: ${picker.result ?? 'error'}`);
-  out.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
+// Sublist lines drawn directly below the selected account row.
+export function creditSublistLines(picker: CreditPicker, width: number): string[] {
+  const out: string[] = [];
+  if (picker.phase === 'loading') {
+    out.push(fit(color(90, '    Loading…'), width));
+  } else if (picker.phase === 'failed') {
+    out.push(fit(color(90, `    Failed to load credits${picker.error ? `: ${picker.error}` : ''}`), width));
+  } else if (!picker.items.length) {
+    out.push(fit(color(90, '    No reset credits available'), width));
+  } else {
+    picker.items.forEach((item, i) => {
+      const cur = i === picker.index ? color(36, '>') : ' ';
+      const lead = `  ${cur} `;
+      const title = item.title ?? '(untitled)';
+      const left = typeof item.resetsLeft === 'number' ? ` left:${item.resetsLeft}` : '';
+      let status = '';
+      if (item.usableNow === false || item.unavailableReason) {
+        status = ` ${color(33, `[${item.unavailableReason ?? 'unavailable'}]`)}`;
+      } else if (item.usableNow === true) {
+        status = ` ${color(32, '[ready]')}`;
+      }
+      if (width < NARROW_WIDTH) {
+        const text = `${lead}${title}${left} exp ${stamp(item.expiresAt)}${status}`;
+        out.push(fit(text, width));
+      } else {
+        const text = `${lead}${fit(`${title}${left}`, 28)} granted ${stamp(item.grantedAt)}  expires ${stamp(item.expiresAt)}${status}`;
+        out.push(fit(text, width));
+      }
+    });
+  }
+  if (picker.phase === 'applying') out.push(fit(color(33, '    Applying…'), width));
+  if (picker.phase === 'done') out.push(fit(`    Result: ${picker.result ?? 'error'}`, width));
   return out;
 }
 
@@ -458,6 +489,9 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
             ? { identity: head, cells: shown.map((window) => window && bar(window.usage, window.resetsAt, barWidth)), tail: [age(saved?.measuredAt), paceText, credits] }
             : { identity: head, cells: color(90, 'no quota data yet'), tail: ['', '', credits] });
         }
+        if (mode === 'credits' && view.credits && account.credentialId === selectedId) {
+          lines.push(...creditSublistLines(view.credits, width));
+        }
       }
     }
     lines.push(color(36, `└${'─'.repeat(Math.max(0, width - 2))}┘`));
@@ -471,7 +505,6 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
     if (height !== undefined && lines.length + box.length + 5 + 4 > height) continue;
     lines.push(...box);
   }
-  if (mode === 'credits' && view.credits) lines.push(...pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) lines.push(...routeEditorLines(view.routes, width));
   if (mode === 'groups' && view.groups) lines.push(...groupEditorLines(view.groups, width));
   // 't' only does something on a Codex or Claude row, so it is only offered there.
@@ -499,7 +532,7 @@ function modeFooter(view: FrameView, creditSelected: boolean): string {
   const { mode } = view;
   return mode === 'routes' && view.routes ? routeEditorFooter(view.routes) : mode === 'groups' && view.groups ? groupEditorFooter(view.groups) : mode === 'normal' ? ` ${normalKeys(creditSelected, view.sortByHeadroom).join('  ')}` : mode === 'help' ? ' KEYS: any key closes' : mode === 'order' ? ' ORDER: ←→ rank -/+   ↑↓ select   a/c auto   Enter/Esc done' : mode === 'delete' ? ' DELETE selected account? y/Enter confirm   Esc cancel' : mode === 'add' ? ' ADD: 1 Claude login   2 Codex login   Esc cancel'
     : view.credits?.phase === 'confirm' ? ` Reset ${view.credits.account}'s usage with this credit? (y/n)`
-    : view.credits?.phase === 'done' ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
+    : (view.credits?.phase === 'done' || view.credits?.phase === 'failed') ? ' Esc close' : ' CREDITS: ↑↓ select   Enter use   Esc close';
 }
 
 // ── The narrow layout ───────────────────────────────────────────────────────
@@ -710,7 +743,7 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
     for (const section of provider === 'claude' ? sections : [{ accounts: group }]) {
       const title = groupSectionTitle(section, summaries);
       if (title) { lines.push({ text: color(36, `  ${title}`), rank: RANK.account, section, heading: true }); accountPhysical += 1; }
-      const rows = section.accounts.map((account): Ranked => {
+      for (const account of section.accounts) {
         const saved = state.accounts[account.credentialId]; const windows = saved?.windows || {};
         const cursor = account.credentialId === selectedId ? color(36, '>') : ' ';
         const arrow = next?.general === account.credentialId ? color(32, '►') : next?.fable === account.credentialId ? color(35, '►') : ' ';
@@ -723,9 +756,13 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
         const keep = (account === current || account.credentialId === selectedId) && !important.has(account.credentialId);
         if (keep) important.add(account.credentialId);
         accountPhysical += hasReset(row) ? 2 : 1;
-        return { text: row, rank: keep ? RANK.current : RANK.account, section };
-      });
-      lines.push(...rows);
+        lines.push({ text: row, rank: keep ? RANK.current : RANK.account, section });
+        if (mode === 'credits' && view.credits && account.credentialId === selectedId) {
+          const sublines = creditSublistLines(view.credits, width);
+          accountPhysical += sublines.length;
+          for (const subline of sublines) lines.push({ text: subline, rank: RANK.current });
+        }
+      }
     }
   }
 
@@ -733,7 +770,6 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
   const creditSelected = accounts.some((account) => account.credentialId === selectedId && (account.provider === 'codex' || account.provider === 'claude'));
   let overlayPhysical = 0;
   const overlay = (texts: string[]): void => { overlayPhysical += texts.length; push(RANK.overlay, ...texts); };
-  if (mode === 'credits' && view.credits) overlay(pickerLines(view.credits, width));
   if (mode === 'routes' && view.routes) overlay(routeEditorLines(view.routes, width));
   if (mode === 'groups' && view.groups) overlay(groupEditorLines(view.groups, width));
   if (mode === 'help') overlay(helpLines(normalKeys(creditSelected, sortByHeadroom), width));

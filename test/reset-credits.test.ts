@@ -308,6 +308,6 @@ test('the dashboard shows tickets on hand and the picker lists them', async () =
   const lines = buildFrame(config, state, { width: 100, selectedId: 'x', mode: 'normal', message: '', sortByHeadroom: true }).map(strip);
   assert.ok(lines.some((l) => l.includes('x@example.com') && /RC3/.test(l)));
   const picker = buildFrame(config, state, { width: 100, selectedId: 'x', mode: 'credits', message: '', sortByHeadroom: true, credits: { account: 'x@example.com', phase: 'confirm', items: [{ title: null, grantedAt: null, expiresAt: Date.UTC(2026, 10, 1) }], index: 0 } }).map(strip);
-  assert.ok(picker.some((l) => /^> \(untitled\) +granted — {2}expires \d\d\/\d\d \d\d:\d\d/.test(l)), picker.join('\n'));
+  assert.ok(picker.some((l) => /^\s*> \(untitled\) +granted — {2}expires \d\d\/\d\d \d\d:\d\d/.test(l)), picker.join('\n'));
   assert.match(picker.at(-1)!, /Reset x@example\.com's usage with this credit\? \(y\/n\)/);
 });

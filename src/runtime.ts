@@ -107,7 +107,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   for (const warning of routeWarnings) persist(warning);
   for (const pool of pools) {
     pool.log = (message) => persist(message); pool.saveNow = saveImmediately;
-    pool.resetCredits = resetCreditSettings(config);
+    if (pool.provider.id === 'codex') pool.resetCredits = resetCreditSettings(config);
   }
   const servers: Server[] = [];
   const ports = { claude: 0, codex: 0, control: 0 };
