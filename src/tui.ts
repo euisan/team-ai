@@ -68,7 +68,7 @@ export async function runTui(): Promise<void> {
   const capture = async (): Promise<void> => {
     busy = true;
     try {
-      const result = await captureDashboard({ level: 'partial', width: terminalSize(process.stdout).width, selectedId, mode, sortByHeadroom, frozen: frozen ?? undefined });
+      const result = await captureDashboard({ level: 'partial', width: terminalSize(process.stdout).width, selectedId, mode, credits, sortByHeadroom, frozen: frozen ?? undefined });
       const [copied, revealed] = await Promise.all([copyImageToClipboard(result.png), revealInFolder(result.png)]);
       const extras = [copied ? 'copied to clipboard' : 'clipboard unavailable', revealed ? 'opened folder' : ''].filter(Boolean).join(', ');
       message = `Captured ${result.png.slice(result.png.lastIndexOf('/') + 1)} — ${extras}`;

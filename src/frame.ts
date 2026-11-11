@@ -3,7 +3,7 @@
 // capture.ts both draw through here, so a capture is exactly what a person at
 // the terminal would have seen — same ordering, same gauges, same colors.
 import { AccountPool, type Ranked as RankedAccount } from './account-pool.js';
-import { cellWidth, fit, gaugeWidth, layoutRows, placeInSlots, SLOTS, usageLayout, type GridRow } from './columns.js';
+import { cellWidth, fit, gaugeWidth, identityNameColumn, layoutRows, placeInSlots, SLOTS, usageLayout, type GridRow } from './columns.js';
 import { hostText, type HostSample } from './host-metrics.js';
 import { EXTERNAL_PROVIDERS, type ExternalProvider, type ExternalUsage, type ExternalWindow } from './external-usage.js';
 import { comparePacing, formatDeviation, pacingDeviation, parseBalance, type Balance } from './pacing.js';
@@ -313,19 +313,28 @@ function stamp(at: number | null): string {
   return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// Sublist lines drawn directly below the selected account row.
-export function creditSublistLines(picker: CreditPicker, width: number): string[] {
+// Sublist lines drawn directly below the selected account row. `nameColumn` is
+// the zero-based column where that row's name starts (columns.ts derives it
+// from the row layout), so the tickets sit a fixed distance inside it no matter
+// how wide the route markers make the lead.
+const SUBLIST_INDENT = 4;
+const SUBLIST_MIN_INDENT = 4;
+
+export function creditSublistLines(picker: CreditPicker, width: number, nameColumn: number): string[] {
+  const indent = Math.max(SUBLIST_MIN_INDENT, nameColumn + SUBLIST_INDENT);
+  const blank = ' '.repeat(indent);
   const out: string[] = [];
   if (picker.phase === 'loading') {
-    out.push(fit(color(90, '    Loading…'), width));
+    out.push(fit(color(90, `${blank}Loading…`), width));
   } else if (picker.phase === 'failed') {
-    out.push(fit(color(90, `    Failed to load credits${picker.error ? `: ${picker.error}` : ''}`), width));
+    out.push(fit(color(90, `${blank}Failed to load credits${picker.error ? `: ${picker.error}` : ''}`), width));
   } else if (!picker.items.length) {
-    out.push(fit(color(90, '    No reset credits available'), width));
+    out.push(fit(color(90, `${blank}No reset credits available`), width));
   } else {
     picker.items.forEach((item, i) => {
+      // The cursor sits in the column just before the indented ticket text.
       const cur = i === picker.index ? color(36, '>') : ' ';
-      const lead = `  ${cur} `;
+      const lead = `${' '.repeat(indent - 1)}${cur}`;
       const title = item.title ?? '(untitled)';
       const left = typeof item.resetsLeft === 'number' ? ` left:${item.resetsLeft}` : '';
       let status = '';
@@ -343,8 +352,8 @@ export function creditSublistLines(picker: CreditPicker, width: number): string[
       }
     });
   }
-  if (picker.phase === 'applying') out.push(fit(color(33, '    Applying…'), width));
-  if (picker.phase === 'done') out.push(fit(`    Result: ${picker.result ?? 'error'}`, width));
+  if (picker.phase === 'applying') out.push(fit(color(33, `${blank}Applying…`), width));
+  if (picker.phase === 'done') out.push(fit(`${blank}Result: ${picker.result ?? 'error'}`, width));
   return out;
 }
 
@@ -490,7 +499,9 @@ export function buildFrame(config: TeamAIConfig, state: PersistedState, view: Fr
             : { identity: head, cells: color(90, 'no quota data yet'), tail: ['', '', credits] });
         }
         if (mode === 'credits' && view.credits && account.credentialId === selectedId) {
-          lines.push(...creditSublistLines(view.credits, width));
+          // The account row's own grid decides where its name starts; the
+          // sublist lines up inside that column (columns.ts).
+          lines.push(...creditSublistLines(view.credits, width, identityNameColumn(usageLayout(width, markWidth))));
         }
       }
     }
@@ -559,6 +570,9 @@ interface NarrowRule { title: string; short?: string; labels: string[] }
 // reset column on the right (`reset`).
 interface NarrowLayout { name: number; gauge: number; cells: number; reset: boolean; stacked: boolean }
 const RESET_WIDTH = 5;
+// The narrow row's lead field: cursor then next-account arrow. The name starts
+// in the column right after it, with no separating space.
+const NARROW_LEAD_WIDTH = 2;
 // A reset time in at most `width` columns (five by default): 59m, 2h10m, 23h,
 // 3d8h, 13d. A narrow gauge field takes the leading span only ("2h").
 function shortDuration(reset: number | null | undefined, width = RESET_WIDTH): string {
@@ -580,11 +594,11 @@ function narrowLayout(width: number, needed: number, stacked: boolean): NarrowLa
     : [[10, 3, true], [8, 3, true], [6, 3, true], [4, 3, true], [0, 3, true], [0, 2, true], [0, 2, false]];
   for (const [gauge, cells, reset] of tries) {
     const shown = Math.min(cells, needed);
-    const name = width - 2 - shown * cellWidth(gauge) - (reset ? 1 + RESET_WIDTH : 0);
+    const name = width - NARROW_LEAD_WIDTH - shown * cellWidth(gauge) - (reset ? 1 + RESET_WIDTH : 0);
     if (name >= 14) return { name, gauge, cells: shown, reset, stacked };
   }
   const cells = Math.min(2, needed);
-  return { name: Math.max(1, width - 2 - cells * cellWidth(0)), gauge: 0, cells, reset: false, stacked };
+  return { name: Math.max(1, width - NARROW_LEAD_WIDTH - cells * cellWidth(0)), gauge: 0, cells, reset: false, stacked };
 }
 
 function narrowValue(reading: Reading, gauge: number): string {
@@ -596,7 +610,7 @@ function narrowValue(reading: Reading, gauge: number): string {
 
 function narrowRow(layout: NarrowLayout, row: NarrowRow): string {
   const field = Math.max(4, layout.gauge);
-  let out = `${fit(row.lead, 2)}${fit(row.tint ? color(row.tint, row.name) : row.name, layout.name)}`;
+  let out = `${fit(row.lead, NARROW_LEAD_WIDTH)}${fit(row.tint ? color(row.tint, row.name) : row.name, layout.name)}`;
   const span = layout.cells * (1 + field) + (layout.reset ? 1 + RESET_WIDTH : 0);
   if (row.note) return `${out} ${fit(color(90, row.note), span - 1)}`;
   const shown = row.cells.slice(0, layout.cells);
@@ -627,7 +641,7 @@ function hasReset(row: NarrowRow): boolean {
 function narrowResetRow(layout: NarrowLayout, row: NarrowRow): string | null {
   if (!layout.stacked || !hasReset(row)) return null;
   const field = Math.max(4, layout.gauge);
-  let out = ' '.repeat(2 + layout.name);
+  let out = ' '.repeat(NARROW_LEAD_WIDTH + layout.name);
   for (let i = 0; i < layout.cells; i++) {
     const cell = row.cells[i];
     const time = cell ? shortDuration(cell.resetsAt, field) : '';
@@ -650,7 +664,7 @@ function right(text: string, width: number): string {
 // the gauges below, written once per section instead of on every account row.
 function narrowRule(layout: NarrowLayout, marker: NarrowRule, width: number): string {
   const field = Math.max(4, layout.gauge);
-  const prefix = 2 + layout.name;
+  const prefix = NARROW_LEAD_WIDTH + layout.name;
   const labels = marker.labels.slice(0, layout.cells);
   if (!labels.some(Boolean)) return rule(marker.title, width);
   const head = (title: string): string => `─ ${title} `;
@@ -758,7 +772,8 @@ function buildNarrowFrame(config: TeamAIConfig, state: PersistedState, view: Fra
         accountPhysical += hasReset(row) ? 2 : 1;
         lines.push({ text: row, rank: keep ? RANK.current : RANK.account, section });
         if (mode === 'credits' && view.credits && account.credentialId === selectedId) {
-          const sublines = creditSublistLines(view.credits, width);
+          // The narrow row's name starts right after its two-column lead.
+          const sublines = creditSublistLines(view.credits, width, NARROW_LEAD_WIDTH);
           accountPhysical += sublines.length;
           for (const subline of sublines) lines.push({ text: subline, rank: RANK.current });
         }

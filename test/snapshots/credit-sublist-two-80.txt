@@ -1,0 +1,3 @@
+>  c1@exampl… OAuth      active   auto      20%          10%           -       …
+      >Ticket Alpha left:2          granted —  expires — [ready]
+       Ticket Beta                  granted —  expires — [cooldown]

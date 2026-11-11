@@ -1,0 +1,2 @@
+> c1@example.com                   20%        10%          -
+      No reset credits available

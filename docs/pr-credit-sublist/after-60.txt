@@ -1,0 +1,13 @@
+[1m TeamAI[0m                                    CPU 8% · RAM 22% 
+[36m─ Claude 2 ────────────────[0m[90m         5h[0m[90m         7d[0m[90m          F[0m
+[36m>[0m demo-one@example.com      [42;97m    [100;37m   42%[0m [42;97m      [100;37m 61%[0m [100;37m         -[0m
+[90m                                 8d15h      5d15h           [0m
+     [36m>[0mWeekly reset ticket left:2 exp 11/30 21:00 [32m[ready][0m    
+      Bonus reset ticket exp 12/02 17:00 [33m[cooldown][0m         
+  demo-two@example.com      [42;97m  [100;37m     18%[0m [42;97m   [100;37m    33%[0m [100;37m         -[0m
+[90m                                 8d15h      6d18h           [0m
+[36m─ Codex 1 ─────────────────[0m[90m         5h[0m[90m         7d[0m[90m           [0m
+  demo-codex@example.com    [42;97m      [100;37m 55%[0m [43;97m       [100;37m72%[0m           
+[90m                                 8d15h       7d6h           [0m
+[36m─ Activity ─────────────────────────────────────────────────[0m
+ CREDITS: ↑↓ select  Enter use  Esc close                   
