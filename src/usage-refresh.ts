@@ -169,7 +169,13 @@ export class UsageRefresher {
   }
 
   private countsDue(pool: AccountPool, account: RuntimeAccount, cutoff: number): boolean {
-    return pool.resetCredits.enabled && Boolean(pool.provider.consumeResetCredit) && (account.resetCreditsAt ?? 0) <= cutoff;
+    // For Codex, ticket counts are refreshed when reset credits auto-redeem is enabled.
+    // For Claude, reset credits are strictly manual-only, but available ticket counts
+    // are refreshed periodically for operator visibility regardless of auto settings.
+    if (pool.provider.id === 'codex') {
+      return pool.resetCredits.enabled && Boolean(pool.provider.consumeResetCredit) && (account.resetCreditsAt ?? 0) <= cutoff;
+    }
+    return Boolean(pool.provider.fetchResetCredits) && typeof account.resetCreditsAt === 'number' && account.resetCreditsAt <= cutoff;
   }
 
   private jitter(entry: AccountSchedule): number {

@@ -35,15 +35,13 @@ export const RECHECK_DELAY_MS = 1_500;
 
 export function resetCreditSettings(config: Partial<TeamAIConfig>): ResetCreditSettings {
   const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
-  const cooldown = config.codexResetCreditsCooldownMs; const reserve = config.codexResetCreditsReserve;
-  const timeout = config.codexResetCreditsTimeoutMs; const list = config.codexResetCreditsListRefreshMs;
   return {
     enabled: config.codexResetCredits === true,
     policy: config.codexResetCreditsPolicy === 'account' ? 'account' : 'fleet',
-    cooldownMs: finite(cooldown) ? Math.max(0, Math.floor(cooldown)) : RESET_CREDIT_DEFAULTS.cooldownMs,
-    reserve: Number.isInteger(reserve) && (reserve as number) > 0 ? reserve as number : 0,
-    timeoutMs: finite(timeout) && timeout > 0 ? timeout : RESET_CREDIT_DEFAULTS.timeoutMs,
-    listRefreshMs: finite(list) && list >= 0 ? list : RESET_CREDIT_DEFAULTS.listRefreshMs,
+    cooldownMs: finite(config.codexResetCreditsCooldownMs) ? Math.max(0, Math.floor(config.codexResetCreditsCooldownMs)) : RESET_CREDIT_DEFAULTS.cooldownMs,
+    reserve: Number.isInteger(config.codexResetCreditsReserve) && (config.codexResetCreditsReserve as number) > 0 ? (config.codexResetCreditsReserve as number) : 0,
+    timeoutMs: finite(config.codexResetCreditsTimeoutMs) && config.codexResetCreditsTimeoutMs > 0 ? config.codexResetCreditsTimeoutMs : RESET_CREDIT_DEFAULTS.timeoutMs,
+    listRefreshMs: finite(config.codexResetCreditsListRefreshMs) && config.codexResetCreditsListRefreshMs >= 0 ? config.codexResetCreditsListRefreshMs : RESET_CREDIT_DEFAULTS.listRefreshMs,
     sessionWindow: config.codexResetCreditsSessionWindow === true,
   };
 }
@@ -56,21 +54,53 @@ export function resetCreditSettings(config: Partial<TeamAIConfig>): ResetCreditS
 export type ConsumeKind = 'reset' | 'spent-no-reset' | 'indeterminate' | 'no-spend';
 export interface ConsumeOutcome { kind: ConsumeKind; code: string; windowsReset: number | null; error: string | null }
 
-const NO_SPEND_CODES = new Set(['nothing_to_reset', 'no_credit', 'already_redeemed']);
+export const CODEX_NO_SPEND_CODES = new Set(['nothing_to_reset', 'no_credit', 'already_redeemed']);
+export const CLAUDE_NO_SPEND_CODES = new Set([
+  'already_used',
+  'not_limited',
+  'ineligible',
+  'cooldown',
+  'paused',
+  'expired',
+  'unknown_grant',
+  'not_next_grant',
+  'grant_id_required',
+  'no_credit',
+]);
+export const NO_SPEND_CODES = CODEX_NO_SPEND_CODES;
 
 // The backend refuses with a 200 as well, so only the body's code decides.
-export function classifyConsume(status: number, body: string): ConsumeOutcome {
+export function classifyConsume(status: number, body: string, provider: 'codex' | 'claude' = 'codex'): ConsumeOutcome {
   let parsed: Record<string, unknown> | null = null;
   try { const value = JSON.parse(body) as unknown; if (value && typeof value === 'object') parsed = value as Record<string, unknown>; } catch { /* judged below */ }
   const error = errorText(parsed, body);
   if (status >= 500) return { kind: 'indeterminate', code: `http_${status}`, windowsReset: null, error };
   if (status >= 400) return { kind: 'no-spend', code: `http_${status}`, windowsReset: null, error };
   if (!parsed) return { kind: 'indeterminate', code: 'unparseable', windowsReset: null, error };
+
+  if (provider === 'claude') {
+    // Claude response shape: { result: "reset" | "already_used" | ..., reason?: string, cleared?: string[], resets_left?: number }
+    const result = typeof parsed.result === 'string' ? parsed.result : null;
+    const reason = typeof parsed.reason === 'string' ? parsed.reason : null;
+    if (result === 'reset') {
+      const cleared = Array.isArray(parsed.cleared) ? parsed.cleared.length : null;
+      const raw = parsed.windows_reset;
+      const windowsReset = typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : (cleared ?? 1);
+      return { kind: windowsReset === 0 ? 'spent-no-reset' : 'reset', code: 'reset', windowsReset, error: null };
+    }
+    const code = reason || result || 'unknown';
+    if ((result && CLAUDE_NO_SPEND_CODES.has(result)) || (reason && CLAUDE_NO_SPEND_CODES.has(reason))) {
+      return { kind: 'no-spend', code, windowsReset: null, error };
+    }
+    return { kind: 'indeterminate', code, windowsReset: null, error };
+  }
+
+  // Codex response shape: { code: "reset" | "nothing_to_reset" | ..., windows_reset?: number }
   const code = typeof parsed.code === 'string' ? parsed.code : 'unknown';
   const raw = parsed.windows_reset;
   const windowsReset = typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : null;
   if (code === 'reset') return { kind: windowsReset === 0 ? 'spent-no-reset' : 'reset', code, windowsReset, error: null };
-  if (NO_SPEND_CODES.has(code)) return { kind: 'no-spend', code, windowsReset, error };
+  if (CODEX_NO_SPEND_CODES.has(code)) return { kind: 'no-spend', code, windowsReset, error };
   return { kind: 'indeterminate', code, windowsReset, error };
 }
 
@@ -102,6 +132,47 @@ export function parseResetCreditList(data: unknown): ResetCredit[] {
     .map(({ credit }) => credit);
 }
 
+// The spendable Claude cedar_ember grants, soonest to expire first; one without an expiry last.
+// Preserves clears, ends_at, usable_now, gives_back_weekly, unavailable_reason.
+export function parseClaudeResetCreditList(data: unknown): ResetCredit[] {
+  const root = (data as { cedar_ember?: { grants?: unknown } } | null)?.cedar_ember ?? (data as { grants?: unknown } | null);
+  const grants = root?.grants;
+  if (!Array.isArray(grants)) return [];
+  return grants
+    .map((raw, index) => ({ raw: raw as Record<string, unknown> | null, index }))
+    .filter(({ raw }) => raw && typeof raw.id === 'string' && raw.id.length > 0 && !raw.paused && (typeof raw.resets_left !== 'number' || raw.resets_left > 0))
+    .map(({ raw, index }) => ({
+      index,
+      credit: {
+        id: String(raw!.id),
+        title: typeof raw!.label === 'string' && raw!.label ? raw!.label : null,
+        grantedAt: instant(raw!.starts_at),
+        expiresAt: instant(raw!.ends_at),
+        clears: Array.isArray(raw!.clears) ? raw!.clears.filter((c): c is string => typeof c === 'string') : [],
+        usableNow: raw!.usable_now === true,
+        givesBackWeekly: raw!.gives_back_weekly === true,
+        unavailableReason: typeof raw!.unavailable_reason === 'string' ? raw!.unavailable_reason : null,
+        resetsLeft: typeof raw!.resets_left === 'number' && Number.isInteger(raw!.resets_left) && raw!.resets_left >= 0 ? raw!.resets_left : 1,
+      },
+    }))
+    .sort((a, b) => (a.credit.expiresAt ?? Number.MAX_SAFE_INTEGER) - (b.credit.expiresAt ?? Number.MAX_SAFE_INTEGER) || a.index - b.index)
+    .map(({ credit }) => credit);
+}
+
+// resets_left sum from cedar_ember grants: a non-negative integer, or unknown.
+export function claudeResetCreditCount(data: unknown): number | null {
+  const ember = (data as { cedar_ember?: { eligible?: unknown; grants?: unknown } } | null)?.cedar_ember;
+  if (!ember || ember.eligible === false || !Array.isArray(ember.grants)) return null;
+  let total = 0;
+  for (const g of ember.grants) {
+    const raw = g as Record<string, unknown> | null;
+    if (raw && !raw.paused && typeof raw.resets_left === 'number' && Number.isInteger(raw.resets_left) && raw.resets_left > 0) {
+      total += raw.resets_left;
+    }
+  }
+  return total;
+}
+
 // available_count from /wham/usage: a non-negative integer, or unknown.
 export function resetCreditCount(data: unknown): number | null {
   const count = (data as { rate_limit_reset_credits?: { available_count?: unknown } } | null)?.rate_limit_reset_credits?.available_count;
@@ -111,6 +182,7 @@ export function resetCreditCount(data: unknown): number | null {
 // Codex reports a window's span; the weekly one is what a ticket is for. When
 // no span was reported, the secondary window is the weekly one by convention.
 export function weeklyWindow(account: Pick<RuntimeAccount, 'windows'>): { usage: number | null; resetsAt: number | null } | undefined {
+  if (account.windows['7d']) return account.windows['7d'];
   const spans = [account.windows.primary, account.windows.secondary].filter((w) => w && (w.minutes ?? 0) >= 7 * 1440);
   return spans[0] ?? account.windows.secondary;
 }
@@ -121,10 +193,12 @@ export function exhausted(account: RuntimeAccount, sessionWindow: boolean, now =
   if ((weeklyWindow(account)?.usage ?? 0) >= 1) return true;
   if (!sessionWindow) return false;
   if (account.cooldownReason === 'quota' && account.cooldownUntil !== null && account.cooldownUntil > now) return true;
+  if (account.windows['5h'] && (account.windows['5h'].usage ?? 0) >= 1) return true;
   return Object.values(account.windows).some((w) => (w.usage ?? 0) >= 1) || (account.usage ?? 0) >= 1;
 }
 
 // Whether automatic use may spend a ticket on this account, and if not, why.
+// Automatic redemption is strictly supported for Codex only. Claude tickets are manual-only.
 export function eligibility(account: RuntimeAccount, settings: ResetCreditSettings, provider: string, now = Date.now()): string {
   if (provider !== 'codex') return 'not-codex-oauth';
   if (!account.enabled) return 'disabled';

@@ -160,17 +160,30 @@ async function adopt(): Promise<void> {
   throw new Error(`${body.error || 'adoption refused'} (control ${status})`);
 }
 
-// Codex reset credits per account, from what the server last recorded.
+// Reset credits per account, from what the server last recorded.
 async function resetCreditStatus(): Promise<void> {
   const config = await loadConfig(); const state = await loadState(); const settings = resetCreditSettings(config);
-  const codex = config.accounts.filter((a) => a.provider === 'codex'); if (!codex.length) return;
-  console.log(`Reset credits: auto-redeem ${settings.enabled ? `on (policy ${settings.policy}, cooldown ${Math.round(settings.cooldownMs / 60_000)}m, reserve ${settings.reserve}${settings.sessionWindow ? ', 5h window too' : ''})` : 'off'}`);
-  for (const account of codex) {
-    const saved = state.accounts[account.credentialId];
-    const count = typeof saved?.resetCredits === 'number' ? saved.resetCredits : null;
-    const used = saved?.resetCreditsConsumed ? `, ${saved.resetCreditsConsumed} redeemed` : '';
-    const last = saved?.resetCreditLastOutcome ? ` (last: ${saved.resetCreditLastOutcome})` : '';
-    console.log(`  ${account.label}: ${count === null ? (settings.enabled ? 'unknown (no usage read has reported a count yet)' : 'unknown') : `${count} available${used}${last}`}`);
+  const codex = config.accounts.filter((a) => a.provider === 'codex');
+  if (codex.length) {
+    console.log(`Reset credits: auto-redeem ${settings.enabled ? `on (policy ${settings.policy}, cooldown ${Math.round(settings.cooldownMs / 60_000)}m, reserve ${settings.reserve}${settings.sessionWindow ? ', 5h window too' : ''})` : 'off'}`);
+    for (const account of codex) {
+      const saved = state.accounts[account.credentialId];
+      const count = typeof saved?.resetCredits === 'number' ? saved.resetCredits : null;
+      const used = saved?.resetCreditsConsumed ? `, ${saved.resetCreditsConsumed} redeemed` : '';
+      const last = saved?.resetCreditLastOutcome ? ` (last: ${saved.resetCreditLastOutcome})` : '';
+      console.log(`  ${account.label}: ${count === null ? (settings.enabled ? 'unknown (no usage read has reported a count yet)' : 'unknown') : `${count} available${used}${last}`}`);
+    }
+  }
+  const claude = config.accounts.filter((a) => a.provider === 'claude');
+  if (claude.length) {
+    console.log('Claude reset credits: manual only');
+    for (const account of claude) {
+      const saved = state.accounts[account.credentialId];
+      const count = typeof saved?.resetCredits === 'number' ? saved.resetCredits : null;
+      const used = saved?.resetCreditsConsumed ? `, ${saved.resetCreditsConsumed} redeemed` : '';
+      const last = saved?.resetCreditLastOutcome ? ` (last: ${saved.resetCreditLastOutcome})` : '';
+      console.log(`  ${account.label}: ${count === null ? 'unknown' : `${count} available${used}${last}`}`);
+    }
   }
 }
 async function stop(quiet = false): Promise<void> { const pid = await runningPid(); if (!pid) { if (!quiet) console.log('TeamAI server is not running'); return; } process.kill(pid, 'SIGTERM'); for (let i = 0; i < 30 && await runningPid(); i++) await new Promise((r) => setTimeout(r, 100)); if (!quiet) console.log(`Stopped TeamAI server ${pid}`); }
