@@ -20,7 +20,7 @@ import type { Provider, RuntimeAccount, StoredAccount } from '../src/types.js';
 import { UsageRefresher } from '../src/usage-refresh.js';
 import { stripAnsi } from '../src/columns.js';
 import { buildFrame, type CreditPicker } from '../src/frame.js';
-import { creditPickerKey } from '../src/tui.js';
+import { creditRedeemUrl, pressCreditKey, redeemCredit } from '../src/tui.js';
 import type { PersistedState, TeamAIConfig } from '../src/types.js';
 
 test('claudeUsageQuota extracts reset credit count from cedar_ember grants', () => {
@@ -643,50 +643,72 @@ test('sublist credit picker: chosen ticket id is passed to control call, cancel 
     { id: 'id-alpha', title: 'Ticket Alpha', grantedAt: null, expiresAt: null },
     { id: 'id-beta', title: 'Ticket Beta', grantedAt: null, expiresAt: null },
   ];
+
+  // 1. Test pure function creditRedeemUrl
+  const url0 = creditRedeemUrl('claude', 'c1@example.com', items, 0);
+  assert.equal(url0, '/claude/reset-credit?account=c1%40example.com&credit_id=id-alpha');
+  const url1 = creditRedeemUrl('claude', 'c1@example.com', items, 1);
+  assert.equal(url1, '/claude/reset-credit?account=c1%40example.com&credit_id=id-beta');
+
+  // 2. Interactive TUI credit picker flow via pressCreditKey
   let picker: CreditPicker = {
     account: 'c1@example.com',
     phase: 'pick',
     items,
     index: 0,
   };
+  const ctx = (c: CreditPicker) => ({
+    provider: 'claude' as const,
+    account: 'c1@example.com',
+    creditList: items,
+    credits: c,
+  });
 
-  // 1. Move down to index 1 (Ticket Beta)
-  const step1 = creditPickerKey(picker, '\x1b[B');
+  const fakeControlCalls: string[] = [];
+  const fakeControl = async (path: string) => {
+    fakeControlCalls.push(path);
+    return new Response(JSON.stringify({ outcome: 'reset' }), { status: 200 });
+  };
+
+  // (a) Move down to index 1 (Ticket Beta)
+  const step1 = await pressCreditKey(ctx(picker), '\x1b[B', fakeControl);
   assert.equal(step1.credits?.index, 1);
+  assert.equal(fakeControlCalls.length, 0, 'navigation makes 0 calls');
   picker = step1.credits!;
 
-  // 2. Press Enter to confirm
-  const step2 = creditPickerKey(picker, '\r');
+  // (b) Press Enter to confirm
+  const step2 = await pressCreditKey(ctx(picker), '\r', fakeControl);
   assert.equal(step2.credits?.phase, 'confirm');
+  assert.equal(fakeControlCalls.length, 0, 'confirm phase transition makes 0 calls');
   picker = step2.credits!;
 
-  // 3. Reject with 'n' -> returns to pick phase, no redeem call
-  const redeemCalls: string[] = [];
-  const fakeRedeem = async (chosenId: string) => { redeemCalls.push(chosenId); };
-  const step3 = creditPickerKey(picker, 'n');
-  assert.equal(step3.credits?.phase, 'pick');
-  assert.equal(step3.redeem, undefined);
-  picker = step3.credits!;
-  assert.equal(redeemCalls.length, 0, 'cancelling with n makes 0 redeem calls');
+  // (c) Reject with 'n' -> returns to pick phase, 0 calls
+  const step3n = await pressCreditKey(ctx(picker), 'n', fakeControl);
+  assert.equal(step3n.credits?.phase, 'pick');
+  assert.equal(fakeControlCalls.length, 0, 'cancelling with n makes 0 control calls');
+  picker = step3n.credits!;
 
-  // 4. Move to confirm again, then cancel with Esc -> close is true, 0 redeem calls
-  const step4 = creditPickerKey(picker, '\r');
+  // (d) Move to confirm again, then cancel with Esc -> close is true, 0 calls
+  const step4 = await pressCreditKey(ctx(picker), '\r', fakeControl);
   assert.equal(step4.credits?.phase, 'confirm');
   picker = step4.credits!;
-  const step5 = creditPickerKey(picker, '\x1b');
-  assert.equal(step5.close, true);
-  assert.equal(step5.redeem, undefined);
-  assert.equal(redeemCalls.length, 0, 'cancelling with Esc makes 0 redeem calls');
+  const step4esc = await pressCreditKey(ctx(picker), '\x1b', fakeControl);
+  assert.equal(step4esc.closed, true);
+  assert.equal(fakeControlCalls.length, 0, 'cancelling with Esc makes 0 control calls');
 
-  // 5. Confirm with 'y' -> triggers redeem for chosen ticket (id-beta)
-  const step6 = creditPickerKey(picker, 'y');
-  assert.equal(step6.redeem, true);
-  const chosen = items[picker.index]!;
-  await fakeRedeem(chosen.id!);
-  assert.equal(redeemCalls.length, 1);
-  assert.equal(redeemCalls[0], 'id-beta', 'chosen ticket id passed to redeem');
+  // (e) In confirm phase, press 'y' -> triggers control call with chosen ticket id (id-beta)
+  const step5 = await pressCreditKey(ctx(picker), 'y', fakeControl);
+  assert.equal(fakeControlCalls.length, 1, 'confirming with y triggers exactly 1 call');
+  assert.equal(fakeControlCalls[0], '/claude/reset-credit?account=c1%40example.com&credit_id=id-beta');
+  assert.equal(step5.credits?.phase, 'done');
 
-  // Mutation check: if code passed the wrong ticket id (e.g. index 0 instead of chosen index), it fails
-  const mutatedGetId = () => items[0]!.id; // Mutation: always passes index 0
-  assert.notEqual(mutatedGetId(), chosen.id, 'mutation of passing wrong ticket id is detected');
+  // 3. Direct test of redeemCredit in src/tui.ts
+  const directCalls: string[] = [];
+  const directControl = async (path: string) => {
+    directCalls.push(path);
+    return new Response(JSON.stringify({ outcome: 'reset' }), { status: 200 });
+  };
+  await redeemCredit('claude', 'c1@example.com', items, { ...picker, index: 1 }, directControl);
+  assert.equal(directCalls.length, 1);
+  assert.equal(directCalls[0], '/claude/reset-credit?account=c1%40example.com&credit_id=id-beta');
 });

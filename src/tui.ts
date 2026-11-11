@@ -105,13 +105,11 @@ export async function runTui(): Promise<void> {
     }
     finally { busy = false; }
   };
-  const redeemCredit = async (): Promise<void> => {
+  const runRedeemCredit = async (): Promise<void> => {
     if (!credits || !creditAccount) return;
-    const chosen = creditList[credits.index]; credits = { ...credits, phase: 'applying' }; busy = true; await render();
+    busy = true; credits = { ...credits, phase: 'applying' }; await render();
     try {
-      const response = await control(`/${creditProvider}/reset-credit?account=${encodeURIComponent(creditAccount)}${chosen?.id ? `&credit_id=${encodeURIComponent(chosen.id)}` : ''}`, 'POST');
-      const body = await response.json() as { outcome?: string; error?: string };
-      credits = { ...credits, phase: 'done', result: body.outcome ?? body.error ?? `error ${response.status}` };
+      credits = await redeemCredit(creditProvider, creditAccount, creditList, credits, control);
     } catch (error) { credits = { ...credits, phase: 'done', result: `error: ${(error as Error).message}` }; }
     finally { busy = false; }
   };
@@ -154,7 +152,7 @@ export async function runTui(): Promise<void> {
     else if (mode === 'credits' && credits) {
       const step = creditPickerKey(credits, key);
       if (step.close) { mode = 'normal'; credits = undefined; }
-      else if (step.redeem) { await redeemCredit(); }
+      else if (step.redeem) { await runRedeemCredit(); }
       else if (step.credits) { credits = step.credits; }
     }
     else if (mode === 'add') { if (key === '1' || key === 'c') await add('claude'); else if (key === '2' || key === 'x') await add('codex'); }
@@ -283,4 +281,62 @@ export function creditPickerKey(
     if (key === '\r' || key === ' ' || key === '\x1b') return { close: true };
   }
   return {};
+}
+
+// Pure function for the control URL to redeem a reset credit
+export function creditRedeemUrl(
+  provider: 'codex' | 'claude',
+  account: string,
+  chosenOrList: ResetCredit | undefined | ResetCredit[],
+  index?: number,
+): string {
+  const chosen = Array.isArray(chosenOrList) ? chosenOrList[index ?? 0] : chosenOrList;
+  return `/${provider}/reset-credit?account=${encodeURIComponent(account)}${chosen?.id ? `&credit_id=${encodeURIComponent(chosen.id)}` : ''}`;
+}
+
+// Executes credit redemption through control port for the chosen ticket
+export async function redeemCredit(
+  provider: 'codex' | 'claude',
+  account: string,
+  creditList: ResetCredit[],
+  credits: CreditPicker,
+  control: (path: string, method?: string) => Promise<Response>,
+): Promise<CreditPicker> {
+  const chosen = creditList[credits.index];
+  const url = creditRedeemUrl(provider, account, chosen);
+  const response = await control(url, 'POST');
+  const body = (await response.json()) as { outcome?: string; error?: string };
+  return { ...credits, phase: 'done', result: body.outcome ?? body.error ?? `error ${response.status}` };
+}
+
+// Handles a key stroke for credit picker sublist, executing redemption when confirmed with 'y'
+export async function pressCreditKey(
+  context: {
+    provider: 'codex' | 'claude';
+    account: string;
+    creditList: ResetCredit[];
+    credits: CreditPicker;
+  },
+  key: string,
+  control: (path: string, method?: string) => Promise<Response>,
+): Promise<{ credits?: CreditPicker; closed?: boolean; calledUrls: string[] }> {
+  const calledUrls: string[] = [];
+  const trackingControl = async (path: string, method = 'GET'): Promise<Response> => {
+    calledUrls.push(path);
+    return control(path, method);
+  };
+  const step = creditPickerKey(context.credits, key);
+  if (step.close) return { closed: true, calledUrls };
+  if (step.redeem) {
+    const updated = await redeemCredit(
+      context.provider,
+      context.account,
+      context.creditList,
+      context.credits,
+      trackingControl,
+    );
+    return { credits: updated, calledUrls };
+  }
+  if (step.credits) return { credits: step.credits, calledUrls };
+  return { credits: context.credits, calledUrls };
 }
