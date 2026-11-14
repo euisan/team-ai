@@ -96,6 +96,15 @@ type SessionLedgerEntry = 'pending' | 'bound' | { state: 'pending' | 'bound'; gr
 type SessionLedger = Record<string, SessionLedgerEntry>;
 const ledgerState = (entry: SessionLedgerEntry): 'pending' | 'bound' => typeof entry === 'string' ? entry : entry.state;
 
+// A binding that has served no request for this long belongs to a conversation
+// that is no longer running and is no longer resumed. Pruning it frees the
+// group it was scoped to so the dashboard can remove that member again; a
+// session used even once inside the window is untouched.
+export const SESSION_BINDING_RETENTION_MS = 30 * 24 * 60 * 60_000;
+// Recorded uses are throttled to this rate, so ordinary traffic does not turn
+// every request into a write of sessions.json.
+export const SESSION_TOUCH_INTERVAL_MS = 10 * 60_000;
+
 function ledgerPathFor(sessionsPath: string): string {
   return join(dirname(sessionsPath), '.sessions-ledger.json');
 }
@@ -251,6 +260,9 @@ export function validateSessionBindings(raw: unknown): StoredSessionBindings {
     if (typeof entry.boundAt !== 'number' || !Number.isFinite(entry.boundAt)) {
       throw new Error(`Corrupt session binding for "${key}": invalid boundAt timestamp`);
     }
+    if (entry.lastSeenAt !== undefined && (typeof entry.lastSeenAt !== 'number' || !Number.isFinite(entry.lastSeenAt))) {
+      throw new Error(`Corrupt session binding for "${key}": invalid lastSeenAt timestamp`);
+    }
     if (entry.group !== undefined && (typeof entry.group !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(entry.group))) throw new Error('Corrupt session group');
     result[key] = {
       ...(entry.group === undefined ? {} : { group: entry.group as string }),
@@ -260,6 +272,7 @@ export function validateSessionBindings(raw: unknown): StoredSessionBindings {
       credentialId: entry.credentialId.trim(),
       actualAccountId: entry.actualAccountId.trim(),
       boundAt: entry.boundAt,
+      ...(entry.lastSeenAt === undefined ? {} : { lastSeenAt: entry.lastSeenAt as number }),
     };
   }
   return result;
@@ -291,6 +304,55 @@ export function updateSessions(change: (bindings: StoredSessionBindings, pending
     await atomicWrite(ledgerPathFor(path), ledger);
     await atomicWrite(path, validated);
     return true;
+  });
+}
+
+// Records that a bound session carried a request, at most once per touch
+// interval. The ledger is left as it is: a bound session stays bound to its
+// account; only its age changes.
+export function touchSessionBinding(sessionId: string, now = Date.now()): Promise<boolean> {
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { bindings, fresh } = await readSessionStore();
+    if (fresh) return false;
+    const binding = bindings[sessionId];
+    if (!binding) return false;
+    if ((binding.lastSeenAt ?? binding.boundAt) > now - SESSION_TOUCH_INTERVAL_MS) return false;
+    binding.lastSeenAt = now;
+    await atomicWrite(path, validateSessionBindings(bindings));
+    return true;
+  });
+}
+
+// Removes bindings no request has touched within the retention window. The
+// ledger record goes with the binding, written first like every other binding
+// change so an interrupted prune still fails closed instead of leaving an
+// authorization with nothing behind it. lastActivity supplies an outside
+// signal (Claude's own transcript mtime) for bindings written before the
+// lastSeenAt field existed; otherwise an upgrade's first sweep could discard a
+// conversation that is running right now.
+export function pruneStaleSessions(options: { retentionMs?: number; now?: number; lastActivity?: (sessionId: string) => number | null } = {}): Promise<number> {
+  const retentionMs = options.retentionMs ?? SESSION_BINDING_RETENTION_MS;
+  if (!Number.isFinite(retentionMs) || retentionMs < 0) return Promise.reject(new Error('Invalid session binding retention'));
+  const now = options.now ?? Date.now();
+  const path = paths().sessions;
+  return serialized(path, async () => {
+    const { bindings, ledger, fresh } = await readSessionStore();
+    if (fresh) return 0;
+    const cutoff = now - retentionMs;
+    let removed = 0;
+    for (const [id, binding] of Object.entries(bindings)) {
+      const lastSeen = Math.max(binding.boundAt, binding.lastSeenAt ?? 0, options.lastActivity?.(id) ?? 0);
+      if (lastSeen > cutoff) continue;
+      delete bindings[id];
+      delete ledger[id];
+      removed++;
+    }
+    if (!removed) return 0;
+    const validated = validateSessionBindings(bindings);
+    await atomicWrite(ledgerPathFor(path), ledger);
+    await atomicWrite(path, validated);
+    return removed;
   });
 }
 

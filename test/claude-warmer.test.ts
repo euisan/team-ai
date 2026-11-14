@@ -460,7 +460,7 @@ test('startServer with background enabled attaches Claude warmer and warms fresh
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
-      if (req.url === '/api/oauth/usage') {
+      if (req.url?.startsWith('/api/oauth/usage')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           limits: [
@@ -541,7 +541,7 @@ test('startServer with warmup.claude=false does not attach Claude warmer', async
   const messagesReceived: Array<{ url: string }> = [];
   const up = createServer((req, res) => {
     req.resume();
-    if (req.url === '/api/oauth/usage') {
+    if (req.url?.startsWith('/api/oauth/usage')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         limits: [

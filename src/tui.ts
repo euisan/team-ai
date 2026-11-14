@@ -9,6 +9,7 @@ import { openRouteEditor, routeEditorKey, type RouteEditor } from './route-edito
 import { groupEditorKey, openGroupEditor, type GroupEditor } from './group-editor.js';
 import { liveState } from './runtime.js';
 import { clearSessionGroups, loadConfig, loadSessions, loadState, removeAccount, renameSessionGroup, updateConfig, upsertAccount } from './storage.js';
+import { pruneInactiveClaudeSessions } from './session-retention.js';
 import type { ResetCredit, StoredAccount } from './types.js';
 
 export async function runTui(): Promise<void> {
@@ -226,6 +227,9 @@ export async function pressGroupKey(editor: GroupEditor, key: string, onSaving: 
   if (!result.save) return result.editor;
   const save = result.save; await onSaving(result.editor);
   if (save.session?.type === 'remove-members') {
+    // Bindings from conversations that ended long ago must not veto a group
+    // edit forever. Drop them first, then only a session still in use blocks.
+    await pruneInactiveClaudeSessions();
     const sessions = await loadSessions();
     const blocked = save.session.removals.find((removal) => Object.values(sessions).some((binding) => binding.provider === 'claude' && binding.group === removal.group && binding.accountId === removal.accountId));
     if (blocked) return { ...editor, error: `Cannot remove ${blocked.accountId} from ${blocked.group}: a bound Claude session still uses this account` };

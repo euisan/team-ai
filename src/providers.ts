@@ -140,6 +140,10 @@ export function codexUsageQuota(data: { rate_limit?: { primary_window?: CodexUsa
   return binding ? { routingUsage: binding.usage, routingResetsAt: binding.resetsAt, windows, resetCredits } : null;
 }
 
+// Claude's usage endpoints gate the ticket data on a client that looks like the
+// official CLI. One constant keeps the count read and the list read identical.
+const CLAUDE_CLI_USER_AGENT = 'claude-cli/2.1.322 (external, cli)';
+
 export const claudeProvider: Provider = {
   id: 'claude', label: 'Claude', upstreamBase: 'https://api.anthropic.com', fableModel: 'claude-fable-5-1',
   startWindowModel: 'claude-haiku-4-5-20251001',
@@ -309,7 +313,20 @@ export const claudeProvider: Provider = {
     return { status: data.organization?.subscription_status ?? null, createdAt: data.organization?.subscription_created_at ?? null, rateLimitTier: data.organization?.rate_limit_tier ?? null, orgType: data.organization?.organization_type ?? null, hasClaudeMax: data.account?.has_claude_max ?? null, hasClaudePro: data.account?.has_claude_pro ?? null, organizationUuid: data.organization?.uuid ?? data.organization?.id ?? null, fetchedAt: Date.now() };
   },
   async fetchUsage(credential) {
-    const response = await fetch(`${this.upstreamBase}/api/oauth/usage`, { headers: { authorization: `Bearer ${credential.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15_000) });
+    // The ticket count rides on the usage response, but only when the read asks
+    // for it: without these query parameters upstream omits cedar_ember
+    // entirely. Keeping it on this one read means the periodic refresh learns
+    // the count without a second request per account. skip_spend trims the
+    // response to quota and ticket data.
+    const response = await fetch(`${this.upstreamBase}/api/oauth/usage?cedar_ember=1&skip_spend=1`, {
+      headers: {
+        authorization: `Bearer ${credential.accessToken}`,
+        'User-Agent': CLAUDE_CLI_USER_AGENT,
+        'x-app': 'cli',
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!response.ok) throw new Error(`Claude usage failed (${response.status})`);
     return claudeUsageQuota(await response.json() as Parameters<typeof claudeUsageQuota>[0]);
   },
@@ -317,7 +334,7 @@ export const claudeProvider: Provider = {
     const response = await fetch(`${this.upstreamBase}/api/oauth/usage?cedar_ember=1&skip_spend=1`, {
       headers: {
         authorization: `Bearer ${credential.accessToken}`,
-        'User-Agent': 'claude-cli/2.1.322 (external, cli)',
+        'User-Agent': CLAUDE_CLI_USER_AGENT,
         'x-app': 'cli',
         'anthropic-beta': 'oauth-2025-04-20',
       },
