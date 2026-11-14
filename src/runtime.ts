@@ -19,6 +19,7 @@ import { ExternalUsageMonitor, externalUsageSettings } from './external-usage.js
 import { createServer } from 'node:http';
 import { providers } from './providers.js';
 import { dataDir, defaultConfig, loadConfig, loadCredentials, loadState, paths, saveState, updateCredentials } from './storage.js';
+import { pruneInactiveClaudeSessions } from './session-retention.js';
 import type { ActivityEvent, PersistedState, ProviderId, TeamAIConfig } from './types.js';
 import { UsageRefresher, type UsageRefreshOptions } from './usage-refresh.js';
 import { codexCapacitySettings } from './codex-capacity.js';
@@ -217,6 +218,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   }
 
   const timers: NodeJS.Timeout[] = [];
+  // A finished conversation leaves its binding behind, and enough of them make
+  // every group edit look blocked by a session that no longer exists. Sweep
+  // bindings older than the retention window; damaged storage is left alone and
+  // stays visible on the requests that need it.
+  const pruneSessions = async (): Promise<void> => {
+    try { const removed = await pruneInactiveClaudeSessions(); if (removed) persist(`Pruned ${removed} stale session binding(s)`); } catch { /* fail closed only where a binding is read */ }
+  };
+  void pruneSessions();
   // Periodic zero-cost usage refresh for all enabled Claude and Codex accounts:
   // idle or lower-priority accounts that receive no proxied traffic still keep
   // their 5h/7d windows and reset timestamps fresh on the dashboard.
@@ -297,6 +306,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   if (background) {
     void refreshProfiles(); timers.push(setInterval(() => void refreshProfiles(), 6 * 60 * 60_000));
     setImmediate(() => void refreshLapsed()); timers.push(setInterval(() => void refreshLapsed(), 5 * 60_000));
+    timers.push(setInterval(() => void pruneSessions(), 6 * 60 * 60_000));
   }
   for (const timer of timers) timer.unref();
 

@@ -353,6 +353,10 @@ export interface StoredSessionBinding {
   credentialId: string;
   actualAccountId: string;
   boundAt: number;
+  // Last time a request carried this session; absent on bindings written before
+  // the field existed, where boundAt is the only age signal. Old bindings are
+  // pruned so a finished conversation eventually stops blocking group edits.
+  lastSeenAt?: number;
 }
 export type StoredSessionBindings = Record<string, StoredSessionBinding>;
 

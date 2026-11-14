@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
-import { adoptClaudeSession, updateSessions, type AdoptOutcome } from './storage.js';
+import { adoptClaudeSession, SESSION_TOUCH_INTERVAL_MS, touchSessionBinding, updateSessions, type AdoptOutcome } from './storage.js';
 import { candidateOrder, classifyConsume, eligibility, RECHECK_DELAY_MS, RESET_CREDIT_DEFAULTS, RESET_GRACE_MS, type ConsumeOutcome, type RedeemResult, type ResetCreditSettings } from './reset-credits.js';
 import type { OAuthCredential, PersistedState, ProbeTemplate, Provider, ProviderId, QuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditLedger, RuntimeAccount, Shortfall, StoredAccount, StoredSessionBinding } from './types.js';
 
@@ -51,6 +51,9 @@ export class AccountPool {
   private usageRefreshes = new Map<string, Promise<boolean>>();
   private sweepInFlight = false;
   private usageRead: Promise<unknown> | null = null;
+  // The last use written for a session, so traffic stays readable without a
+  // sessions.json write per request. The storage layer keeps the durable copy.
+  private seenSessions = new Map<string, number>();
   // Codex capacity retries, shared by the provider's proxy ports.
   codexCapacity: CodexCapacitySettings = { ...CAPACITY_DEFAULTS };
   // Codex reset credits. The server fills these in: the settings from config,
@@ -388,6 +391,19 @@ export class AccountPool {
     return this.pick(excluded, wantsFable, route, this.availableNow);
   }
 
+  // Best-effort and throttled: no request waits for this write, and a failure
+  // only means the next use of the session tries again.
+  private noteSessionSeen(sessionId: string): void {
+    const now = this.now();
+    const last = this.seenSessions.get(sessionId) ?? 0;
+    if (now - last < SESSION_TOUCH_INTERVAL_MS) return;
+    if (this.seenSessions.size > 8192) {
+      for (const [id, at] of this.seenSessions) if (now - at >= SESSION_TOUCH_INTERVAL_MS) this.seenSessions.delete(id);
+    }
+    this.seenSessions.set(sessionId, now);
+    void touchSessionBinding(sessionId, now).catch(() => { this.seenSessions.delete(sessionId); });
+  }
+
   // Resolves or atomically binds a Claude session to an account, persisted durably.
   async resolveOrBindClaudeSession(
     sessionId: string,
@@ -407,6 +423,7 @@ export class AccountPool {
       credentialId: undefined as string | undefined,
       actualAccountId: undefined as string | undefined,
       group: undefined as string | undefined,
+      created: false,
       outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error' | 'group_unavailable' | 'group_mismatch',
     };
 
@@ -443,6 +460,7 @@ export class AccountPool {
         state.boundId = initialSelected.id;
         state.credentialId = initialSelected.credentialId;
         state.actualAccountId = actualAccountId;
+        state.created = true;
 
         const binding: StoredSessionBinding = {
           sessionId,
@@ -458,6 +476,11 @@ export class AccountPool {
     } catch {
       return { account: null, status: 'storage_error' };
     }
+
+    // A request that reached an existing binding proves the conversation is
+    // still in use. Record it, throttled, so the retention sweep can tell a
+    // live session from one whose process is long gone.
+    if (state.boundId !== null && !state.created) this.noteSessionSeen(sessionId);
 
     if (state.outcome === 'group_unavailable' || state.outcome === 'group_mismatch') return { account: null, status: state.outcome, group: state.group };
     if (state.outcome === 'storage_error') return { account: null, status: 'storage_error' };
@@ -802,7 +825,7 @@ export class AccountPool {
       const countsDue = (a: RuntimeAccount) =>
         (this.provider.id === 'codex'
           ? this.resetCredits.enabled && Boolean(this.provider.consumeResetCredit) && (a.resetCreditsAt ?? 0) <= cutoff
-          : Boolean(this.provider.fetchResetCredits) && typeof a.resetCreditsAt === 'number' && a.resetCreditsAt <= cutoff);
+          : Boolean(this.provider.fetchResetCredits) && (a.resetCreditsAt ?? 0) <= cutoff);
       const due = this.accounts.filter((a) => a.enabled && !a.retired && !a.error && ((a.measuredAt ?? 0) <= cutoff || countsDue(a) || (a.cooldownReason === 'quota' && (a.cooldownUntil ?? 0) > this.now())));
       await Promise.all(due.map(async (account) => {
         try {

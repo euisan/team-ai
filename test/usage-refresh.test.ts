@@ -92,7 +92,7 @@ for (const delayed of [false, true]) {
     const fakeClaudeUpstream = createServer(async (req, res) => {
       req.resume();
       await waitForHttp();
-      if (req.url === '/api/oauth/usage') {
+      if (req.url?.startsWith('/api/oauth/usage')) {
         const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
         claudeReads.push({ token, at: clock.now() });
         claudeStep++;
@@ -156,7 +156,9 @@ for (const delayed of [false, true]) {
       const state: PersistedState = {
         version: 1,
         accounts: {
-          'claude:idle-c': { usage: 0.05, resetsAt: start + 3_600_000, measuredAt: start, windows: { '5h': { usage: 0.05, resetsAt: start + 3_600_000 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
+          // A known ticket read keeps this an idle-cadence test: an account
+          // with no recorded count is due at once, which its own test covers.
+          'claude:idle-c': { usage: 0.05, resetsAt: start + 3_600_000, measuredAt: start, windows: { '5h': { usage: 0.05, resetsAt: start + 3_600_000 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null, resetCredits: 2, resetCreditsAt: start },
           'codex:idle-x': { usage: 0.08, resetsAt: start + 3_600_000, measuredAt: start, windows: { primary: { usage: 0.08, resetsAt: start + 3_600_000, minutes: 300 } }, profile: null, cooldownUntil: null, lastUsed: null, error: null },
         },
       };
@@ -448,7 +450,7 @@ test('POST /reload updates usage refresh targets and persists refreshed state ac
       }));
       return;
     }
-    if (req.url === '/api/oauth/usage') {
+    if (req.url?.startsWith('/api/oauth/usage')) {
       const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+tok-/i, '');
       probed.push(`claude:${token}`);
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -573,7 +575,7 @@ test('startServer with background enabled automatically probes enabled idle acco
   const probed: string[] = [];
   const up = createServer((req, res) => {
     req.resume();
-    if (req.url === '/api/oauth/usage') {
+    if (req.url?.startsWith('/api/oauth/usage')) {
       const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+tok-/i, '');
       probed.push(`claude:${token}`);
       res.writeHead(200, { 'content-type': 'application/json' });

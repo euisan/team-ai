@@ -172,10 +172,13 @@ export class UsageRefresher {
     // For Codex, ticket counts are refreshed when reset credits auto-redeem is enabled.
     // For Claude, reset credits are strictly manual-only, but available ticket counts
     // are refreshed periodically for operator visibility regardless of auto settings.
+    // A Claude account with no recorded ticket read is due too: its count could
+    // never become known otherwise, because the old condition required the very
+    // timestamp that only a count read writes.
     if (pool.provider.id === 'codex') {
       return pool.resetCredits.enabled && Boolean(pool.provider.consumeResetCredit) && (account.resetCreditsAt ?? 0) <= cutoff;
     }
-    return Boolean(pool.provider.fetchResetCredits) && typeof account.resetCreditsAt === 'number' && account.resetCreditsAt <= cutoff;
+    return Boolean(pool.provider.fetchResetCredits) && (account.resetCreditsAt ?? 0) <= cutoff;
   }
 
   private jitter(entry: AccountSchedule): number {
