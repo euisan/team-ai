@@ -565,3 +565,23 @@ test('measuredAt survives a restart via exported state', () => {
   const restored = new AccountPool(provider, [account('a')], { 'codex:a': credential('a') }, output);
   assert.equal(restored.accounts[0]!.measuredAt, 1234);
 });
+
+test('a usage read drops a Fable window the server no longer returns; headers keep it', () => {
+  const before = { '5h': { usage: 0.1, resetsAt: null }, '7d': { usage: 0.6, resetsAt: null }, '7d_oi': { usage: 0.55, resetsAt: null } };
+  const withoutFable = { routingUsage: 0.6, routingResetsAt: null, windows: { '5h': { usage: 0.2, resetsAt: null }, '7d': { usage: 0.61, resetsAt: null } } };
+  assert.deepEqual(Object.keys(AccountPool.carriedWindows(before, withoutFable, 'usage')).sort(), ['5h', '7d']);
+  assert.deepEqual(Object.keys(AccountPool.carriedWindows(before, withoutFable, 'headers')).sort(), ['5h', '7d', '7d_oi']);
+  const withFable = { ...withoutFable, windows: { ...withoutFable.windows, '7d_oi': { usage: 0.6, resetsAt: null } } };
+  assert.ok('7d_oi' in AccountPool.carriedWindows(before, withFable, 'usage'));
+  const codex = { primary: { usage: 0.1, resetsAt: null }, secondary: { usage: 0.2, resetsAt: null } };
+  assert.deepEqual(Object.keys(AccountPool.carriedWindows(codex, { windows: { primary: { usage: 0.3, resetsAt: null } } }, 'usage')).sort(), ['primary', 'secondary']);
+});
+
+test('refreshUsage drops a Fable window the usage read no longer returns', async () => {
+  const usageProvider: Provider = { ...provider, fetchUsage: async () => ({ routingUsage: 0.3, routingResetsAt: null, windows: { '5h': { usage: 0.1, resetsAt: null }, '7d': { usage: 0.3, resetsAt: null } } }) };
+  const pool = new AccountPool(usageProvider, [account('fable')], { 'codex:fable': credential('fable') }, state);
+  const acct = pool.accounts[0]!;
+  acct.windows = { '5h': { usage: 0.1, resetsAt: null }, '7d': { usage: 0.3, resetsAt: null }, '7d_oi': { usage: 0.55, resetsAt: null } };
+  await pool.refreshUsage(0);
+  assert.deepEqual(Object.keys(acct.windows).sort(), ['5h', '7d']);
+});
