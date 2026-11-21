@@ -666,6 +666,15 @@ export class AccountPool {
     const plan = headers.get('x-codex-plan-type');
     if (plan && account.profile && account.profile.rateLimitTier !== plan) account.profile = { ...account.profile, rateLimitTier: plan };
   }
+  // The windows kept from before a new reading. A usage read is the server's
+  // whole answer: a model-scoped weekly window (7d_oi, the Fable bucket) it no
+  // longer returns is dropped, so the usage view shows "-" rather than the last
+  // value it ever saw. Response headers only describe the request they came
+  // with, so a header reading keeps every window it does not mention.
+  static carriedWindows<W>(windows: Record<string, W>, quota: { windows: Record<string, unknown> }, source: 'headers' | 'usage'): Record<string, W> {
+    if (source !== 'usage') return windows;
+    return Object.fromEntries(Object.entries(windows).filter(([name]) => !/^7d_[a-z0-9]+$/i.test(name) || name in quota.windows));
+  }
   private applyQuota(account: RuntimeAccount, quota: QuotaSnapshot, source: 'headers' | 'usage' = 'headers'): void {
     const now = this.now();
     const previousMeasuredAt = account.measuredAt;
@@ -678,12 +687,12 @@ export class AccountPool {
         return [name, { ...w, usage: held === null || held === undefined || w.usage === null ? w.usage : Math.min(held, w.usage) }];
       }));
       const usage = account.usage === null || quota.routingUsage === null ? quota.routingUsage : Math.min(account.usage, quota.routingUsage);
-      account.usage = usage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...windows }; account.measuredAt = now;
+      account.usage = usage; account.resetsAt = quota.routingResetsAt; account.windows = { ...AccountPool.carriedWindows(account.windows, quota, source), ...windows }; account.measuredAt = now;
       this.clearRecoveredQuotaCooldown(account, quota, now, previousMeasuredAt, source);
       this.changeListener?.(account);
       return;
     }
-    account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...account.windows, ...quota.windows }; account.measuredAt = now;
+    account.usage = quota.routingUsage; account.resetsAt = quota.routingResetsAt; account.windows = { ...AccountPool.carriedWindows(account.windows, quota, source), ...quota.windows }; account.measuredAt = now;
     this.clearRecoveredQuotaCooldown(account, quota, now, previousMeasuredAt, source);
     this.changeListener?.(account);
   }
