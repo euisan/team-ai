@@ -1,5 +1,6 @@
 import type { AccountGroups } from './groups.js';
 import { randomUUID } from 'node:crypto';
+import { resolveClaudeAccountRef, windowExhausted } from './claude-account-pin.js';
 import { CAPACITY_DEFAULTS, type CodexCapacitySettings } from './codex-capacity.js';
 import { comparePacing, sessionWindow, weeklyWindow, type Balance } from './pacing.js';
 import { matchRoute, type Route } from './routes.js';
@@ -404,27 +405,174 @@ export class AccountPool {
     void touchSessionBinding(sessionId, now).catch(() => { this.seenSessions.delete(sessionId); });
   }
 
+  private matchesBoundClaudeAccount(boundId: string, expected: string): boolean {
+    if (expected === boundId) return true;
+    const resolved = resolveClaudeAccountRef(this.accounts, expected);
+    return resolved.ok && resolved.account.id === boundId;
+  }
+
+  private validatePinnedClaudeAccount(
+    expectedAccount: string,
+    wantsFable: boolean,
+    route: Route | null,
+    group?: string,
+  ):
+    | { ok: true; target: RuntimeAccount }
+    | {
+        ok: false;
+        outcome:
+          | 'pinned_unknown'
+          | 'pinned_ambiguous'
+          | 'pinned_group_excluded'
+          | 'pinned_route_excluded'
+          | 'pinned_disabled'
+          | 'pinned_error'
+          | 'pinned_cooldown'
+          | 'pinned_quota'
+          | 'pinned_model_unsupported'
+          | 'pinned_busy';
+        target?: RuntimeAccount;
+        cooldownUntil?: number | null;
+        cooldownReason?: string | null;
+        retryAfterMs?: number | null;
+        reason?: string;
+      } {
+    const resolved = resolveClaudeAccountRef(this.accounts, expectedAccount);
+    if (!resolved.ok) {
+      return { ok: false, outcome: resolved.reason === 'ambiguous' ? 'pinned_ambiguous' : 'pinned_unknown' };
+    }
+    const target = resolved.account;
+    if (group !== undefined && !this.groups[group]?.includes(target.id)) {
+      return { ok: false, outcome: 'pinned_group_excluded', target };
+    }
+    if (route?.mode === 'exclusive' && !this.isMember(route, target)) {
+      return { ok: false, outcome: 'pinned_route_excluded', target };
+    }
+    if (!target.enabled) {
+      return { ok: false, outcome: 'pinned_disabled', target };
+    }
+    if (target.error) {
+      return { ok: false, outcome: 'pinned_error', target, reason: target.error };
+    }
+    const now = Date.now();
+    if (target.resetsAt && target.resetsAt <= now) {
+      target.usage = null;
+      target.resetsAt = null;
+      target.cooldownUntil = null;
+      target.cooldownReason = null;
+      target.cooldownAt = null;
+    }
+    if (target.cooldownUntil !== null && target.cooldownUntil > now) {
+      return {
+        ok: false,
+        outcome: 'pinned_cooldown',
+        target,
+        cooldownUntil: target.cooldownUntil,
+        cooldownReason: target.cooldownReason,
+        retryAfterMs: target.cooldownUntil - now,
+      };
+    }
+    const w5h = windowExhausted(target.windows['5h'], now);
+    const w7d = windowExhausted(target.windows['7d'], now);
+    const routingSpent = target.usage !== null && target.usage >= 1;
+    if (w5h || w7d || routingSpent) {
+      const resets = [
+        w5h ? target.windows['5h']?.resetsAt : null,
+        w7d ? target.windows['7d']?.resetsAt : null,
+        routingSpent ? target.resetsAt : null,
+      ].filter((t): t is number => typeof t === 'number' && t > now);
+      const retryAfterMs = resets.length ? Math.min(...resets) - now : null;
+      const reason =
+        w5h && w7d ? '5h and 7d quota windows exhausted'
+          : w5h ? '5h quota window exhausted'
+            : w7d ? '7d quota window exhausted'
+              : 'quota window exhausted';
+      return { ok: false, outcome: 'pinned_quota', target, retryAfterMs, reason };
+    }
+    if (wantsFable && !this.servesFable(target)) {
+      if (AccountPool.fableSpent(target)) {
+        const resetAt = AccountPool.fableWindow(target)?.resetsAt;
+        return {
+          ok: false,
+          outcome: 'pinned_quota',
+          target,
+          retryAfterMs: resetAt && resetAt > now ? resetAt - now : null,
+          reason: 'Fable weekly quota window exhausted',
+        };
+      }
+      return { ok: false, outcome: 'pinned_model_unsupported', target, retryAfterMs: 60_000 };
+    }
+    if (this.atConcurrencyCap(target)) {
+      return { ok: false, outcome: 'pinned_busy', target, retryAfterMs: 5_000 };
+    }
+    if (!target.credential?.accountId?.trim()) {
+      return { ok: false, outcome: 'pinned_error', target, reason: 'credential has no account id' };
+    }
+    return { ok: true, target };
+  }
+
   // Resolves or atomically binds a Claude session to an account, persisted durably.
   async resolveOrBindClaudeSession(
     sessionId: string,
     wantsFable: boolean,
     route: Route | null = null,
     expectedGroup?: string,
+    expectedAccount?: string,
   ): Promise<{
     group?: string;
     account: RuntimeAccount | null;
-    status: 'ok' | 'unproven' | 'disabled' | 'removed' | 'cooldown' | 'busy' | 'model_unsupported' | 'no_account' | 'storage_error' | 'credential_mismatch' | 'group_unavailable' | 'group_mismatch';
+    status:
+      | 'ok'
+      | 'unproven'
+      | 'disabled'
+      | 'removed'
+      | 'cooldown'
+      | 'busy'
+      | 'model_unsupported'
+      | 'no_account'
+      | 'storage_error'
+      | 'credential_mismatch'
+      | 'group_unavailable'
+      | 'group_mismatch'
+      | 'account_mismatch'
+      | 'pinned_unknown'
+      | 'pinned_ambiguous'
+      | 'pinned_group_excluded'
+      | 'pinned_route_excluded'
+      | 'pinned_disabled'
+      | 'pinned_error'
+      | 'pinned_cooldown'
+      | 'pinned_quota'
+      | 'pinned_model_unsupported'
+      | 'pinned_busy';
     cooldownUntil?: number | null;
     cooldownReason?: string | null;
     retryAfterMs?: number | null;
+    reason?: string;
   }> {
+    type PinnedFailureOutcome =
+      | 'pinned_unknown'
+      | 'pinned_ambiguous'
+      | 'pinned_group_excluded'
+      | 'pinned_route_excluded'
+      | 'pinned_disabled'
+      | 'pinned_error'
+      | 'pinned_cooldown'
+      | 'pinned_quota'
+      | 'pinned_model_unsupported'
+      | 'pinned_busy';
     const state = {
       boundId: null as string | null,
       credentialId: undefined as string | undefined,
       actualAccountId: undefined as string | undefined,
       group: undefined as string | undefined,
       created: false,
-      outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error' | 'group_unavailable' | 'group_mismatch',
+      target: undefined as RuntimeAccount | undefined,
+      cooldownUntil: undefined as number | null | undefined,
+      cooldownReason: undefined as string | null | undefined,
+      retryAfterMs: undefined as number | null | undefined,
+      reason: undefined as string | undefined,
+      outcome: 'ok' as 'ok' | 'unproven' | 'no_account' | 'storage_error' | 'group_unavailable' | 'group_mismatch' | 'account_mismatch' | PinnedFailureOutcome,
     };
 
     try {
@@ -432,23 +580,43 @@ export class AccountPool {
         const existing = bindings[sessionId];
         state.group = existing?.group ?? groups.get(sessionId);
         if (expectedGroup !== undefined && expectedGroup !== state.group) { state.outcome = 'group_mismatch'; return false; }
-        if (state.group !== undefined && !this.hasGroup(state.group)) { state.outcome = 'group_unavailable'; return false; }
         if (existing && existing.provider === 'claude') {
+          if (expectedAccount !== undefined && !this.matchesBoundClaudeAccount(existing.accountId, expectedAccount)) {
+            state.outcome = 'account_mismatch';
+            return false;
+          }
+          if (state.group !== undefined && !this.hasGroup(state.group)) { state.outcome = 'group_unavailable'; return false; }
           state.boundId = existing.accountId;
           state.credentialId = existing.credentialId;
           state.actualAccountId = existing.actualAccountId;
           return false;
         }
+        if (state.group !== undefined && !this.hasGroup(state.group)) { state.outcome = 'group_unavailable'; return false; }
 
         if (!pending.has(sessionId)) {
           state.outcome = 'unproven';
           return false;
         }
 
-        const initialSelected = this.pickClaudeInitial(wantsFable, route, state.group);
-        if (!initialSelected) {
-          state.outcome = 'no_account';
-          return false;
+        let initialSelected: RuntimeAccount | null = null;
+        if (expectedAccount !== undefined) {
+          const checked = this.validatePinnedClaudeAccount(expectedAccount, wantsFable, route, state.group);
+          if (!checked.ok) {
+            state.outcome = checked.outcome;
+            state.target = checked.target;
+            state.cooldownUntil = checked.cooldownUntil;
+            state.cooldownReason = checked.cooldownReason;
+            state.retryAfterMs = checked.retryAfterMs;
+            state.reason = checked.reason;
+            return false;
+          }
+          initialSelected = checked.target;
+        } else {
+          initialSelected = this.pickClaudeInitial(wantsFable, route, state.group);
+          if (!initialSelected) {
+            state.outcome = 'no_account';
+            return false;
+          }
         }
 
         const actualAccountId = initialSelected.credential?.accountId;
@@ -482,7 +650,20 @@ export class AccountPool {
     // live session from one whose process is long gone.
     if (state.boundId !== null && !state.created) this.noteSessionSeen(sessionId);
 
-    if (state.outcome === 'group_unavailable' || state.outcome === 'group_mismatch') return { account: null, status: state.outcome, group: state.group };
+    if (state.outcome === 'group_unavailable' || state.outcome === 'group_mismatch' || state.outcome === 'account_mismatch') {
+      return { account: null, status: state.outcome, group: state.group };
+    }
+    if (state.outcome.startsWith('pinned_')) {
+      return {
+        account: state.target ?? null,
+        group: state.group,
+        status: state.outcome,
+        ...(state.cooldownUntil !== undefined ? { cooldownUntil: state.cooldownUntil } : {}),
+        ...(state.cooldownReason !== undefined ? { cooldownReason: state.cooldownReason } : {}),
+        ...(state.retryAfterMs !== undefined ? { retryAfterMs: state.retryAfterMs } : {}),
+        ...(state.reason !== undefined ? { reason: state.reason } : {}),
+      };
+    }
     if (state.outcome === 'storage_error') return { account: null, status: 'storage_error' };
     if (state.outcome === 'unproven') return { account: null, status: 'unproven' };
     if (state.outcome === 'no_account' || !state.boundId) return { account: null, status: 'no_account', group: state.group };

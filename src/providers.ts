@@ -170,6 +170,7 @@ export const claudeProvider: Provider = {
     headers.set('authorization', `Bearer ${account.credential.accessToken}`);
     headers.delete('x-api-key');
     headers.delete('x-teamai-group');
+    headers.delete('x-teamai-account');
     return headers;
   },
   rewriteBody(body, account) {

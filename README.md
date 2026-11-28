@@ -53,13 +53,14 @@ tai
 For a direct provider session, use the dedicated launchers. They automatically start the TeamAI relay when necessary and pass every trailing argument to the official client:
 
 ```bash
-tac                   # Claude Code through the TeamAI account pool
-tac --resume          # same as: teamai claude --resume
-tax                   # Codex through the TeamAI account pool
-tax resume            # same as: teamai codex resume
-teamai claude         # long form of tac
-teamai codex          # long form of tax
-teamai session        # choose [1] Claude or [2] Codex interactively
+tac                                  # Claude Code through the TeamAI account pool
+tac --account user@example.com       # Pin a new Claude session to a specific account
+tac --resume                         # same as: teamai claude --resume
+tax                                  # Codex through the TeamAI account pool
+tax resume                           # same as: teamai codex resume
+teamai claude                        # long form of tac
+teamai codex                         # long form of tax
+teamai session                       # choose [1] Claude or [2] Codex interactively
 ```
 
 The names intentionally avoid replacing an existing TeamClaude `tc` shell function. `tc` can continue to target TeamClaude while `tac` and `tax` target TeamAI.
@@ -76,6 +77,30 @@ Each Claude Code session is permanently pinned to its initial account in `sessio
 - **Adopting a session that predates registration:** After an upgrade, a Claude session started under an older relay has no registration and gets `409`. An administrator can record it explicitly: `teamai adopt claude <session-id> --account <account>` (`<account>` is the label or id `teamai accounts` prints) asks the running relay over its authenticated control port (`POST /claude/sessions/adopt`, body `{"sessionId", "account"}`). The relay takes the credential and actual account id from its own pool and writes the binding and its ledger record together under the session lock; no credential is sent or returned. **The chosen account becomes that session's first account**: from then on it is served only there, with no handover on quota, disable or error, so pick the account the session was actually using. Repeating it with the same account changes nothing; another account, a relay-issued ID that is still pending, a disabled, removed or unknown account, or an invalid ID is refused, and damaged storage fails closed with `500` without writing anything. The session ID is the full value Claude Code sends as `x-claude-code-session-id` (the name of its transcript file under `~/.claude/projects/`).
 
 The [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) documents UUID `--session-id`, resume/continue, and the new ID created by `--fork-session`. Its [hooks reference](https://code.claude.com/docs/en/hooks#common-input-fields) distinguishes the session ID from subagent IDs; it does not guarantee HTTP header behavior for every client feature or version.
+
+### Pinning a new Claude session to a specific account
+
+You can start a new Claude session pinned to a specific Claude account without altering `config.json`:
+
+```bash
+teamai claude --account user@example.com
+teamai claude --account=<account-id>
+TEAMAI_ACCOUNT=user@example.com tac
+```
+
+- **Option and environment precedence:** `--account <ref>` (or `--account=<ref>`) takes precedence over `TEAMAI_ACCOUNT`, is consumed by TeamAI before launching Claude, and is supported only for Claude (`teamai codex` and `tax` reject both). `<ref>` matches the account `id` or `label` shown by `teamai accounts claude` (exact `id` before `label`).
+- **Pre-launch validation:** Unknown, ambiguous, non-Claude, or disabled account references fail before launching Claude or issuing a session. When `--group` (or `TEAMAI_GROUP`) is also set, the account must be a member of that group or launch fails. If persisted runtime state (`state.json`) already shows an active cooldown, an exhausted `5h` or `7d` quota window, or a live error, a new session is rejected before launch.
+- **Relay enforcement (`x-teamai-account`):** The launcher passes `x-teamai-account: <account-id>` in `ANTHROPIC_CUSTOM_HEADERS`, and the proxy strips `x-teamai-account` before forwarding upstream. On the first request of an unbound relay-registered session, the proxy binds that session to the requested account only — it never silently falls back to another account or bypasses an `exclusive` model route (`prefer` routes still allow the pinned account). When omitted, automatic selection and existing session pinning work unchanged.
+- **Rejection responses (no binding created, pending registration kept for retry):**
+  - `429` with `x-teamai-429-reason: pinned_account_cooldown` (and `retry-after`) when the account is in cooldown
+  - `429` with `x-teamai-429-reason: pinned_account_quota` (and `retry-after` when a reset time is known) when the `5h`, `7d`, or Fable weekly window is full
+  - `429` with `x-teamai-429-reason: pinned_account_model_unsupported` (`retry-after: 60`) when a Fable request targets an account without a Fable window
+  - `429` with `x-teamai-429-reason: pinned_account_busy` (`retry-after: 5`) when the account is at `maxConcurrentPerAccount`
+  - `429` with `x-teamai-429-reason: pinned_account_route_excluded` when an `exclusive` route excludes the account
+  - `404` / `400` / `503` when the requested account is unknown, ambiguous, outside the session's group, disabled, or errored
+- **Continuity and mismatch:** Once bound, later turns (including `--resume` or `--continue`) stay on that account whether `x-teamai-account` is omitted or matches the bound account; sending a different `x-teamai-account` returns `409`.
+
+<!-- claude-account-pin-translations-pending -->
 
 ## Shell setup
 
