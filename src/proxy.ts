@@ -365,6 +365,100 @@ function extractCanonicalSessionId(
   return { sessionId: first };
 }
 
+function extractRequestedAccount(req: IncomingMessage): { accountId?: string; error?: string } {
+  const raw = req.headers['x-teamai-account'];
+  if (raw === undefined) return {};
+  const parts = (Array.isArray(raw) ? raw : [raw]).flatMap((item) => item.split(','));
+  const values: string[] = [];
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) return { error: 'Empty x-teamai-account header' };
+    if (trimmed === '__proto__' || trimmed === 'constructor' || trimmed === 'prototype') {
+      return { error: 'Invalid x-teamai-account header' };
+    }
+    values.push(trimmed);
+  }
+  const unique = [...new Set(values)];
+  if (unique.length !== 1) return { error: 'Conflicting x-teamai-account headers provided' };
+  return { accountId: unique[0]! };
+}
+
+type PinnedResolution = Awaited<ReturnType<AccountPool['resolveOrBindClaudeSession']>>;
+
+function replyPinnedAccountFailure(
+  res: ServerResponse,
+  pool: AccountPool,
+  req: IncomingMessage,
+  path: string,
+  onChange: (event?: string) => void,
+  resolution: PinnedResolution,
+  route: Route | null,
+  requestedAccount: string | undefined,
+): boolean {
+  const targetId = resolution.account?.id;
+  const targetRef = targetId ? `"${targetId}"` : `"${requestedAccount}"`;
+  const who = targetId ?? requestedAccount;
+  const log429 = (reason: string) => onChange(`${pool.provider.label} ${req.method} ${path} → 429 ${reason} (${who})`);
+  switch (resolution.status) {
+    case 'account_mismatch':
+      json(res, 409, { error: 'Requested account differs from the session account; resume with its bound account or omit --account and TEAMAI_ACCOUNT' });
+      return true;
+    case 'pinned_unknown':
+      json(res, 404, { error: `Pinned Claude account ${targetRef} was not found` });
+      return true;
+    case 'pinned_ambiguous':
+      json(res, 400, { error: 'Pinned Claude account reference is ambiguous; use its account id' });
+      return true;
+    case 'pinned_group_excluded':
+      json(res, 400, { error: `Pinned Claude account ${targetRef} is not a member of group "${resolution.group}"` });
+      return true;
+    case 'pinned_route_excluded':
+      log429('pinned_account_route_excluded');
+      json(res, 429, { error: `Pinned Claude account ${targetRef} is excluded by exclusive route "${route?.name}"` }, { 'x-teamai-429-reason': 'pinned_account_route_excluded' });
+      return true;
+    case 'pinned_disabled':
+      json(res, 503, { error: `Pinned Claude account ${targetRef} is disabled` });
+      return true;
+    case 'pinned_error':
+      json(res, 503, { error: `Pinned Claude account ${targetRef} is unavailable: ${resolution.reason || 'account error'}` });
+      return true;
+    case 'pinned_cooldown': {
+      const retryAfterSec = Math.max(1, Math.ceil((resolution.retryAfterMs ?? 1000) / 1000));
+      log429('pinned_account_cooldown');
+      json(res, 429, { error: `Pinned Claude account ${targetRef} is in cooldown (${resolution.cooldownReason || 'quota'})` }, {
+        'retry-after': String(retryAfterSec),
+        'x-teamai-429-reason': 'pinned_account_cooldown',
+      });
+      return true;
+    }
+    case 'pinned_quota': {
+      const headers: Record<string, string> = { 'x-teamai-429-reason': 'pinned_account_quota' };
+      if (resolution.retryAfterMs && resolution.retryAfterMs > 0) {
+        headers['retry-after'] = String(Math.min(900, Math.max(1, Math.ceil(resolution.retryAfterMs / 1000))));
+      }
+      log429('pinned_account_quota');
+      json(res, 429, { error: `Pinned Claude account ${targetRef} has exhausted its quota (${resolution.reason || 'limit reached'})` }, headers);
+      return true;
+    }
+    case 'pinned_model_unsupported':
+      log429('pinned_account_model_unsupported');
+      json(res, 429, { error: `Pinned Claude account ${targetRef} cannot serve the requested Fable model` }, {
+        'retry-after': '60',
+        'x-teamai-429-reason': 'pinned_account_model_unsupported',
+      });
+      return true;
+    case 'pinned_busy':
+      log429('pinned_account_busy');
+      json(res, 429, { error: `Pinned Claude account ${targetRef} is at concurrency capacity` }, {
+        'retry-after': '5',
+        'x-teamai-429-reason': 'pinned_account_busy',
+      });
+      return true;
+    default:
+      return false;
+  }
+}
+
 async function dispatchClaude(
   req: IncomingMessage,
   res: ServerResponse,
@@ -404,10 +498,17 @@ async function dispatchClaude(
   } else {
     const wantsFable = pool.provider.usesFableBudget?.(path, body) ?? false;
     const expectedGroup = req.headers['x-teamai-group'];
-    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, wantsFable, route, typeof expectedGroup === 'string' ? expectedGroup : undefined);
+    const accountExtraction = extractRequestedAccount(req);
+    if (accountExtraction.error) {
+      json(res, 400, { error: accountExtraction.error });
+      return;
+    }
+    const requestedAccount = accountExtraction.accountId;
+    const resolution = await pool.resolveOrBindClaudeSession(canonicalSessionId, wantsFable, route, typeof expectedGroup === 'string' ? expectedGroup : undefined, requestedAccount);
     track.setGroup?.(resolution.group ?? null);
     if (resolution.status === 'group_mismatch') { json(res, 409, { error: 'Requested group differs from the session group; resume with its original group or omit --group and TEAMAI_GROUP' }); return; }
     if (resolution.status === 'group_unavailable') { json(res, 503, { error: 'Session group is missing or no longer contains its bound account; binding unchanged' }); return; }
+    if (replyPinnedAccountFailure(res, pool, req, path, onChange, resolution, route, requestedAccount)) return;
 
     if (resolution.status === 'storage_error') {
       json(res, 500, { error: 'Session binding storage corrupted: fail-closed to protect session pinning' });

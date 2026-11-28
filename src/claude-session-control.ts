@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AccountPool } from './account-pool.js';
-import { claudeGroupArgs } from './groups.js';
+import { resolveClaudeLaunchSelection } from './claude-account-pin.js';
 import { secureEqual } from './proxy.js';
 import { isLoopback } from './reset-credit-control.js';
 import { adoptableSessionId, issueClaudeSession } from './storage.js';
@@ -95,10 +95,10 @@ export async function handleClaudeSessionControl(req: IncomingMessage, res: Serv
 }
 
 export async function prepareClaudeArgs(input: string[], config: TeamAIConfig): Promise<string[]> {
-  const { args, group } = claudeGroupArgs(input, config);
+  const { args, group, resume } = await resolveClaudeLaunchSelection(input, config);
   const named = (name: string): boolean => args.some((arg) => arg === name || arg.startsWith(`${name}=`));
   if (named('--session-id') || named('--fork-session')) throw new Error('TeamAI issues Claude session IDs; --session-id and --fork-session are unsupported. Use --resume for a previously bound session.');
-  if (named('--resume') || named('--continue') || args.some((arg) => /^-[^-]*[rc]/.test(arg))) return [...args];
+  if (resume) return [...args];
   const port = config.proxy.controlPort ?? config.proxy.claudePort + 100;
   const response = await fetch(`http://${config.proxy.host}:${port}${CLAUDE_SESSION_PATH}`, {
     method: 'POST', headers: { authorization: `Bearer ${config.proxy.clientToken}`, 'content-type': 'application/json' }, body: JSON.stringify(group === undefined ? {} : { group }), signal: AbortSignal.timeout(10_000),
