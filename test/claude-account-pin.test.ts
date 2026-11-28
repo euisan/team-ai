@@ -152,7 +152,8 @@ async function createPoolRig(
     accounts.map((a) => [a.credentialId, { accountId: `uuid-${a.id}`, accessToken: `fake-${a.id}`, refreshToken: null, expiresAt: Date.now() + 86_400_000 }]),
   );
   const pool = new AccountPool(provider, accounts, credentials, options.state ?? { version: 1, accounts: {} }, 0.98, options.maxConcurrent ?? 16);
-  const proxy = createProxy(pool, 'test-token', () => {});
+  const events: string[] = [];
+  const proxy = createProxy(pool, 'test-token', (event) => { if (event) events.push(event); });
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
   const proxyAddr = proxy.address();
   assert(proxyAddr && typeof proxyAddr !== 'string');
@@ -183,7 +184,7 @@ async function createPoolRig(
     return { status: response.status, headers: response.headers, body: text, json: JSON.parse(text || '{}') as Record<string, unknown> };
   };
 
-  return { pool, hits, send };
+  return { pool, hits, events, send };
 }
 
 async function setupFakeClaude(extraEnv: Record<string, string | undefined> = {}) {
@@ -528,4 +529,132 @@ test('8. --account with --group allows group members only and exclusive routes a
   );
   assert.equal(preferAllowed.status, 200);
   assert.deepEqual(poolRig.hits.map((h) => h.auth), ['Bearer fake-b']);
+});
+
+test('9. pinned-failure proxy responses, headers, and activity logs identify resolved accounts by id only and never expose email labels', async (t) => {
+  const emailA = 'alice.private@example.com';
+  const emailB = 'bob.private@example.com';
+  const emailDup = 'shared.private@example.com';
+  const accounts: StoredAccount[] = [
+    { id: 'acct-a', provider: 'claude', label: emailA, enabled: true, priority: 1, credentialId: 'cred-a', createdAt: '' },
+    { id: 'acct-b', provider: 'claude', label: emailB, enabled: true, priority: 2, credentialId: 'cred-b', createdAt: '' },
+    { id: 'acct-off', provider: 'claude', label: 'disabled.private@example.com', enabled: false, priority: 3, credentialId: 'cred-off', createdAt: '' },
+    { id: 'acct-dup1', provider: 'claude', label: emailDup, enabled: true, priority: 4, credentialId: 'cred-dup1', createdAt: '' },
+    { id: 'acct-dup2', provider: 'claude', label: emailDup, enabled: true, priority: 5, credentialId: 'cred-dup2', createdAt: '' },
+  ];
+  const r = await createPoolRig(t, { accounts, maxConcurrent: 1 });
+  const accB = r.pool.accounts.find((a) => a.id === 'acct-b')!;
+  const sensitiveEmails = [emailA, emailB, 'disabled.private@example.com', emailDup];
+
+  const assertNoLabelLeak = (
+    reply: Awaited<ReturnType<typeof r.send>>,
+    eventCountBefore: number,
+    expectedId?: string,
+    expectLogEvent = false,
+  ) => {
+    for (const email of sensitiveEmails) {
+      assert.equal(reply.body.includes(email), false, `response body leaked label ${email}: ${reply.body}`);
+      for (const [k, v] of reply.headers.entries()) {
+        assert.equal(v.includes(email), false, `response header ${k} leaked label ${email}: ${v}`);
+      }
+    }
+    const newEvents = r.events.slice(eventCountBefore);
+    for (const line of newEvents) {
+      for (const email of sensitiveEmails) {
+        assert.equal(line.includes(email), false, `activity log leaked label ${email}: ${line}`);
+      }
+    }
+    if (expectedId) {
+      assert.equal(reply.body.includes(expectedId), true, `response body missing id ${expectedId}: ${reply.body}`);
+      if (expectLogEvent) {
+        assert.equal(newEvents.some((line) => line.includes(expectedId)), true, `activity log missing id ${expectedId}: ${newEvents.join(' | ')}`);
+      }
+    }
+  };
+
+  // Cooldown (even when caller sent email label in x-teamai-account)
+  accB.cooldownUntil = Date.now() + 60_000;
+  accB.cooldownReason = 'quota';
+  let before = r.events.length;
+  const cooldownRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailB });
+  assert.equal(cooldownRes.status, 429);
+  assertNoLabelLeak(cooldownRes, before, 'acct-b', true);
+  accB.cooldownUntil = null;
+  accB.cooldownReason = null;
+
+  // Quota exhausted
+  const future = Date.now() + 3600_000;
+  accB.usage = 1;
+  accB.resetsAt = future;
+  accB.windows = { '5h': { usage: 1, resetsAt: future } };
+  before = r.events.length;
+  const quotaRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailB });
+  assert.equal(quotaRes.status, 429);
+  assertNoLabelLeak(quotaRes, before, 'acct-b', true);
+
+  // Fable unsupported (Pro account lacking Fable window)
+  accB.usage = 0.2;
+  accB.resetsAt = null;
+  accB.windows = { '5h': { usage: 0.2, resetsAt: future }, '7d': { usage: 0.2, resetsAt: future } };
+  before = r.events.length;
+  const fableRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailB }, { model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(fableRes.status, 429);
+  assertNoLabelLeak(fableRes, before, 'acct-b', true);
+
+  // Concurrency busy
+  accB.inflight = 1;
+  before = r.events.length;
+  const busyRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailB });
+  assert.equal(busyRes.status, 429);
+  assertNoLabelLeak(busyRes, before, 'acct-b', true);
+  accB.inflight = 0;
+
+  // Exclusive route excluded
+  r.pool.setRoutes(parseRoutes([{ name: 'only-a', match: ['claude-opus-*'], accounts: ['acct-a'], mode: 'exclusive' }], 'claude'));
+  before = r.events.length;
+  const routeRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailB }, { model: 'claude-opus-4', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(routeRes.status, 429);
+  assertNoLabelLeak(routeRes, before, 'acct-b', true);
+  r.pool.setRoutes([]);
+
+  // Group excluded
+  r.pool.setGroups({ g: ['acct-a'] });
+  before = r.events.length;
+  const groupRes = await r.send(await issueClaudeSession('g'), { 'x-teamai-group': 'g', 'x-teamai-account': emailB });
+  assert.equal(groupRes.status, 400);
+  assertNoLabelLeak(groupRes, before, 'acct-b');
+
+  // Disabled & errored
+  before = r.events.length;
+  const disabledRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': 'disabled.private@example.com' });
+  assert.equal(disabledRes.status, 503);
+  assertNoLabelLeak(disabledRes, before, 'acct-off');
+
+  accB.error = 'refresh failed';
+  before = r.events.length;
+  const errRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailB });
+  assert.equal(errRes.status, 503);
+  assertNoLabelLeak(errRes, before, 'acct-b');
+  accB.error = null;
+
+  // Ambiguous label does not leak the email label
+  before = r.events.length;
+  const ambiguousRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': emailDup });
+  assert.equal(ambiguousRes.status, 400);
+  assertNoLabelLeak(ambiguousRes, before);
+
+  // Unknown account keeps requested ref as given
+  before = r.events.length;
+  const unknownRes = await r.send(await issueClaudeSession(), { 'x-teamai-account': 'nonexistent-ref' });
+  assert.equal(unknownRes.status, 404);
+  assertNoLabelLeak(unknownRes, before);
+  assert.match(unknownRes.body, /nonexistent-ref/);
+
+  // Bound session mismatch (409) does not leak labels
+  const boundSid = await issueClaudeSession();
+  assert.equal((await r.send(boundSid, { 'x-teamai-account': 'acct-b' })).status, 200);
+  before = r.events.length;
+  const mismatchRes = await r.send(boundSid, { 'x-teamai-account': emailA });
+  assert.equal(mismatchRes.status, 409);
+  assertNoLabelLeak(mismatchRes, before);
 });

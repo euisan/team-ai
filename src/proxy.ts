@@ -395,8 +395,9 @@ function replyPinnedAccountFailure(
   route: Route | null,
   requestedAccount: string | undefined,
 ): boolean {
-  const targetRef = resolution.account ? `"${resolution.account.label}" (${resolution.account.id})` : `"${requestedAccount}"`;
-  const who = resolution.account?.label ?? requestedAccount;
+  const targetId = resolution.account?.id;
+  const targetRef = targetId ? `"${targetId}"` : `"${requestedAccount}"`;
+  const who = targetId ?? requestedAccount;
   const log429 = (reason: string) => onChange(`${pool.provider.label} ${req.method} ${path} → 429 ${reason} (${who})`);
   switch (resolution.status) {
     case 'account_mismatch':
@@ -406,7 +407,7 @@ function replyPinnedAccountFailure(
       json(res, 404, { error: `Pinned Claude account ${targetRef} was not found` });
       return true;
     case 'pinned_ambiguous':
-      json(res, 400, { error: `Pinned Claude account ${targetRef} is ambiguous; use its account id` });
+      json(res, 400, { error: 'Pinned Claude account reference is ambiguous; use its account id' });
       return true;
     case 'pinned_group_excluded':
       json(res, 400, { error: `Pinned Claude account ${targetRef} is not a member of group "${resolution.group}"` });
